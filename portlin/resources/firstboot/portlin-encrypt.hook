@@ -1,4 +1,9 @@
 #!/bin/sh
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+#
 # initramfs-tools hook: put the pieces the encryption prompt needs into the
 # initramfs.
 #

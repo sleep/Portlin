@@ -7,6 +7,13 @@ name = "portlin"
 version = "0.1.0"
 description = "Portable, persistent Debian + Xfce on a USB stick, optionally LUKS encrypted"
 requires-python = ">=3.11"
+# PEP 639 license expressions need setuptools >= 77; this build pins 75.8.0.
+license = { text = "GPL-3.0-or-later" }
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
 # No runtime dependencies on purpose. portlin has to work on a freshly installed
 # Debian with nothing but python3, where pip may not even be present.
 dependencies = []

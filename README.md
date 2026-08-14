@@ -228,3 +228,8 @@ scripts/qemu-boot-test.sh out/stick.img
 
 A shared FAT32/exFAT partition readable from Windows, Secure Boot signing, and architectures other
 than amd64.
+
+## License
+
+[GNU General Public License v3.0 or later](LICENSE). The Debian system portlin installs onto the
+stick carries its own licenses, unaffected by this one.
