@@ -1,0 +1,236 @@
+#!/bin/sh
+# Offer to encrypt the root filesystem, from the initramfs, on first boot.
+#
+# This has to happen here and nowhere else. Adding a LUKS header shifts every
+# byte of the filesystem forward to make room for it, so the device must not be
+# mounted -- which rules out doing it from the running system. The initramfs is
+# the only point where root exists as a block device but is not yet in use.
+#
+# Triggered by portlin.encrypt=ask on the kernel command line, which the write
+# stage adds to unencrypted sticks and the first-boot wizard removes once this
+# has run. That keeps the decision out of any file this script would have to
+# mount something to read.
+
+PREREQ="cryptroot"
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+grep -qw 'portlin.encrypt=ask' /proc/cmdline || exit 0
+
+# The splash would otherwise cover the prompt completely.
+plymouth quit >/dev/null 2>&1 || true
+
+# Overridable so the test harness can point this at a pty and drive the whole
+# script without booting anything. Every bug found in this file so far was one a
+# one-minute standalone run would have caught, versus a fifteen-minute emulated
+# boot read off a photograph.
+CONSOLE="${PORTLIN_CONSOLE:-/dev/console}"
+say() { printf '%s\n' "$1" > "$CONSOLE"; }
+
+# Resolve the root device, trying every form the kernel command line can take.
+# local-top runs before initramfs-tools does its own wait for the root device,
+# and a USB stick takes a second or two to enumerate -- so on real hardware the
+# first attempt reliably finds nothing. Virtio disks in a VM appear instantly,
+# which is exactly why this only ever failed on the real thing.
+resolve_root() {
+    _dev=""
+    _uuid=""
+    case "$ROOT" in
+        UUID=*)  _uuid="${ROOT#UUID=}";  _dev="/dev/disk/by-uuid/$_uuid" ;;
+        LABEL=*) _dev="/dev/disk/by-label/${ROOT#LABEL=}" ;;
+        /dev/*)  _dev="$ROOT" ;;
+    esac
+    if [ -b "$_dev" ]; then
+        readlink -f "$_dev"
+        return 0
+    fi
+    _dev="$(resolve_device "$ROOT" 2>/dev/null)" || _dev=""
+    if [ -b "$_dev" ]; then
+        echo "$_dev"
+        return 0
+    fi
+    if [ -n "$_uuid" ]; then
+        _dev="$(blkid -U "$_uuid" 2>/dev/null)" || _dev=""
+        if [ -b "$_dev" ]; then
+            echo "$_dev"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+ROOT_DEV=""
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+    ROOT_DEV="$(resolve_root)" && break
+    ROOT_DEV=""
+    [ "$attempt" = 4 ] && say "portlin: waiting for the drive to appear..."
+    sleep 0.5
+    attempt=$((attempt + 1))
+done
+
+if [ -z "$ROOT_DEV" ] || [ ! -b "$ROOT_DEV" ]; then
+    say "portlin: could not identify the root device after 30s, skipping encryption."
+    exit 0
+fi
+
+# Already a LUKS container, yet portlin.encrypt=ask is still on the command
+# line -- which only happens when a previous boot encrypted the drive but setup
+# did not finish, so /etc/crypttab was never written and the initramfs has no
+# idea how to unlock this. Nothing else will open it, and the boot would die in
+# an initramfs shell. Unlock it here so the system comes up and setup can retry.
+if cryptsetup isLuks "$ROOT_DEV" 2>/dev/null; then
+    say ""
+    say "Portlin: this drive is encrypted but setup did not finish last time."
+    say "Enter the passphrase to continue; setup will run again."
+    attempt=0
+    while [ "$attempt" -lt 3 ]; do
+        attempt=$((attempt + 1))
+        stty -echo < "$CONSOLE" 2>/dev/null
+        printf 'Passphrase: ' > "$CONSOLE"
+        read -r recover < "$CONSOLE"
+        stty echo < "$CONSOLE" 2>/dev/null
+        say ""
+        if printf '%s' "$recover" | cryptsetup open --key-file - "$ROOT_DEV" portlin_root; then
+            ROOT=/dev/mapper/portlin_root
+            export ROOT
+            say "Unlocked. Continuing boot."
+            exit 0
+        fi
+        say "That passphrase was not accepted."
+    done
+    say "Could not unlock the drive. Dropping to the initramfs shell."
+    exit 0
+fi
+
+say ""
+say "======================================================================"
+say "  Portlin: encrypt this drive?"
+say ""
+say "  Encrypting protects everything on the stick if it is lost or stolen."
+say "  You will be asked for the passphrase every time it boots."
+say ""
+say "  This is the only opportunity: it cannot be done once the system is"
+say "  running. It takes a few minutes and must not be interrupted."
+say "======================================================================"
+say ""
+
+printf 'Encrypt this drive? [y/N] ' > "$CONSOLE"
+read -r answer < "$CONSOLE"
+case "$answer" in
+    y | Y | yes | YES) ;;
+    *) say "Continuing without encryption."; exit 0 ;;
+esac
+
+# Read the passphrase twice with echo off, and refuse to proceed until they
+# match. Getting this wrong means an unopenable stick, so there is no "close
+# enough" here.
+attempt=0
+while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    stty -echo < "$CONSOLE" 2>/dev/null
+    printf 'New passphrase: ' > "$CONSOLE"
+    read -r pass1 < "$CONSOLE"
+    printf '\nRepeat passphrase: ' > "$CONSOLE"
+    read -r pass2 < "$CONSOLE"
+    stty echo < "$CONSOLE" 2>/dev/null
+    say ""
+
+    if [ -z "$pass1" ] || [ "${#pass1}" -lt 8 ]; then
+        say "Too short: use at least 8 characters."
+        continue
+    fi
+    if [ "$pass1" != "$pass2" ]; then
+        say "Those did not match."
+        continue
+    fi
+    break
+done
+
+if [ -z "$pass1" ] || [ "$pass1" != "$pass2" ]; then
+    say "Giving up on encryption; continuing unencrypted."
+    exit 0
+fi
+
+# The LUKS2 header goes at the FRONT of the device, so making room for it shifts
+# the filesystem forward and leaves less space than before. ext4 records its own
+# size in the superblock and does not notice, so unless it is shrunk first it
+# ends up believing it is larger than the device holding it -- and fsck refuses
+# to mount it, dropping the machine to an initramfs shell. Shrinking must happen
+# BEFORE the header is inserted; there is no fixing the order afterwards.
+HEADER_BYTES=33554432  # 32 MiB, matching --reduce-device-size below
+
+say "Preparing the filesystem. This must finish; do not power off."
+if ! e2fsck -f -y "$ROOT_DEV" > "$CONSOLE" 2>&1; then
+    # e2fsck returns 1 for "errors corrected", which is a success for us.
+    status=$?
+    if [ "$status" -gt 1 ]; then
+        say "Filesystem check failed; leaving the drive unencrypted."
+        exit 0
+    fi
+fi
+
+SECTORS="$(cat "/sys/class/block/$(basename "$ROOT_DEV")/size" 2>/dev/null)"
+if [ -z "$SECTORS" ]; then
+    say "Could not measure $ROOT_DEV; leaving the drive unencrypted."
+    exit 0
+fi
+TARGET_KIB=$(( (SECTORS * 512 - HEADER_BYTES) / 1024 ))
+
+say "Shrinking the filesystem by 32 MiB to make room for the header."
+if ! resize2fs "$ROOT_DEV" "${TARGET_KIB}K" > "$CONSOLE" 2>&1; then
+    say "Could not shrink the filesystem; leaving the drive unencrypted."
+    say "Nothing has been changed and the system will boot normally."
+    exit 0
+fi
+
+say ""
+say "Encrypting $ROOT_DEV. Do not remove the drive or power off."
+say "(Progress is shown below; this takes a few minutes.)"
+say ""
+
+# --reduce-device-size makes room at the front for the LUKS2 header by shifting
+# the filesystem, which is why the partition ends up slightly smaller. The
+# argon2id cost is capped for the same reason it is capped at build time: the
+# stick has to be openable on whatever low-RAM machine it meets next.
+if printf '%s' "$pass1" | cryptsetup reencrypt --encrypt \
+        --type luks2 \
+        --reduce-device-size 32M \
+        --pbkdf argon2id \
+        --pbkdf-memory 262144 \
+        --iter-time 2000 \
+        --cipher aes-xts-plain64 \
+        --key-size 512 \
+        --hash sha256 \
+        --batch-mode \
+        --key-file - \
+        --progress-frequency 5 \
+        "$ROOT_DEV" > "$CONSOLE" 2>&1; then
+    say ""
+    say "Encryption complete. Unlocking and continuing boot."
+else
+    say ""
+    say "Encryption failed. The drive is unchanged; continuing unencrypted."
+    say "cryptsetup can resume an interrupted run with --resume-only."
+    exit 0
+fi
+
+if ! printf '%s' "$pass1" | cryptsetup open --key-file - "$ROOT_DEV" portlin_root; then
+    say "Could not open the new container. Reboot and enter the passphrase."
+    exit 0
+fi
+
+# initramfs-tools sources this script, so reassigning ROOT redirects the rest of
+# boot at the unlocked mapping instead of the now-encrypted raw partition.
+ROOT=/dev/mapper/portlin_root
+export ROOT
+
+# Breadcrumb for the first-boot wizard, which finishes the job in userspace:
+# writes crypttab, rebuilds the initramfs and drops portlin.encrypt=ask so the
+# next boot unlocks normally.
+mkdir -p /run/portlin
+: > /run/portlin/just-encrypted

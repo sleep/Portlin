@@ -1,0 +1,36 @@
+#!/bin/sh
+# initramfs-tools hook: put the pieces the encryption prompt needs into the
+# initramfs.
+#
+# cryptsetup-initramfs already ships the cryptsetup binary, but only when the
+# system has an encrypted volume to unlock. On a stick that starts out
+# unencrypted there is nothing for it to detect, so it includes nothing -- and
+# the one boot where we need cryptsetup is precisely the boot before any
+# encryption exists. Hence forcing it in here.
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /sbin/cryptsetup /sbin
+copy_exec /usr/sbin/cryptsetup /sbin 2>/dev/null || true
+
+# The filesystem must be shrunk before the LUKS header is inserted, so both of
+# these have to be available here. e2fsck is usually present already because
+# initramfs-tools checks the root filesystem; resize2fs never is.
+# blkid is one of the fallbacks used to find the root device before udev has
+# created the by-uuid symlinks.
+copy_exec /sbin/blkid /sbin 2>/dev/null || copy_exec /usr/sbin/blkid /sbin 2>/dev/null || true
+copy_exec /sbin/resize2fs /sbin 2>/dev/null || copy_exec /usr/sbin/resize2fs /sbin 2>/dev/null || true
+copy_exec /sbin/e2fsck /sbin 2>/dev/null || copy_exec /usr/sbin/e2fsck /sbin 2>/dev/null || true
+# stty is how the passphrase prompt turns off echo.
+copy_exec /bin/stty /bin 2>/dev/null || copy_exec /usr/bin/stty /bin 2>/dev/null || true
+
+# Reencryption needs the same crypto the container will use.
+for module in dm-crypt aes xts sha256 argon2 af_alg algif_skcipher; do
+    manual_add_modules "$module" 2>/dev/null || true
+done

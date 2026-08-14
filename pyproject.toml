@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools==75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portlin"
+version = "0.1.0"
+description = "Portable, persistent Debian + Xfce on a USB stick, optionally LUKS encrypted"
+requires-python = ">=3.11"
+# No runtime dependencies on purpose. portlin has to work on a freshly installed
+# Debian with nothing but python3, where pip may not even be present.
+dependencies = []
+
+[project.scripts]
+portlin = "portlin.cli:main"
+
+[tool.setuptools]
+packages = ["portlin"]
+
+[tool.setuptools.package-data]
+portlin = ["resources/firstboot/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

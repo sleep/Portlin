@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Build artefacts and test targets
+out/
+*.tar.zst
+*.img
+
+.DS_Store

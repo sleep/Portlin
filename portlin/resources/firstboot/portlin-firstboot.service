@@ -1,0 +1,41 @@
+[Unit]
+Description=Portlin first boot setup
+Documentation=file:/etc/portlin-release
+# The sentinel is removed only after the wizard completes successfully, so a
+# failed or interrupted setup retries on the next boot instead of leaving the
+# stick with no user account.
+ConditionPathExists=/var/lib/portlin/firstboot-pending
+After=local-fs.target systemd-tmpfiles-setup.service
+# Deliberately NOT ordered against plymouth-quit-wait.service. That service
+# waits for plymouth to die; plymouth dies when the display manager starts; the
+# display manager waits for this unit. Ordering after it closes that loop into a
+# deadlock. What this wizard needs is the console, not plymouth's death, so it
+# takes the console with "plymouth deactivate" and leaves the daemon running to
+# be shut down by the normal sequence.
+# Ordering before the display manager makes LightDM wait for setup to finish,
+# so the greeter never appears with no accounts to offer.
+Before=display-manager.service getty@tty1.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# TTYPath below only attaches the wizard to tty1; it does not put tty1 in front
+# of the user. Without an explicit switch the wizard draws its dialogs onto a
+# console nobody is looking at, while the screen shows whichever VT plymouth
+# left active, frozen on the last message printed before boot output was muted.
+# Prefixed with '-' because a machine without kbd should still get a wizard.
+# Note there is deliberately no "plymouth quit" here: see After= above.
+ExecStartPre=-/usr/bin/chvt 1
+ExecStart=/usr/local/sbin/portlin-firstboot
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+# A person is typing at this prompt. There is no correct timeout.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,886 @@
+#!/usr/bin/env python3
+"""Portlin first-boot setup wizard.
+
+Runs once on tty1 before the display manager, and gives the stick its identity:
+account, hostname, locale, keyboard, timezone, and optionally a new LUKS
+passphrase so the person holding the stick owns the key rather than whoever
+built it.
+
+Deliberately stdlib-only and whiptail-driven rather than graphical. This runs
+before X on hardware nobody has tested, where a text UI on tty1 is the only
+thing guaranteed to work.
+"""
+
+from __future__ import annotations
+
+import grp
+import os
+import re
+import signal
+import subprocess
+import sys
+import traceback
+from pathlib import Path
+
+SENTINEL = Path("/var/lib/portlin/firstboot-pending")
+LOG = Path("/var/log/portlin-firstboot.log")
+BACKTITLE = "Portlin first-boot setup"
+
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
+
+# Groups a desktop user needs for audio, removable media, VPNs and printing.
+# Filtered against the ones that actually exist, because the set differs across
+# Debian releases and useradd fails outright on an unknown group.
+DESIRED_GROUPS = [
+    "sudo", "audio", "video", "plugdev", "netdev",
+    "cdrom", "dip", "lp", "scanner", "bluetooth",
+]
+
+COMMON_LOCALES = [
+    ("en_US.UTF-8", "English (United States)"),
+    ("en_GB.UTF-8", "English (United Kingdom)"),
+    ("de_DE.UTF-8", "German (Germany)"),
+    ("fr_FR.UTF-8", "French (France)"),
+    ("es_ES.UTF-8", "Spanish (Spain)"),
+    ("it_IT.UTF-8", "Italian (Italy)"),
+    ("pt_BR.UTF-8", "Portuguese (Brazil)"),
+    ("nl_NL.UTF-8", "Dutch (Netherlands)"),
+    ("pl_PL.UTF-8", "Polish (Poland)"),
+    ("ru_RU.UTF-8", "Russian (Russia)"),
+    ("ja_JP.UTF-8", "Japanese (Japan)"),
+    ("zh_CN.UTF-8", "Chinese (Simplified)"),
+]
+
+COMMON_KEYMAPS = [
+    ("us", "US English"),
+    ("gb", "UK English"),
+    ("de", "German"),
+    ("fr", "French (AZERTY)"),
+    ("es", "Spanish"),
+    ("it", "Italian"),
+    ("pt", "Portuguese"),
+    ("no", "Norwegian"),
+    ("se", "Swedish"),
+    ("dk", "Danish"),
+    ("pl", "Polish"),
+    ("ru", "Russian"),
+]
+
+
+class Cancelled(Exception):
+    """The user pressed Cancel or Esc."""
+
+
+def claim_console(quiet: bool) -> None:
+    """Take sole possession of tty1, or hand it back.
+
+    Three separate things write to this terminal during boot and each needs its
+    own silencer: the kernel's printk stream, systemd's service status lines, and
+    plymouth's splash. Left alone they scribble straight through the wizard's
+    dialogs, which looks like a crash rather than a prompt.
+
+    Everything here is best-effort and reversible. Failing to quiet the console
+    is a cosmetic problem; failing to restore it would leave the machine
+    permanently unable to report anything at boot, which is much worse.
+    """
+    def attempt(argv: list[str]) -> None:
+        """Run a console-wrangling command, and never let it block the wizard.
+
+        Every one of these talks to something that may already be gone, and a
+        plymouth command with no daemon to answer it blocks indefinitely --
+        hanging the wizard before it draws anything, which presents as a machine
+        that simply never finishes booting. None of them matters enough to wait
+        on.
+        """
+        try:
+            subprocess.run(argv, capture_output=True, timeout=5)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            log(f"console setup: {' '.join(argv)} did not complete ({exc})")
+
+    if quiet:
+        # "deactivate", not "quit". Quitting kills the daemon that
+        # plymouth-quit-wait is blocking on, deadlocking the boot; deactivating
+        # just makes plymouth let go of the terminal, which is all that is
+        # actually needed here.
+        attempt(["plymouth", "deactivate"])
+        # Put tty1 in front of the user. The unit does this too, but a wizard
+        # drawing to a console nobody is looking at is the single worst failure
+        # mode here -- it looks exactly like a hung boot -- so it is worth
+        # asserting from both sides.
+        attempt(["chvt", "1"])
+    attempt(["setterm", "--msg", "off" if quiet else "on"])
+    try:
+        # SIGRTMIN+21 disables systemd's console status output, +20 re-enables it.
+        os.kill(1, signal.SIGRTMIN + (21 if quiet else 20))
+    except (OSError, AttributeError, ValueError):
+        log("could not toggle systemd console status")
+
+
+def log(message: str) -> None:
+    try:
+        with LOG.open("a") as handle:
+            handle.write(message.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def run(argv: list[str], *, check: bool = True, stdin: str | None = None) -> subprocess.CompletedProcess:
+    log(f"run: {' '.join(argv)}")
+    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True)
+    if proc.stderr.strip():
+        log(f"  stderr: {proc.stderr.strip()}")
+    if check and proc.returncode != 0:
+        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(argv)}\n{proc.stderr}")
+    return proc
+
+
+# --------------------------------------------------------------------------
+# whiptail wrappers
+# --------------------------------------------------------------------------
+
+def _whiptail(args: list[str], *, capture: bool = False) -> str:
+    """Invoke whiptail. Selections come back on stderr, which is whiptail's convention."""
+    argv = ["whiptail", "--backtitle", BACKTITLE, *args]
+    proc = subprocess.run(argv, stderr=subprocess.PIPE, text=True)
+    if proc.returncode == 255:
+        raise Cancelled()
+    if proc.returncode != 0 and capture:
+        raise Cancelled()
+    return (proc.stderr or "").strip()
+
+
+def _box_height(text: str, minimum: int = 12) -> int:
+    """Height needed to show ``text`` in full.
+
+    whiptail silently clips whatever does not fit rather than scrolling or
+    complaining, so a fixed height quietly swallows the end of any longer
+    message. The summary screen lost both its last row and the question the
+    buttons were answering, which is a bad thing not to notice.
+    """
+    lines = text.count("\n") + 1
+    return max(minimum, min(lines + 8, 22))
+
+
+def message(title: str, text: str) -> None:
+    _whiptail(["--title", title, "--msgbox", text, str(_box_height(text, 16)), "72"])
+
+
+def info(title: str, text: str) -> None:
+    """A dialog with no button, for work happening right now.
+
+    msgbox would block on Ok and then do the work with the screen already
+    dismissed, leaving the user staring at nothing while the disk is resized.
+    """
+    _whiptail(["--title", title, "--infobox", text, str(_box_height(text)), "72"])
+
+
+def ask(title: str, text: str, default: str = "") -> str:
+    return _whiptail(
+        ["--title", title, "--inputbox", text, "12", "72", default],
+        capture=True,
+    )
+
+
+def ask_password(title: str, text: str) -> str:
+    return _whiptail(["--title", title, "--passwordbox", text, "12", "72"], capture=True)
+
+
+def choose(title: str, text: str, entries: list[tuple[str, str]], height: int = 20) -> str:
+    rows: list[str] = []
+    for tag, label in entries:
+        rows += [tag, label]
+    listsize = min(len(entries), max(height - 8, 4))
+    return _whiptail(
+        ["--title", title, "--menu", text, str(height), "72", str(listsize), *rows],
+        capture=True,
+    )
+
+
+def confirm(title: str, text: str, *, default_yes: bool = True) -> bool:
+    args = ["--title", title, "--yesno", text, str(_box_height(text)), "72"]
+    if not default_yes:
+        args.insert(0, "--defaultno")
+    argv = ["whiptail", "--backtitle", BACKTITLE, *args]
+    return subprocess.run(argv).returncode == 0
+
+
+# --------------------------------------------------------------------------
+# Wizard steps
+# --------------------------------------------------------------------------
+
+def step_welcome() -> None:
+    message(
+        "Welcome to Portlin",
+        "\nThis stick is a full Debian system with an Xfce desktop, and it "
+        "carries its changes with it from machine to machine.\n\n"
+        "Setting it up takes a minute. Nothing is written until the last step.",
+    )
+
+
+def step_keyboard() -> tuple[str, str]:
+    layout = choose(
+        "Keyboard layout",
+        "Which keyboard layout does this machine have?\n"
+        "You can pick a different one later from the Xfce settings.",
+        COMMON_KEYMAPS + [("other", "Something else (type the code)")],
+    )
+    if layout == "other":
+        layout = ask("Keyboard layout", "Enter an X11 layout code, for example 'cz' or 'br':", "us")
+    return layout, dict(COMMON_KEYMAPS).get(layout, layout)
+
+
+def step_locale() -> str:
+    locale = choose(
+        "Language",
+        "Which language and regional formats should the desktop use?",
+        COMMON_LOCALES + [("other", "Something else (type the name)")],
+    )
+    if locale == "other":
+        locale = ask("Language", "Enter a locale name, for example 'cs_CZ.UTF-8':", "en_US.UTF-8")
+    return locale
+
+
+def _timezones() -> list[str]:
+    proc = subprocess.run(
+        ["timedatectl", "list-timezones"], capture_output=True, text=True
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.split()
+    # Fall back to walking the zoneinfo tree if timedatectl is unavailable.
+    base = Path("/usr/share/zoneinfo")
+    zones = []
+    for path in base.rglob("*"):
+        if path.is_file() and "/" in str(path.relative_to(base)):
+            zones.append(str(path.relative_to(base)))
+    return sorted(zones)
+
+
+def step_timezone() -> str:
+    zones = _timezones()
+    if not zones:
+        return "UTC"
+    regions = sorted({z.split("/", 1)[0] for z in zones})
+    region = choose(
+        "Time zone",
+        "Which region are you in?",
+        [(r, r.replace("_", " ")) for r in regions],
+    )
+    cities = sorted(z for z in zones if z.split("/", 1)[0] == region)
+    if len(cities) <= 1:
+        return cities[0] if cities else region
+    return choose(
+        "Time zone",
+        f"Which city in {region} shares your time zone?",
+        [(c, c.split("/", 1)[1].replace("_", " ")) for c in cities],
+    )
+
+
+def step_hostname() -> str:
+    while True:
+        hostname = ask(
+            "Computer name",
+            "What should this stick call itself on a network?",
+            "portlin",
+        )
+        if HOSTNAME_RE.match(hostname):
+            return hostname
+        message("Computer name", f"\n'{hostname}' is not a valid hostname.\n\n"
+                                 "Use letters, digits and hyphens, starting and ending with a "
+                                 "letter or digit.")
+
+
+def step_account() -> tuple[str, str, str]:
+    while True:
+        full_name = ask("Your account", "What is your full name? (optional, shown on the login screen)")
+        username = ask("Your account", "Choose a username. Lowercase letters, digits, - and _.",
+                       _suggest_username(full_name))
+        if not USERNAME_RE.match(username):
+            message("Your account", f"\n'{username}' is not a valid username.\n\n"
+                                    "Start with a lowercase letter or underscore, then use "
+                                    "lowercase letters, digits, hyphens or underscores.")
+            continue
+        if _user_exists(username):
+            message("Your account", f"\nThe user '{username}' already exists. Choose another name.")
+            continue
+
+        password = _ask_matching_password(
+            "Your account",
+            "Choose a password for this account.\n"
+            "It is also the password sudo will ask for.",
+        )
+        if password is None:
+            continue
+        return username, full_name, password
+
+
+def _suggest_username(full_name: str) -> str:
+    first = full_name.strip().split(" ")[0].lower() if full_name.strip() else ""
+    candidate = re.sub(r"[^a-z0-9_-]", "", first)
+    return candidate if USERNAME_RE.match(candidate) else "user"
+
+
+def _user_exists(username: str) -> bool:
+    return subprocess.run(["id", "--", username], capture_output=True).returncode == 0
+
+
+def _ask_matching_password(title: str, text: str) -> str | None:
+    password = ask_password(title, text)
+    if len(password) < 4:
+        message(title, "\nThat password is too short. Use at least 4 characters.")
+        return None
+    again = ask_password(title, "Type the same password again to confirm.")
+    if password != again:
+        message(title, "\nThose passwords did not match. Let's try again.")
+        return None
+    return password
+
+
+def _luks_device() -> str | None:
+    """The backing device of the encrypted root, if this stick has one.
+
+    Read from crypttab rather than guessed, so it stays correct no matter how the
+    stick's partitions are enumerated on this particular machine.
+    """
+    crypttab = Path("/etc/crypttab")
+    if not crypttab.exists():
+        return None
+    for line in crypttab.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        source = fields[1]
+        if source.startswith("UUID="):
+            path = Path("/dev/disk/by-uuid") / source.split("=", 1)[1]
+            return str(path) if path.exists() else None
+        return source if Path(source).exists() else None
+    return None
+
+
+def step_change_passphrase(device: str) -> None:
+    if not confirm(
+        "Disk encryption",
+        "\nThis stick's storage is encrypted.\n\n"
+        "The passphrase was set by whoever built it. Would you like to change it "
+        "to one only you know?",
+        default_yes=True,
+    ):
+        return
+
+    # cryptsetup prompts on the tty directly. Passing the passphrases through
+    # files or arguments instead would leave them readable to other processes,
+    # so the interactive path is both simpler and safer here.
+    subprocess.run(["clear"])
+    print("\nChanging the disk passphrase for", device)
+    print("You will be asked for the current passphrase, then the new one.\n")
+    result = subprocess.run(["cryptsetup", "luksChangeKey", device])
+    if result.returncode != 0:
+        message("Disk encryption", "\nThe passphrase was not changed. "
+                                   "Your existing passphrase still works.")
+    else:
+        message("Disk encryption", "\nThe passphrase was changed successfully.")
+
+
+def _root_devices() -> tuple[str, str, int] | None:
+    """Locate (disk, partition, number) holding the root filesystem.
+
+    Everything is resolved from the running system rather than assumed, because
+    the stick is a different device on every machine it is plugged into. On an
+    encrypted stick the root is a device-mapper node, so this walks one extra
+    level down to the LUKS partition underneath it.
+    """
+    source = subprocess.run(
+        ["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True
+    ).stdout.strip()
+    if not source:
+        return None
+
+    partition = _backing_partition(source)
+    if not partition:
+        log(f"could not find the partition behind {source}")
+        return None
+    disk = _parent_disk(partition)
+    if not disk:
+        log(f"could not find the disk behind {partition}")
+        return None
+
+    digits = re.search(r"(\d+)$", partition)
+    if not digits:
+        return None
+    return f"/dev/{disk}", f"/dev/{partition}", int(digits.group(1))
+
+
+def _backing_partition(source: str) -> str:
+    """Kernel name of the partition holding ``source``.
+
+    On an encrypted stick the root is a device-mapper node, and dm devices have
+    no "device" link in sysfs -- which is why `lsblk -o PKNAME` returns an empty
+    string for them and every lookup built on it silently produced nothing. The
+    supported relationship is /sys/block/<dm>/slaves/, listing what the mapping
+    is built on top of.
+    """
+    node = _sysfs_node(source)
+    if node is None:
+        return ""
+    slaves = node / "slaves"
+    if slaves.is_dir():
+        entries = sorted(entry.name for entry in slaves.iterdir())
+        if entries:
+            return entries[0]
+    # Not a mapping at all: the source is already the partition.
+    return node.resolve().name
+
+
+def _sysfs_node(device: str) -> Path | None:
+    """Sysfs directory for a device node, located by its device number.
+
+    Resolving /dev/mapper/<name> as a symlink only works where udev created it
+    that way. Without udev -- in an initramfs, a container, or a minimal system
+    -- cryptsetup makes a real device node there instead, and resolve() returns
+    the path unchanged, pointing at a sysfs entry that does not exist. The
+    major:minor pair is how the kernel identifies the device either way.
+    """
+    try:
+        status = os.stat(device)
+    except OSError:
+        return None
+    path = Path(f"/sys/dev/block/{os.major(status.st_rdev)}:{os.minor(status.st_rdev)}")
+    return path if path.exists() else None
+
+
+def _parent_disk(partition_name: str) -> str:
+    """Kernel name of the whole disk a partition belongs to.
+
+    /sys/class/block/sda4 is a symlink into the device tree, where the partition
+    sits inside its disk's directory -- so the parent directory's name is the
+    disk. Works identically for sdaN, nvme0n1pN and loop0pN, none of which
+    follow the same naming rule.
+    """
+    path = Path("/sys/class/block") / partition_name
+    if not path.exists():
+        return ""
+    parent = path.resolve().parent.name
+    return parent if parent != "block" else ""
+
+
+def _sectors(name: str, attribute: str) -> int:
+    """Read a sector count the kernel publishes for a block device."""
+    try:
+        return int((Path("/sys/class/block") / name / attribute).read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _free_space_bytes(disk: str, partition: str) -> int:
+    """Unallocated bytes after the last partition.
+
+    Taken from sysfs rather than by parsing a command's output. The previous
+    version shelled out to partx with a malformed argument, and because the
+    failure produced an empty string that parsed as zero free space, expansion
+    was silently never offered -- no error, no log, just a missing step.
+    """
+    disk_sectors = _sectors(Path(disk).name, "size")
+    part_name = Path(partition).name
+    end = _sectors(part_name, "start") + _sectors(part_name, "size")
+    if not disk_sectors or end <= 0:
+        return 0
+    # The GPT backup header and its partition array occupy the last 33 sectors.
+    return max(0, (disk_sectors - end - 34) * 512)
+
+
+def _unused_inside_partition(partition: str) -> int:
+    """Space inside the partition that the filesystem is not using.
+
+    Expansion has two separate gaps and they are not the same thing: room after
+    the partition, and room inside it the filesystem has not claimed. An
+    interrupted expansion grows the partition and stops -- leaving zero free
+    space after it, so a check that only looked at the first gap would decide
+    there was nothing to do and never offer again, stranding the user at the
+    original size inside a full-size partition.
+    """
+    partition_bytes = _sectors(Path(partition).name, "size") * 512
+    if not partition_bytes:
+        return 0
+
+    source = subprocess.run(
+        ["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True
+    ).stdout.strip()
+    used = subprocess.run(
+        ["dumpe2fs", "-h", source], capture_output=True, text=True
+    ).stdout
+    blocks = re.search(r"Block count:\s+(\d+)", used)
+    size = re.search(r"Block size:\s+(\d+)", used)
+    if not blocks or not size:
+        return 0
+
+    filesystem_bytes = int(blocks.group(1)) * int(size.group(1))
+    # A LUKS header sits between the two, so allow generous slack before
+    # calling the difference meaningful.
+    return max(0, partition_bytes - filesystem_bytes - 64 * 1024**2)
+
+
+def step_expand() -> bool:
+    """Offer to grow the system to fill the stick.
+
+    The image is deliberately smaller than any stick worth using, so almost
+    every first boot has free space to claim.
+    """
+    located = _root_devices()
+    if located is None:
+        log("could not identify the root device, skipping expansion")
+        return False
+    disk, partition, _ = located
+    free = _free_space_bytes(disk, partition) + _unused_inside_partition(partition)
+    log(f"expansion: disk={disk} partition={partition} free={free} bytes")
+    # Below a gigabyte there is nothing worth the risk of repartitioning.
+    if free < 1024**3:
+        log("expansion: not enough free space to be worth offering")
+        return False
+
+    gigabytes = free / 1024**3
+    return confirm(
+        "Expand to fill the drive",
+        f"\nThis drive has {gigabytes:.1f} GB of unused space beyond the "
+        f"installed system.\n\n"
+        "Grow the system to use all of it? Your files and settings are "
+        "untouched; this only makes the existing filesystem bigger.\n\n"
+        "You can skip this and do it later, but it is easiest now.",
+        default_yes=True,
+    )
+
+
+def apply_expand() -> None:
+    """Grow the partition, the LUKS mapping, then the filesystem, in that order.
+
+    All three resize online, on the mounted running system: growpart uses the
+    kernel's partition-resize ioctl, and both cryptsetup and ext4 support growing
+    while in use. The order matters and is strictly outside-in -- each layer can
+    only grow into space the layer beneath it has already claimed.
+    """
+    located = _root_devices()
+    if located is None:
+        return
+    disk, partition, number = located
+
+    result = run(["growpart", disk, str(number)], check=False)
+    if result.returncode != 0:
+        # growpart exits 1 with NOCHANGE when there is nothing to do, which is
+        # not an error worth alarming anyone about.
+        if "NOCHANGE" not in (result.stdout + result.stderr):
+            raise RuntimeError(f"growpart failed: {result.stderr.strip()}")
+        return
+
+    source = subprocess.run(
+        ["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True
+    ).stdout.strip()
+    if source.startswith("/dev/mapper/"):
+        _resize_mapping(Path(source).name)
+    run(["resize2fs", source])
+
+
+def _resize_mapping(name: str) -> None:
+    """Grow the LUKS mapping into the enlarged partition.
+
+    Rebuilding a dm-crypt mapping needs the volume key. cryptsetup normally
+    takes it from the kernel keyring, but when it is not there it quietly falls
+    back to prompting for the passphrase -- and a prompt with no terminal
+    answers itself with "Nothing to read on input", killing the expansion.
+
+    So: try the keyring, and ask only if that fails. The passphrase was typed a
+    few minutes ago at boot, so asking is a small imposition compared with
+    silently not expanding.
+    """
+    result = run(["cryptsetup", "resize", name], check=False)
+    if result.returncode == 0:
+        return
+
+    log(f"cryptsetup resize needed a passphrase: {result.stderr.strip()}")
+    for _ in range(3):
+        passphrase = ask_password(
+            "Disk encryption",
+            "\nEnter this drive's passphrase to finish expanding it.\n\n"
+            "This is the passphrase you typed when the system started.",
+        )
+        if not passphrase:
+            break
+        retry = run(
+            ["cryptsetup", "resize", "--key-file", "-", name],
+            check=False,
+            stdin=passphrase,
+        )
+        if retry.returncode == 0:
+            return
+        message("Disk encryption", "\nThat passphrase was not accepted.")
+
+    raise RuntimeError(f"could not resize the encrypted mapping: {result.stderr.strip()}")
+
+
+def finalise_encryption() -> bool:
+    """Make an encryption performed by the initramfs permanent.
+
+    The initramfs can create the container and unlock it for this one boot, but
+    it cannot make the system boot that way again: crypttab lives on the root
+    filesystem, the initramfs has to be rebuilt to contain the unlock logic, and
+    the kernel command line still carries the flag that offers encryption. All
+    three are userspace jobs, so they happen here on the boot immediately after.
+
+    Idempotent and self-healing: it keys off the observable state (root is a
+    mapper device with no crypttab entry) rather than a flag that could be lost.
+    """
+    source = subprocess.run(
+        ["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True
+    ).stdout.strip()
+    if not source.startswith("/dev/mapper/"):
+        return False
+
+    crypttab = Path("/etc/crypttab")
+    name = Path(source).name
+    if crypttab.exists() and name in crypttab.read_text():
+        return False  # already permanent
+
+    partition = _backing_partition(source)
+    if not partition:
+        log("encrypted root has no backing device, cannot finalise")
+        return False
+    device = f"/dev/{partition}"
+
+    uuid = subprocess.run(
+        ["cryptsetup", "luksUUID", device], capture_output=True, text=True
+    ).stdout.strip()
+    if not uuid:
+        log(f"could not read the LUKS UUID of {device}")
+        return False
+
+    crypttab.write_text(
+        "# Generated by portlin after first-boot encryption.\n"
+        f"{name}\tUUID={uuid}\tnone\tluks\n"
+    )
+    # Rebuild so the initramfs can unlock this container by itself next boot.
+    run(["update-initramfs", "-u", "-k", "all"], check=False)
+
+    # Drop the offer flag: this stick has made its choice, and asking again
+    # would invite someone to encrypt an already-encrypted drive.
+    default_grub = Path("/etc/default/grub")
+    if default_grub.exists():
+        default_grub.write_text(
+            default_grub.read_text().replace(" portlin.encrypt=ask", "")
+        )
+    run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"], check=False)
+    return True
+
+
+def step_autologin(username: str) -> bool:
+    return confirm(
+        "Automatic login",
+        f"\nLog in as '{username}' automatically when this stick boots?\n\n"
+        "Convenient on a stick you carry, but anyone who boots it reaches your "
+        "desktop without typing anything.",
+        default_yes=False,
+    )
+
+
+# --------------------------------------------------------------------------
+# Applying the answers
+# --------------------------------------------------------------------------
+
+def apply_keyboard(layout: str) -> None:
+    Path("/etc/default/keyboard").write_text(
+        "\n".join(
+            [
+                "XKBMODEL=pc105",
+                f'XKBLAYOUT="{layout}"',
+                'XKBVARIANT=""',
+                'XKBOPTIONS=""',
+                'BACKSPACE="guess"',
+                "",
+            ]
+        )
+    )
+    run(["setupcon", "--save"], check=False)
+    run(["localectl", "set-x11-keymap", layout], check=False)
+
+
+def apply_locale(locale: str) -> None:
+    Path("/etc/locale.gen").write_text(f"{locale} UTF-8\nC.UTF-8 UTF-8\n")
+    run(["locale-gen"])
+    Path("/etc/default/locale").write_text(f'LANG="{locale}"\n')
+    run(["localectl", "set-locale", f"LANG={locale}"], check=False)
+
+
+def apply_timezone(timezone: str) -> None:
+    if run(["timedatectl", "set-timezone", timezone], check=False).returncode != 0:
+        run(["ln", "-sf", f"/usr/share/zoneinfo/{timezone}", "/etc/localtime"], check=False)
+        Path("/etc/timezone").write_text(f"{timezone}\n")
+
+
+def apply_hostname(hostname: str) -> None:
+    Path("/etc/hostname").write_text(f"{hostname}\n")
+    hosts = Path("/etc/hosts")
+    lines = [
+        line for line in hosts.read_text().splitlines()
+        if not line.startswith("127.0.1.1")
+    ]
+    lines.insert(1, f"127.0.1.1\t{hostname}")
+    hosts.write_text("\n".join(lines) + "\n")
+    run(["hostnamectl", "set-hostname", hostname], check=False)
+
+
+def apply_account(username: str, full_name: str, password: str) -> None:
+    existing = {g.gr_name for g in grp.getgrall()}
+    groups = [g for g in DESIRED_GROUPS if g in existing]
+    run(
+        [
+            "useradd",
+            "--create-home",
+            "--shell", "/bin/bash",
+            "--comment", full_name,
+            "--groups", ",".join(groups),
+            username,
+        ]
+    )
+    run(["chpasswd"], stdin=f"{username}:{password}\n")
+
+
+def apply_autologin(username: str, enabled: bool) -> None:
+    config = Path("/etc/lightdm/lightdm.conf.d/10-portlin.conf")
+    if not enabled:
+        config.unlink(missing_ok=True)
+        return
+    # Debian's LightDM PAM configuration only permits autologin for members of
+    # the 'autologin' group, so the group has to exist and contain the user.
+    run(["groupadd", "-f", "autologin"], check=False)
+    run(["usermod", "-aG", "autologin", username], check=False)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                "[Seat:*]",
+                f"autologin-user={username}",
+                "autologin-user-timeout=0",
+                "",
+            ]
+        )
+    )
+
+
+def refresh_initramfs_for_keymap(encrypted: bool) -> None:
+    """Rebuild the initramfs so the LUKS prompt uses the chosen keyboard layout.
+
+    The passphrase prompt happens in the initramfs, long before /etc/default/keyboard
+    is read at boot. Without this rebuild a passphrase containing symbols is typed
+    on a US layout no matter what the user selected here, which is a genuinely
+    horrible way to be locked out of your own stick.
+    """
+    if not encrypted:
+        return
+    run(["update-initramfs", "-u", "-k", "all"], check=False)
+
+
+# --------------------------------------------------------------------------
+
+def wizard() -> None:
+    step_welcome()
+    layout, _ = step_keyboard()
+    apply_keyboard(layout)
+
+    locale = step_locale()
+    timezone = step_timezone()
+    hostname = step_hostname()
+    username, full_name, password = step_account()
+
+    luks_device = _luks_device()
+    autologin = step_autologin(username)
+    expand = step_expand()
+
+    if not confirm(
+        "Ready to apply",
+        f"\nAccount:   {username}\n"
+        f"Computer:  {hostname}\n"
+        f"Language:  {locale}\n"
+        f"Keyboard:  {layout}\n"
+        f"Time zone: {timezone}\n"
+        f"Autologin: {'yes' if autologin else 'no'}\n"
+        f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
+        "Apply these settings now?",
+    ):
+        raise Cancelled()
+
+    # Before anything else: if the initramfs just encrypted this drive, make
+    # that permanent, so a crash later in setup cannot leave a stick that is
+    # encrypted but no longer bootable.
+    if finalise_encryption():
+        info(
+            "Encryption",
+            "\nThis drive was encrypted during boot.\n\n"
+            "Recording the settings so it unlocks normally from now on.",
+        )
+
+    if expand:
+        # First, so everything below writes into the full-size filesystem rather
+        # than the handful of gigabytes the image shipped with.
+        info(
+            "Expanding",
+            "\nGrowing the system to fill the drive.\n\n"
+            "This takes a few seconds. Do not remove the drive.",
+        )
+        apply_expand()
+
+    apply_locale(locale)
+    apply_timezone(timezone)
+    apply_hostname(hostname)
+    apply_account(username, full_name, password)
+    apply_autologin(username, autologin)
+    refresh_initramfs_for_keymap(luks_device is not None)
+
+    if luks_device:
+        step_change_passphrase(luks_device)
+
+    SENTINEL.unlink(missing_ok=True)
+    run(["systemctl", "disable", "portlin-firstboot.service"], check=False)
+    message(
+        "All set",
+        f"\nWelcome, {full_name or username}.\n\n"
+        "The desktop is starting now. Everything you change on this stick is "
+        "saved to it, on whatever machine you plug it into next.",
+    )
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("portlin-firstboot must run as root", file=sys.stderr)
+        return 1
+
+    try:
+        claim_console(True)
+        wizard()
+    except Cancelled:
+        # The sentinel stays, so setup runs again on the next boot rather than
+        # leaving the stick with no way in.
+        message(
+            "Setup postponed",
+            "\nSetup was cancelled. It will run again the next time this stick "
+            "boots.\n\nThere is no user account yet, so you cannot log in until "
+            "it is finished.",
+        )
+        return 1
+    except Exception:
+        detail = traceback.format_exc()
+        log(detail)
+        message(
+            "Setup failed",
+            "\nSomething went wrong during setup.\n\n"
+            f"The details are in {LOG}.\n\n"
+            "Setup will run again the next time this stick boots.",
+        )
+        return 1
+    finally:
+        # Always hand the console back, including on the failure paths above.
+        claim_console(False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
