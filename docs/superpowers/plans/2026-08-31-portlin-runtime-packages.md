@@ -251,9 +251,20 @@ def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
 
 
 def _sysfs_node(device: str) -> Path | None:
-    name = Path(device).resolve().name
-    node = Path("/sys/class/block") / name
-    return node if node.exists() else None
+    """Sysfs directory for a device node, located by its device number.
+
+    Resolving /dev/mapper/<name> as a symlink only works where udev created it
+    that way. Without udev -- in an initramfs, a container, or a minimal system
+    -- cryptsetup makes a real device node there instead, and resolve() returns
+    the path unchanged, pointing at a sysfs entry that does not exist. The
+    major:minor pair is how the kernel identifies the device either way.
+    """
+    try:
+        status = os.stat(device)
+    except OSError:
+        return None
+    path = Path(f"/sys/dev/block/{os.major(status.st_rdev)}:{os.minor(status.st_rdev)}")
+    return path if path.exists() else None
 
 
 def _backing_partition(source: str) -> str:
@@ -1821,16 +1832,34 @@ install, land where they should, and upgrade without stopping to ask.
 In `scripts/verify-image.sh`, alongside the existing checks, assert against the
 loop-mounted root:
 
+Follow the script's existing idiom exactly. It has no `check` helper: assertions
+are written as a test command chained to the `pass`/`fail` pair defined at
+`scripts/verify-image.sh:14-15`, where `fail` increments the `FAILURES` counter
+the script exits on. Read those two lines and a nearby assertion before writing
+these, and match the surrounding style.
+
 ```bash
-check "portlin-runtime is installed" \
-    chroot "$MNT" dpkg-query -W -f='${Status}' portlin-runtime \
-    | grep -q "install ok installed"
-check "the apt source is present" test -f "$MNT/etc/apt/sources.list.d/portlin.sources"
-check "the keyring is present" test -f "$MNT/usr/share/keyrings/portlin-archive-keyring.gpg"
-check "the finaliser is enabled" \
-    test -L "$MNT/etc/systemd/system/multi-user.target.wants/portlin-finalise-encryption.service"
+chroot "$MNT" dpkg-query -W -f='${Status}' portlin-runtime 2>/dev/null \
+    | grep -q "install ok installed" \
+    && pass "portlin-runtime is installed" \
+    || fail "portlin-runtime is not installed (no updates will reach this stick)"
+
+test -f "$MNT/etc/apt/sources.list.d/portlin.sources" \
+    && pass "the portlin apt source is present" \
+    || fail "the portlin apt source is missing"
+
+test -f "$MNT/usr/share/keyrings/portlin-archive-keyring.gpg" \
+    && pass "the archive keyring is present" \
+    || fail "the archive keyring is missing (apt will reject the archive)"
+
+test -L "$MNT/etc/systemd/system/multi-user.target.wants/portlin-finalise-encryption.service" \
+    && pass "the encryption finaliser is enabled" \
+    || fail "the encryption finaliser is not enabled"
+
 for tool in portlin-info portlin-expand portlin-encrypt; do
-    check "$tool is executable" test -x "$MNT/usr/bin/$tool"
+    test -x "$MNT/usr/bin/$tool" \
+        && pass "$tool is executable" \
+        || fail "$tool is missing or not executable"
 done
 ```
 
