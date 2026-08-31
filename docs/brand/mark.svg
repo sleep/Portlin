@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- Enclosure: the device. Bars: the GPT layout, anchored at the device start,
+       widths in true rank order, root accent-coloured because root is the encrypted one. -->
+  <rect x="5" y="5" width="54" height="54" rx="12" stroke="#7C8B9E" stroke-width="4"/>
+  <rect x="7" y="17.5" width="10" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="27"   width="22" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="36.5" width="30" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="46"   width="44" height="5" fill="#FF3355"/>
+</svg>

@@ -1,0 +1,145 @@
+<meta charset="utf-8">
+<style>
+  /* Portlin desktop wallpaper, authored at 1920x1080 and rasterised at 1x and 2x.
+     Composition rule: the top-left quadrant stays empty, because that is where
+     Xfce parks desktop icons. */
+  :root {
+    --ink:    #12161C;
+    --panel:  #1A212B;
+    --line:   #2C3542;
+    --muted:  #7C8B9E;
+    --paper:  #E8EDF3;
+    --accent: #FF3355;
+
+    /* Partition block geometry. The bars are the README's GPT table in true rank
+       order; only the last one is accent-coloured, because only root is encrypted. */
+    --start:  280px;   /* device start: every bar is anchored here */
+    --bar-h:  20px;
+    --gap:    52px;
+    --top:    572px;
+
+    /* The root bar leaves the canvas instead of ending: the 8 GB image growing
+       into whatever drive it was written to. --fade-start is where solid becomes
+       claim-in-progress. */
+    --fade-start: 900px;
+  }
+
+  html, body { margin: 0; padding: 0; overflow: hidden; }
+  body { width: 100vw; height: 100vh; }
+  #stage {
+    width: 1920px; height: 1080px; position: relative; overflow: hidden;
+    transform-origin: 0 0; transform: scale(var(--k, 1));
+    background:
+      radial-gradient(820px 460px at 46% 74%, rgba(255, 51, 85, 0.085), transparent 70%),
+      linear-gradient(155deg, #0E1218 0%, var(--ink) 36%, var(--panel) 74%, #141A22 100%);
+  }
+
+  /* Sector ruler: a faint square grid, faded out toward the edges so it reads as
+     texture rather than as a chart. */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      repeating-linear-gradient(to right, rgba(44,53,66,0.55) 0 1px, transparent 1px 48px),
+      repeating-linear-gradient(to bottom, rgba(44,53,66,0.55) 0 1px, transparent 1px 48px);
+    -webkit-mask-image: radial-gradient(1250px 760px at 55% 66%, #000 0%, rgba(0,0,0,0.55) 52%, transparent 82%);
+    opacity: 0.55;
+  }
+
+  .map { position: absolute; left: 0; top: 0; }
+
+  /* Device-start tick: the physical edge the whole table is measured from. */
+  .anchor {
+    position: absolute;
+    left: var(--start); top: calc(var(--top) - 30px);
+    width: 1px; height: calc(4 * var(--bar-h) + 3 * var(--gap) + 60px);
+    background: linear-gradient(to bottom, transparent, rgba(124,139,158,0.46) 18%,
+                                rgba(124,139,158,0.46) 82%, transparent);
+  }
+
+  .bar {
+    position: absolute; left: var(--start); height: var(--bar-h);
+    border-radius: 3px; background: var(--muted); opacity: 0.82;
+  }
+  .b1 { top: var(--top);                                     width: 96px;  }
+  .b2 { top: calc(var(--top) + 1 * (var(--bar-h) + var(--gap))); width: 286px; }
+  .b3 { top: calc(var(--top) + 2 * (var(--bar-h) + var(--gap))); width: 452px; }
+
+  /* Root: solid to --fade-start, then dissolving off the right edge. */
+  .b4 {
+    top: calc(var(--top) + 3 * (var(--bar-h) + var(--gap)));
+    width: calc(1920px - var(--start)); opacity: 0.92;
+    background: linear-gradient(to right,
+      var(--accent) 0,
+      var(--accent) calc(var(--fade-start) - var(--start)),
+      rgba(255, 51, 85, 0.42) 62%,
+      rgba(255, 51, 85, 0.05) 100%);
+    border-radius: 3px 0 0 3px;
+  }
+
+  .label {
+    position: absolute;
+    font-family: Menlo, monospace; font-size: 12px; letter-spacing: 0.08em;
+    color: rgba(124, 139, 158, 0.62);
+    white-space: nowrap;
+    transform: translateY(-50%);
+  }
+  .l1 { left: calc(var(--start) + 96px  + 26px); top: calc(var(--top) + var(--bar-h) / 2); }
+  .l2 { left: calc(var(--start) + 286px + 26px); top: calc(var(--top) + 1 * (var(--bar-h) + var(--gap)) + var(--bar-h) / 2); }
+  .l3 { left: calc(var(--start) + 452px + 26px); top: calc(var(--top) + 2 * (var(--bar-h) + var(--gap)) + var(--bar-h) / 2); }
+  .l4 {
+    left: var(--fade-start);
+    top: calc(var(--top) + 3 * (var(--bar-h) + var(--gap)) - 20px);
+    color: rgba(255, 51, 85, 0.82);
+    transform: none;
+  }
+
+  /* Wordmark, bottom right, clear of both the Xfce panel and the icon column. */
+  .sig {
+    position: absolute; right: 88px; bottom: 84px;
+    display: flex; align-items: center; gap: 20px;
+  }
+  .sig svg { width: 54px; height: 54px; display: block; opacity: 0.9; }
+  .sig .txt { display: flex; flex-direction: column; gap: 7px; }
+  .sig .word {
+    font-family: Futura, "Futura PT", "Century Gothic", sans-serif; font-weight: 500;
+    font-size: 34px; letter-spacing: 0.02em; line-height: 1;
+    color: var(--paper); opacity: 0.86;
+  }
+  .sig .tag {
+    font-family: Menlo, monospace; font-size: 12px; letter-spacing: 0.02em;
+    color: var(--muted); opacity: 0.5; line-height: 1;
+  }
+  .tag { display: none; }
+  body.cmd .tag { display: block; }
+</style>
+
+<div id="stage">
+<div class="grid"></div>
+
+<div class="map">
+  <div class="anchor"></div>
+  <div class="bar b1"></div>
+  <div class="bar b2"></div>
+  <div class="bar b3"></div>
+  <div class="bar b4"></div>
+  <div class="label l1">EF02 &middot; 1 MiB</div>
+  <div class="label l2">EF00 &middot; 512 MiB</div>
+  <div class="label l3">ext4 &middot; 1 GiB</div>
+  <div class="label l4">LUKS2 &middot; rest</div>
+</div>
+
+<div class="sig">
+  <svg viewBox="0 0 64 64" fill="none">
+    <rect x="5" y="5" width="54" height="54" rx="12" stroke="#7C8B9E" stroke-width="4"/>
+    <rect x="7" y="17.5" width="10" height="5" fill="#7C8B9E"/>
+    <rect x="7" y="27"   width="22" height="5" fill="#7C8B9E"/>
+    <rect x="7" y="36.5" width="30" height="5" fill="#7C8B9E"/>
+    <rect x="7" y="46"   width="44" height="5" fill="#FF3355"/>
+  </svg>
+  <div class="txt">
+    <div class="word">portlin</div>
+    <div class="tag">portlin create -t /dev/sdb --encrypt</div>
+  </div>
+</div>
+</div>
+<script>document.documentElement.style.setProperty('--k', window.innerWidth / 1920);</script>

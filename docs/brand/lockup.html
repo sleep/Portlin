@@ -1,0 +1,31 @@
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; }
+  /* Lockup: mark + Futura wordmark. Ink text for light backgrounds, paper for dark;
+     the served variant is chosen by the `light` class on <body>. */
+  body {
+    width: 524px; height: 172px;
+    display: flex; align-items: center; gap: 34px;
+    padding: 0 40px; box-sizing: border-box;
+  }
+  svg { width: 108px; height: 108px; display: block; flex: none; }
+  .word {
+    font-family: Futura, "Futura PT", "Century Gothic", sans-serif;
+    font-weight: 500;
+    font-size: 82px;
+    letter-spacing: 0.02em;
+    line-height: 1;
+    color: #E8EDF3;
+  }
+  body.light .word { color: #12161C; }
+  body.light .stroke { stroke: #56657A; }
+  body.light .bar { fill: #56657A; }
+</style>
+<svg viewBox="0 0 64 64" fill="none">
+  <rect class="stroke" x="5" y="5" width="54" height="54" rx="12" stroke="#7C8B9E" stroke-width="4"/>
+  <rect class="bar" x="7" y="17.5" width="10" height="5" fill="#7C8B9E"/>
+  <rect class="bar" x="7" y="27"   width="22" height="5" fill="#7C8B9E"/>
+  <rect class="bar" x="7" y="36.5" width="30" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="46" width="44" height="5" fill="#FF3355"/>
+</svg>
+<div class="word">portlin</div>
