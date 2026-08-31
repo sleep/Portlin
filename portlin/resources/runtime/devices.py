@@ -66,3 +66,21 @@ def backing_partition(source: str) -> str:
             return entries[0]
     # Not a mapping at all: the source is already the partition.
     return node.resolve().name
+
+
+def sysfs_sectors(name: str, field: str) -> int:
+    """A sector count for a block device, from sysfs, or 0 if unreadable.
+
+    Distinct from sysfs_node above, which locates a device by its device number
+    because a /dev/mapper name cannot be resolved by path without udev. This one
+    is given a kernel name that already exists in sysfs and only reads geometry
+    from it.
+
+    sysfs is world-readable, which is what makes partition geometry available to
+    the tools at all: portlin-info runs as an ordinary user, so the wizard's
+    dumpe2fs route is closed to it.
+    """
+    try:
+        return int((Path("/sys/class/block") / name / field).read_text().strip())
+    except (OSError, ValueError):
+        return 0

@@ -135,12 +135,18 @@ def test_runtime_ships_the_shared_device_lookup_module():
     source = files["usr/lib/portlin/devices.py"]
     assert "def sysfs_node" in source
     assert "def backing_partition" in source
-    # Regression guard: locate the device by its major:minor number, never by
-    # assuming udev created a /sys/class/block/<name> symlink, because without
-    # udev cryptsetup makes a real device node instead and that lookup finds
-    # nothing for an encrypted root.
-    assert "st_rdev" in source
-    assert "/sys/class/block" not in source
+    # Regression guard: sysfs_node must locate the device by its major:minor
+    # number, never by assuming udev created a /sys/class/block/<name> symlink,
+    # because without udev cryptsetup makes a real device node instead and that
+    # lookup finds nothing for an encrypted root.
+    #
+    # Scoped to that one function rather than the whole file. sysfs_sectors also
+    # reads /sys/class/block, and correctly so: it is handed a kernel name that
+    # already exists there and only reads geometry from it, which is a different
+    # question from finding a device node in the first place.
+    node_body = source[source.index("def sysfs_node") : source.index("def backing_partition")]
+    assert "st_rdev" in node_body
+    assert "/sys/class/block" not in node_body
 
 
 def test_info_tool_is_shipped_and_executable():
