@@ -280,6 +280,40 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         "$MNT/etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs" 2>/dev/null \
         && pass "the session puts portlin's xdg directory on XDG_CONFIG_DIRS" \
         || fail "nothing puts /etc/xdg/xdg-portlin on XDG_CONFIG_DIRS"
+
+    # A wallpaper reaches a fresh account only by being the file xfdesktop
+    # falls back to when no xfconf property names the monitor, and every step
+    # of that takeover fails silently on its own: the account simply comes up
+    # showing Debian's backdrop, which is also what a stick with no wallpaper
+    # at all shows. Checked here rather than left to the eye, because the
+    # difference is invisible to every other assertion in this file.
+    BACKDROP="usr/share/backgrounds/xfce/xfce-x.svg"
+
+    grep -qx "/$BACKDROP" "$MNT/var/lib/dpkg/diversions" 2>/dev/null \
+        && pass "xfdesktop's default backdrop is diverted to portlin" \
+        || fail "no diversion of /$BACKDROP (portlin-desktop's preinst did not run)"
+
+    # By content, not by name. The path keeps its .svg suffix so that dpkg and
+    # xfdesktop4-data still agree on what is being diverted, and xfdesktop
+    # sniffs the bytes rather than the extension, so PNG magic is the only
+    # honest evidence that the file there is portlin's render.
+    head -c 8 "$MNT/$BACKDROP" 2>/dev/null | grep -qa PNG \
+        && pass "portlin's render is installed as the default backdrop" \
+        || fail "/$BACKDROP is not a PNG (portlin's render did not land there)"
+
+    test -e "$MNT/$BACKDROP.distrib" \
+        && pass "Debian's own backdrop is preserved beside it" \
+        || fail "/$BACKDROP.distrib is missing (the diversion displaced nothing)"
+
+    # The path portlin diverts is compiled into xfdesktop, not configurable,
+    # so a Debian that rebuilds it against a different default would leave
+    # every check above passing and every stick showing the wrong wallpaper.
+    # This is the one assertion that notices.
+    if test -x "$MNT/usr/bin/xfdesktop"; then
+        grep -qa "/$BACKDROP" "$MNT/usr/bin/xfdesktop" \
+            && pass "xfdesktop still falls back to the path portlin diverts" \
+            || fail "xfdesktop no longer references /$BACKDROP (its built-in default moved)"
+    fi
 else
     echo "  (skip) portlin-desktop wallpapers: this is a headless image"
 fi

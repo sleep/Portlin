@@ -270,19 +270,22 @@ def test_every_declared_binary_member_exists():
 
 
 def test_wallpapers_carry_every_declared_size():
+    # Every size, plus the one extra copy that sits where xfdesktop looks when
+    # nothing has configured a backdrop.
     destinations = package.binary_files("portlin-desktop")
-    assert len(destinations) == len(package.WALLPAPER_SIZES)
-    assert all(d.startswith("usr/share/backgrounds/portlin/") for d in destinations)
+    renders = [d for d in destinations if d.startswith("usr/share/backgrounds/portlin/")]
+    assert len(renders) == len(package.WALLPAPER_SIZES)
+    assert set(destinations) - set(renders) == {package.DEFAULT_BACKDROP}
 
 
-def test_desktop_declares_exactly_its_eight_etc_paths_as_conffiles():
+def test_desktop_declares_exactly_its_seven_etc_paths_as_conffiles():
     # Without this member dpkg treats these /etc files as ordinary package
     # files and overwrites a locally-edited one silently on every upgrade. The
     # session snippet is counted here too: an admin who has tuned the search
     # path has as much right to keep that edit as one who has tuned a theme.
     files = package.text_files("portlin-desktop")
     conffiles = files["DEBIAN/conffiles"].splitlines()
-    assert len(conffiles) == 8
+    assert len(conffiles) == 7
     assert set(conffiles) == {f"/{destination}" for destination in package.THEME_FILES}
 
 
@@ -334,3 +337,47 @@ def test_keyring_package_carries_the_key_at_the_path_the_source_names(
     destinations = package.binary_files("portlin-archive-keyring")
     assert package.KEYRING_PATH.lstrip("/") in destinations
     assert package.KEYRING_PATH in package.render_sources_entry()
+
+
+def test_desktop_takes_over_the_backdrop_xfdesktop_falls_back_to():
+    # xfdesktop has no system-wide "default wallpaper" setting. Its backdrop is
+    # an xfconf property keyed by the monitor's name -- monitorHDMI-1,
+    # monitoreDP-1, monitorVirtual-1 -- which cannot be known when a stick is
+    # written, so no shipped default can name the property. What it draws when
+    # no such property exists is one path compiled into the binary, so that
+    # path is the only place a default wallpaper can actually be put.
+    destinations = package.binary_files("portlin-desktop")
+    assert package.DEFAULT_BACKDROP in destinations
+    assert destinations[package.DEFAULT_BACKDROP].exists()
+
+
+def test_desktop_diverts_the_default_backdrop_symmetrically():
+    # dpkg matches a diversion by the whole triple of owning package, divert-to
+    # path and original path. Added under one triple and removed under another,
+    # it is never removed at all, and xfdesktop's own file stays displaced for
+    # the life of the machine.
+    files = package.text_files("portlin-desktop")
+    preinst, postrm = files["DEBIAN/preinst"], files["DEBIAN/postrm"]
+    for script in (preinst, postrm):
+        assert f"/{package.DEFAULT_BACKDROP}" in script
+        assert package.DIVERTED_BACKDROP in script
+        assert "--package portlin-desktop" in script
+    assert "--add" in preinst and "--remove" not in preinst
+    assert "--remove" in postrm and "--add" not in postrm
+
+
+def test_maintainer_scripts_are_executable():
+    # dpkg-deb --build refuses a maintainer script that is not executable, so
+    # this fails the build rather than the stick.
+    executable = package.executable_paths("portlin-desktop")
+    assert {"DEBIAN/preinst", "DEBIAN/postrm"} <= executable
+
+
+def test_no_backdrop_is_configured_by_monitor_number():
+    # xfdesktop stopped reading /backdrop/screen0/monitor0/... in 4.11, and its
+    # one migration path ignores any property whose name contains /workspace.
+    # A default written that way installs cleanly, verifies cleanly and is
+    # never read, which is how it went unnoticed the first time.
+    for name in package.PACKAGES:
+        for destination, content in package.text_files(name).items():
+            assert "monitor0" not in content, destination

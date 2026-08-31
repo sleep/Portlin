@@ -89,11 +89,12 @@ when the desktop package group is present.
 The Xfce theme conffiles, plus six renders of the wallpaper at 16:9, roughly
 11.9 MB in total.
 
-- `/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/{xsettings,xfwm4,xfce4-desktop}.xml`
+- `/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/{xsettings,xfwm4}.xml`
 - `/etc/xdg/xdg-portlin/gtk-3.0/settings.ini`, `/etc/xdg/xdg-portlin/gtk-4.0/settings.ini`
 - `/etc/xdg/xdg-portlin/xfce4/terminal/terminalrc`
 - `/etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs`
 - `/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf`
+- `/usr/share/backgrounds/xfce/xfce-x.svg`, diverted from `xfdesktop4-data`
 
 The defaults sit in a directory of portlin's own rather than at the canonical
 `/etc/xdg` locations, because dpkg permits exactly one installed package to own
@@ -129,6 +130,28 @@ honest signal that portlin's default and the local file have diverged.
 
 Installed to `/usr/share/backgrounds/portlin/`.
 
+### Becoming the default
+
+There is no system-wide setting for the wallpaper a fresh account sees. xfdesktop
+reads its backdrop from an xfconf property keyed by the monitor's *name* --
+`/backdrop/screen0/monitorHDMI-1/workspace0/last-image`, `monitoreDP-1`,
+`monitorVirtual-1` -- and that name comes from the hardware the stick is
+eventually plugged into, so nothing written at `write` time can name the
+property. The numeric `monitor0` form was dropped in Xfce 4.11, and the one
+migration path that still reads it ignores any property whose name contains
+`/workspace`, so a default written that way installs cleanly and is never read.
+
+What xfdesktop draws when no property matches is a single path compiled into the
+binary. Debian builds it as `/usr/share/backgrounds/xfce/xfce-x.svg`, owned by
+`xfdesktop4-data`, so `portlin-desktop` takes that path over with a `dpkg-divert`
+in its `preinst` and gives it back in its `postrm`. The suffix stays `.svg` so
+that dpkg and `xfdesktop4-data` go on agreeing about what is diverted; xfdesktop
+sniffs the bytes rather than the extension, so the PNG loads regardless.
+
+This is the one part of the theme that a compiled-in constant can move out from
+under, which is why `verify-image.sh` asserts that the installed `xfdesktop`
+binary still references the diverted path rather than trusting that it does.
+
 Separate from `portlin-runtime` because the two change on completely different
 schedules. A one-line fix to `portlin-info` should cost a stick a 30 KB download,
 not 11.9 MB of unchanged PNGs.
@@ -144,7 +167,13 @@ different device scale factor. Producing genuine 16:10 or ultrawide compositions
 would require making that layout responsive, which is a redesign of the artwork
 rather than a change to the render script. Out of scope here. Those displays get
 a 16:9 render crop-fitted by xfdesktop's zoomed mode, which suits a composition
-that already reserves its top-left quadrant for desktop icons.
+that already reserves its top-left quadrant for desktop icons. Zoomed is
+xfdesktop's own default for an unset `image-style`, so nothing has to configure
+it.
+
+Only the 1920x1080 render is the default backdrop; the other five are there for
+anyone who picks one in Settings. Choosing among them by panel resolution would
+need something running in the session, which the diversion deliberately avoids.
 
 ## Reaching the stick
 
