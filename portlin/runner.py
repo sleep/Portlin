@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import selectors
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -210,6 +211,20 @@ class Runner:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         path.chmod(mode)
+
+    def copy_file(self, source: str | Path, destination: str | Path) -> None:
+        """Copy a file, recorded like a command so dry runs stay inspectable.
+
+        write_file handles text. Wallpapers are PNGs, and decoding them into a
+        str to write them back out would corrupt them.
+        """
+        source, destination = Path(source), Path(destination)
+        self.commands.append(["copy-file", str(source), str(destination)])
+        if self.dry_run:
+            log.debug("dry-run: copy %s to %s", source, destination)
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
 
     def rendered(self) -> list[str]:
         """Recorded commands as shell-ish strings, for assertions and logs."""

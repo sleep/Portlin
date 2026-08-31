@@ -138,6 +138,26 @@ class TestUnencryptedWrite:
     def test_enables_the_encryption_finaliser(self):
         assert self.t.has_tokens("systemctl", "enable", "portlin-finalise-encryption.service")
 
+    def test_builds_every_package_before_installing_any(self):
+        assert self.t.tokens_before(
+            ("dpkg-deb", "--build"), ("apt-get", "install")
+        )
+
+    def test_builds_all_three_packages(self):
+        assert self.t.count("dpkg-deb", "--build") == 3
+
+    def test_installs_the_packages_in_one_transaction(self):
+        # One apt call so the inter-package dependencies resolve against each
+        # other rather than against an archive that is not reachable here.
+        argv = self.t.command_at("apt-get", "install")
+        assert sum(1 for a in argv if a.endswith(".deb")) == 3
+
+    def test_installs_packages_after_the_frozen_wizard(self):
+        assert self.t.before(
+            ("write-file", "usr/local/sbin/portlin-firstboot"),
+            ("apt-get", "install"),
+        )
+
     def test_regenerates_the_initramfs_inside_the_chroot(self):
         assert self.t.has("chroot", "update-initramfs")
 

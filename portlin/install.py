@@ -19,6 +19,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from . import __version__, crypto, templates
+from . import package as pkg
 from .chroot import Chroot
 from .config import WriteConfig
 from .errors import TargetError
@@ -113,7 +114,7 @@ def write_stick(cfg: WriteConfig, runner: Runner) -> None:
         log.info("generating the initramfs and installing GRUB")
         with Chroot(mountpoint, runner, network=False) as chroot:
             _remove_boot_splash(chroot)
-            _install_firstboot(chroot)
+            _install_runtime(chroot)
             chroot.run(["update-initramfs", "-u", "-k", "all"])
             _install_grub(chroot, target.device)
 
@@ -394,7 +395,7 @@ def _remove_boot_splash(chroot: Chroot) -> None:
     )
 
 
-def _install_firstboot(chroot: Chroot) -> None:
+def _install_runtime(chroot: Chroot) -> None:
     """Install the first-boot wizard into the target.
 
     Deliberately here rather than in the rootfs build. The wizard is portlin's
@@ -453,6 +454,56 @@ def _install_firstboot(chroot: Chroot) -> None:
         (RESOURCES / "firstboot" / "portlin-encrypt.local-top").read_text(),
         mode=0o755,
     )
+
+    _build_and_install_packages(chroot)
+
+
+def _has_desktop(chroot: Chroot) -> bool:
+    """Whether the unpacked rootfs contains an Xfce session.
+
+    Asked of the filesystem rather than the config, because ``write`` consumes
+    a prebuilt tarball and the package groups that produced it belong to
+    ``BuildConfig``. A tarball built with --minimal on one machine can be
+    written on another that never saw those arguments, so the rootfs itself is
+    the only honest source.
+
+    Routed through the runner so it is recorded, and so a dry run reports the
+    full desktop plan rather than silently dropping the wallpapers.
+    """
+    return chroot.runner.exists(
+        ["test", "-x", str(chroot.root / "usr/bin/startxfce4")]
+    )
+
+
+def _build_and_install_packages(chroot: Chroot) -> None:
+    """Assemble portlin's own packages in the chroot and install them.
+
+    Built here rather than committed as binaries or fetched over the network,
+    so that write stays offline, the repository stays free of build products,
+    and a stick can never receive a package older than the checkout that wrote
+    it. The version carries a ~local suffix, which sorts below any published
+    release, so the first apt upgrade replaces these with signed builds.
+    """
+    staging = "tmp/portlin-packages"
+    names = list(pkg.PACKAGES)
+    if not _has_desktop(chroot):
+        # 14 MB of wallpaper on a --minimal stick with no desktop to show it.
+        # Recommends rather than Depends is what makes leaving it out legal.
+        names.remove("portlin-desktop")
+
+    for name in names:
+        root = f"{staging}/{name}"
+        for relative, content in pkg.text_files(name).items():
+            mode = 0o755 if relative in pkg.executable_paths(name) else 0o644
+            chroot.write_file(f"{root}/{relative}", content, mode=mode)
+        for relative, source in pkg.binary_files(name).items():
+            chroot.runner.copy_file(source, chroot.root / root / relative)
+        chroot.run(["dpkg-deb", "--build", f"/{root}", f"/{staging}/{name}.deb"])
+
+    # One transaction, so the dependencies between these three resolve against
+    # each other. There is no network here and no archive to fall back on.
+    chroot.apt(["install", *[f"/{staging}/{name}.deb" for name in names]])
+    chroot.run(["rm", "-rf", f"/{staging}"])
 
 
 def _install_grub(chroot: Chroot, device: str) -> None:

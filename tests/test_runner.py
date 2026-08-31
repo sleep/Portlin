@@ -30,6 +30,22 @@ class TestDryRun:
         assert runner.commands[0] == ["mkfs.ext4", "42", str(tmp_path)]
 
 
+class TestCopyFile:
+    def test_copy_file_is_recorded_like_a_command(self, tmp_path):
+        # Wallpapers are binary, so they cannot go through write_file, but a dry
+        # run still has to show them.
+        runner = Runner(dry_run=True)
+        runner.copy_file(tmp_path / "a.png", tmp_path / "b.png")
+        assert runner.rendered() == [f"copy-file {tmp_path / 'a.png'} {tmp_path / 'b.png'}"]
+
+    def test_copy_file_copies_bytes_when_not_dry_running(self, tmp_path):
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"\x89PNG\r\n\x1a\n")
+        runner = Runner()
+        runner.copy_file(source, tmp_path / "nested" / "b.bin")
+        assert (tmp_path / "nested" / "b.bin").read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+
 class TestExecution:
     def test_captures_stdout(self):
         runner = Runner()
