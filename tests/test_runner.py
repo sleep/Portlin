@@ -36,7 +36,9 @@ class TestCopyFile:
         # run still has to show them.
         runner = Runner(dry_run=True)
         runner.copy_file(tmp_path / "a.png", tmp_path / "b.png")
-        assert runner.rendered() == [f"copy-file {tmp_path / 'a.png'} {tmp_path / 'b.png'}"]
+        assert runner.rendered() == [
+            f"copy-file {tmp_path / 'a.png'} {tmp_path / 'b.png'} mode=644"
+        ]
 
     def test_copy_file_copies_bytes_when_not_dry_running(self, tmp_path):
         source = tmp_path / "a.bin"
@@ -44,6 +46,26 @@ class TestCopyFile:
         runner = Runner()
         runner.copy_file(source, tmp_path / "nested" / "b.bin")
         assert (tmp_path / "nested" / "b.bin").read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+    def test_copy_file_sets_a_predictable_mode_regardless_of_umask(self, tmp_path):
+        # shutil.copyfile alone leaves the mode at 0o666 & ~umask, which under a
+        # hardened umask can make a package member such as the archive keyring
+        # unreadable by the unprivileged user apt drops privileges to.
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"secret")
+        source.chmod(0o600)
+        runner = Runner()
+        destination = tmp_path / "b.bin"
+        runner.copy_file(source, destination)
+        assert destination.stat().st_mode & 0o777 == 0o644
+
+    def test_copy_file_accepts_an_explicit_mode(self, tmp_path):
+        source = tmp_path / "a.bin"
+        source.write_bytes(b"data")
+        runner = Runner()
+        destination = tmp_path / "b.bin"
+        runner.copy_file(source, destination, mode=0o600)
+        assert destination.stat().st_mode & 0o777 == 0o600
 
 
 class TestExecution:

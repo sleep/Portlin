@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from portlin import __version__, package
@@ -57,9 +59,30 @@ def test_sources_entry_pins_the_architecture():
     assert "Signed-By: /usr/share/keyrings/portlin-archive-keyring.gpg" in entry
 
 
-def test_keyring_package_ships_the_sources_entry():
+def test_keyring_package_ships_no_key_or_source_while_the_placeholder_is_empty():
+    # The repository ships a zero-byte placeholder until a real signing key is
+    # committed. Shipping the apt source without it would point every stick at
+    # an archive that either does not exist yet or cannot be verified, failing
+    # apt update on every run, forever.
+    assert package.KEYRING_FILE.stat().st_size == 0
+    assert "etc/apt/sources.list.d/portlin.sources" not in package.text_files(
+        "portlin-archive-keyring"
+    )
+    assert package.binary_files("portlin-archive-keyring") == {}
+
+
+def test_keyring_package_ships_the_key_and_source_once_a_real_key_lands(
+    tmp_path, monkeypatch
+):
+    real_key = tmp_path / "portlin-archive-keyring.gpg"
+    real_key.write_bytes(b"not a real key, just non-empty")
+    monkeypatch.setattr(package, "KEYRING_FILE", real_key)
+
     files = package.text_files("portlin-archive-keyring")
     assert "etc/apt/sources.list.d/portlin.sources" in files
+    assert package.binary_files("portlin-archive-keyring") == {
+        package.KEYRING_PATH.lstrip("/"): real_key
+    }
 
 
 def test_runtime_ships_the_three_tools_as_executables():
@@ -152,14 +175,30 @@ def test_encrypt_tool_does_not_encrypt_anything_itself():
     assert "portlin.encrypt=ask" in source
 
 
-def test_info_and_expand_use_the_shared_device_module_not_a_hand_copy():
+def test_pkname_lookups_exclude_holder_devices():
+    # Without -d (no-deps), lsblk lists the whole subtree rooted at the queried
+    # device -- including an open LUKS mapping sitting on top of the very
+    # partition being asked about, which is the ordinary case for a live,
+    # mounted, encrypted stick. That returns two rows glued into one string
+    # instead of one, and the harness caught this reaching a real growpart
+    # call with an empty partition number.
+    files = package.text_files("portlin-runtime")
+    for tool in ("usr/bin/portlin-info", "usr/bin/portlin-expand"):
+        source = files[tool]
+        assert '"lsblk", "-no", "PKNAME"' not in source
+        assert '"lsblk", "-dno", "PKNAME"' in source
+
+
+def test_tools_use_the_shared_device_module_not_a_hand_copy():
     # A hand-written /sys/class/block lookup has already reached a USB stick
     # once in this project's history: it resolves the mapper alias for an
     # encrypted root, which sysfs never created because cryptsetup made a real
-    # device node there instead of a udev symlink. Both tools must import the
-    # shared lookup in usr/lib/portlin/devices.py rather than repeat that bug.
+    # device node there instead of a udev symlink. Every tool must import the
+    # shared lookup in usr/lib/portlin/devices.py rather than repeat that bug,
+    # or duplicate the command-running and root-finding helpers that live
+    # there alongside it.
     files = package.text_files("portlin-runtime")
-    for tool in ("usr/bin/portlin-info", "usr/bin/portlin-expand"):
+    for tool in ("usr/bin/portlin-info", "usr/bin/portlin-expand", "usr/bin/portlin-encrypt"):
         source = files[tool]
         assert "/sys/class/block" not in source
         assert "/usr/lib/portlin" in source
@@ -208,9 +247,14 @@ def test_desktop_declares_exactly_its_seven_etc_paths_as_conffiles():
     assert set(conffiles) == {f"/{destination}" for destination in package.THEME_FILES}
 
 
-def test_keyring_declares_its_sources_entry_as_a_conffile():
+def test_keyring_declares_its_sources_entry_as_a_conffile(tmp_path, monkeypatch):
     # A user who points portlin.sources at a mirror must not lose that edit
-    # to the next apt update of the keyring package.
+    # to the next apt update of the keyring package. Only assertable once a
+    # real key ships the sources entry at all.
+    real_key = tmp_path / "portlin-archive-keyring.gpg"
+    real_key.write_bytes(b"not a real key, just non-empty")
+    monkeypatch.setattr(package, "KEYRING_FILE", real_key)
+
     files = package.text_files("portlin-archive-keyring")
     assert files["DEBIAN/conffiles"] == "/etc/apt/sources.list.d/portlin.sources\n"
 
@@ -223,10 +267,31 @@ def test_runtime_ships_no_etc_files_and_declares_no_conffiles():
     assert "DEBIAN/conffiles" not in files
 
 
-def test_keyring_package_carries_the_key_at_the_path_the_source_names():
+def test_conffiles_also_cover_binary_members_under_etc(monkeypatch):
+    # A binary member under /etc must be declared just like a text one, or
+    # dpkg treats it as an ordinary file and silently overwrites a local edit
+    # on every upgrade. portlin-runtime ships no /etc files of its own, which
+    # makes it a clean package to prove this on: without this, the fake
+    # binary member below would produce no DEBIAN/conffiles member at all.
+    monkeypatch.setattr(
+        package,
+        "binary_files",
+        lambda name: {"etc/portlin/example.bin": Path("/dev/null")},
+    )
+    files = package.text_files("portlin-runtime")
+    assert files["DEBIAN/conffiles"] == "/etc/portlin/example.bin\n"
+
+
+def test_keyring_package_carries_the_key_at_the_path_the_source_names(
+    tmp_path, monkeypatch
+):
     # The Signed-By path in the apt source and the path the package installs
     # the key to are the same string in two files, and apt fails silently on
     # every update if they drift apart.
+    real_key = tmp_path / "portlin-archive-keyring.gpg"
+    real_key.write_bytes(b"not a real key, just non-empty")
+    monkeypatch.setattr(package, "KEYRING_FILE", real_key)
+
     destinations = package.binary_files("portlin-archive-keyring")
     assert package.KEYRING_PATH.lstrip("/") in destinations
     assert package.KEYRING_PATH in package.render_sources_entry()

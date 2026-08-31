@@ -17,6 +17,7 @@ RESOURCES = Path(__file__).parent.parent / "portlin" / "resources" / "firstboot"
 WIZARD = RESOURCES / "portlin-firstboot"
 UNIT = RESOURCES / "portlin-firstboot.service"
 FINALISE = RESOURCES / "portlin-finalise-encryption"
+FINALISE_UNIT = RESOURCES / "portlin-finalise-encryption.service"
 
 
 class TestWizardScript:
@@ -527,6 +528,73 @@ class TestSystemdUnit:
 
     def test_it_is_installable(self, unit):
         assert "WantedBy=multi-user.target" in unit
+
+
+class TestFinaliserSystemdUnit:
+    """Pins the finaliser unit's directives the same way TestSystemdUnit pins
+    the wizard's. This unit is frozen tier: written once by ``write`` and never
+    updatable, so a wrong directive here can never be fixed on a deployed
+    stick, and has to be caught before it ships.
+    """
+
+    @pytest.fixture
+    def unit(self) -> str:
+        return FINALISE_UNIT.read_text()
+
+    def test_it_accepts_the_finalised_exit_code_as_success(self, unit):
+        # The script exits 10, not 0, when it actually finalised an encryption
+        # (see FINALISED in portlin-finalise-encryption); without this, systemd
+        # would treat every finalisation as a unit failure.
+        assert "SuccessExitStatus=0 10" in unit
+
+    def test_it_runs_before_the_wizard_and_the_display_manager(self, unit):
+        # Both must see the finished crypttab: the wizard, so it can report
+        # that finalisation happened, and the display manager, because a stick
+        # finalised on a boot after setup has no wizard left to order against.
+        assert "Before=portlin-firstboot.service display-manager.service" in unit
+
+    def test_it_is_gated_on_the_stick_being_a_portlin_stick(self, unit):
+        # /etc/portlin-release exists on every stick portlin wrote and on
+        # nothing else, so this never runs on an unrelated system.
+        assert "ConditionPathExists=/etc/portlin-release" in unit
+
+    def test_it_is_a_oneshot_that_does_not_stay_active(self, unit):
+        # RemainAfterExit=no (not yes, unlike the wizard): this runs on every
+        # boot and must be free to run again, not treated as already started.
+        assert "Type=oneshot" in unit
+        assert "RemainAfterExit=no" in unit
+
+    def test_it_is_installable(self, unit):
+        assert "WantedBy=multi-user.target" in unit
+
+
+class TestFinaliserBreadcrumbContract:
+    """The finaliser and the wizard agree on nothing but a path and an exit
+    code -- if either side's copy of BREADCRUMB or FINALISED drifts, the
+    wizard silently stops reporting that finalisation happened, with no test
+    failure anywhere else to catch it.
+    """
+
+    def test_the_breadcrumb_path_matches_between_finaliser_and_wizard(self):
+        finalise_body = FINALISE.read_text()
+        wizard_finalise_encryption = WIZARD.read_text()
+        wizard_finalise_encryption = wizard_finalise_encryption[
+            wizard_finalise_encryption.index("def finalise_encryption"):
+            wizard_finalise_encryption.index("def step_autologin")
+        ]
+        assert "BREADCRUMB = Path(\"/run/portlin/finalised\")" in finalise_body
+        assert "/run/portlin/finalised" in wizard_finalise_encryption
+
+    def test_main_only_returns_the_finalised_code_when_it_touched_the_breadcrumb(self):
+        # Read rather than executed: the script needs root and real crypttab
+        # and cryptsetup state to run for real, which belongs to the harness
+        # (scripts/test-encrypt-hook.py), not a unit test. This instead pins
+        # the two statements that make the contract hold: main() returns
+        # FINALISED only on the line right after it touches BREADCRUMB.
+        body = FINALISE.read_text()
+        main_body = body[body.index("def main"):]
+        assert "BREADCRUMB.touch()" in main_body
+        assert re.search(r"BREADCRUMB\.touch\(\)\s*\n\s*return FINALISED", main_body)
 
 
 class TestKeyringUnderAutologin:

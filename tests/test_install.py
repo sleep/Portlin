@@ -517,6 +517,26 @@ class TestPackageAssemblyIsShared:
         assert seen == list(pkg.PACKAGES)
 
 
+class TestHeadlessDropsTheDesktopPackage:
+    """_has_desktop probes the unpacked rootfs, and in dry-run mode Runner.exists
+    always reports success -- so without monkeypatching it, a unit test can never
+    exercise the --minimal path where portlin-desktop is left out.
+    """
+
+    def test_drops_portlin_desktop_when_there_is_no_desktop(
+        self, plain_config, runner, trace, monkeypatch
+    ):
+        monkeypatch.setattr(install, "_has_desktop", lambda chroot: False)
+        write_stick(plain_config, runner)
+        t = trace(runner)
+
+        # Only the keyring and runtime packages get built and installed; the
+        # 11.9 MB of wallpaper never lands in the staging tree.
+        assert t.count("dpkg-deb", "--build") == 2
+        argv = t.command_at("apt-get", "install")
+        assert not any("portlin-desktop.deb" in arg for arg in argv)
+
+
 class TestAssemblePackage:
     """The one place a package's tree turns into a .deb.
 
