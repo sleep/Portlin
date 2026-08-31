@@ -155,3 +155,8 @@ class TestMain:
         out = capsys.readouterr().out
         assert "dry run: commands that would have run" in out
         assert "lsblk" in out
+
+    def test_package_subcommand_builds_every_package(self, tmp_path, capsys):
+        cli.main(["--dry-run", "package", "--output", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert out.count("dpkg-deb --build") == 3

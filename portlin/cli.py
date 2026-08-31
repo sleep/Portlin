@@ -81,6 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="reuse this tarball if it exists, otherwise build it here",
     )
 
+    package = sub.add_parser(
+        "package", help="build portlin's own .deb packages without writing a stick"
+    )
+    package.add_argument(
+        "--output", type=Path, required=True, help="directory to write the .deb files into"
+    )
+    package.add_argument(
+        "--version", help="version to stamp onto the packages (default: local dev version)"
+    )
+
     return parser
 
 
@@ -198,6 +208,30 @@ def cmd_create(args: argparse.Namespace, runner: Runner) -> int:
     return 0
 
 
+def cmd_package(args: argparse.Namespace, runner: Runner) -> int:
+    """Build the runtime packages without writing a stick.
+
+    Shared with the write path through portlin.package, so that a package
+    published by CI and one built locally can never be assembled by two
+    different code paths.
+    """
+    from . import package as pkg
+
+    output = Path(args.output)
+    version = args.version or pkg.local_version()
+    for name in pkg.PACKAGES:
+        root = output / name
+        for relative, content in pkg.text_files(name).items():
+            mode = 0o755 if relative in pkg.executable_paths(name) else 0o644
+            content = content.replace(pkg.local_version(), version)
+            runner.write_file(root / relative, content, mode=mode)
+        for relative, source in pkg.binary_files(name).items():
+            runner.copy_file(source, root / relative)
+        runner.run(["dpkg-deb", "--build", str(root), str(output / f"{name}.deb")])
+    print(f"packages written to {output}")
+    return 0
+
+
 # --------------------------------------------------------------------------
 
 def _build_config(args: argparse.Namespace, output: Path) -> BuildConfig:
@@ -293,6 +327,7 @@ COMMANDS = {
     "build": cmd_build,
     "write": cmd_write,
     "create": cmd_create,
+    "package": cmd_package,
 }
 
 
