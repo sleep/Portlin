@@ -17,7 +17,7 @@ their tier before they are written.
 
 | | Frozen | Updatable |
 |---|---|---|
-| Written by | `write`, once | `portlin-runtime`, by apt |
+| Written by | `write`, once | `portlin-runtime` and `portlin-desktop`, by apt |
 | Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, wallpaper, branding, the `portlin-*` commands |
 | Failure mode | a stick that will not boot or will not unlock | a desktop that looks wrong, or a command that refuses to run |
 
@@ -75,17 +75,24 @@ Depends on `portlin-archive-keyring`, `python3`, `cloud-guest-utils`,
 
 A recommendation rather than a dependency because of `--minimal`, which produces
 a stick with no desktop at all. The three commands are useful there, and neither
-the theme nor 14 MB of wallpaper is, so `write` installs `portlin-desktop` only
+the theme nor 11.9 MB of wallpaper is, so `write` installs `portlin-desktop` only
 when the desktop package group is present.
 
 - `/usr/bin/portlin-info`
 - `/usr/bin/portlin-expand`
 - `/usr/bin/portlin-encrypt`
+- `/usr/lib/portlin/devices.py`
+- `/usr/share/portlin/logo.svg`
+
+### `portlin-desktop`
+
+The Xfce theme conffiles, plus six renders of the wallpaper at 16:9, roughly
+11.9 MB in total.
+
 - `/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/{xsettings,xfwm4,xfce4-desktop}.xml`
 - `/etc/xdg/gtk-3.0/settings.ini`, `/etc/xdg/gtk-4.0/settings.ini`
 - `/etc/xdg/xfce4/terminal/terminalrc`
 - `/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf`
-- `/usr/share/portlin/logo.svg`
 
 The files under `/etc` become dpkg conffiles, and that is the correct semantics
 rather than a problem to engineer around. xfconf writes a user's own settings to
@@ -94,25 +101,20 @@ someone who edited them deliberately. Preserving such an edit across an upgrade
 is the desired behaviour, and the conffile prompt that accompanies it is the
 honest signal that portlin's default and the local file have diverged.
 
-### `portlin-desktop`
-
-The Xfce theme conffiles, plus six renders of the wallpaper at 16:9, roughly
-14 MB in total.
-
 | Scale of the authoring canvas | Output |
 |---|---|
-| 0.711x | 1366x768 |
+| 0.711x | 1365x768 |
 | 1x | 1920x1080 |
-| 1.333x | 2560x1440 |
+| 4/3 | 2560x1440 |
 | 2x | 3840x2160 |
-| 2.667x | 5120x2880 |
+| 8/3 | 5120x2880 |
 | 4x | 7680x4320 |
 
 Installed to `/usr/share/backgrounds/portlin/`.
 
 Separate from `portlin-runtime` because the two change on completely different
 schedules. A one-line fix to `portlin-info` should cost a stick a 30 KB download,
-not 14 MB of unchanged PNGs.
+not 11.9 MB of unchanged PNGs.
 
 Pre-rendering six sizes rather than scaling one is justified by this particular
 composition: the background carries a one-pixel grid at 48 pixel spacing and

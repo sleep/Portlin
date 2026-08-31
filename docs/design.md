@@ -75,6 +75,35 @@ Nothing host-specific may survive into the image:
 - `noatime,commit=120` and zram instead of swap, because USB flash has finite
   write cycles.
 
+## The update tier rule
+
+Every file portlin puts on a stick belongs to exactly one tier. This is the
+governing rule of the whole design, and new features are expected to declare
+their tier before they are written.
+
+| | Frozen | Updatable |
+|---|---|---|
+| Written by | `write`, once | `portlin-runtime` and `portlin-desktop`, by apt |
+| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, wallpaper, branding, the `portlin-*` commands |
+| Failure mode | a stick that will not boot or will not unlock | a desktop that looks wrong, or a command that refuses to run |
+
+**The test.** If a broken version of a file can stop a stick booting or
+unlocking, it is frozen. Otherwise it is updatable. When the answer is unclear,
+it is frozen.
+
+Two consequences follow, and both are deliberate rather than accidental.
+
+**The split causes duplication.** The wizard keeps its own `apply_expand()` even
+once `portlin-expand` ships, because the wizard runs at first boot, when the
+installed package is whatever `write` put there and no update has been possible
+yet. The two implementations will drift, and that is the accepted price of the
+boundary.
+
+**An updatable feature may depend on a frozen one.** When it does, it must
+detect the prerequisite at runtime and refuse cleanly when it is absent,
+because the frozen half of a stick written last year cannot be brought
+forward.
+
 ## Module decomposition
 
 Each module has one job and a testable surface.
@@ -83,7 +112,7 @@ Each module has one job and a testable surface.
 |---|---|
 | `runner.py` | Single subprocess chokepoint. Records every command, supports dry-run, redacts secret stdin |
 | `layout.py` | Pure: target size -> partition plan, sgdisk argv, partition device paths |
-| `templates.py` | Pure: renders fstab, crypttab, `/etc/default/grub`, initramfs conf, sources.list, desktop theme defaults |
+| `templates.py` | Pure: renders fstab, crypttab, `/etc/default/grub`, initramfs conf, sources.list |
 | `devices.py` | Enumerates block devices from `lsblk -J`, evaluates target safety |
 | `target.py` | Uniform interface over a block device and a loop-mounted image file |
 | `chroot.py` | Bind-mount lifecycle, `policy-rc.d`, resolv.conf, command execution |
@@ -91,6 +120,7 @@ Each module has one job and a testable surface.
 | `rootfs.py` | debootstrap + package installation -> cached tarball |
 | `install.py` | Orchestrates `write`: partition, format, unpack, configure, GRUB |
 | `packages.py` | The package set, grouped and overridable |
+| `package.py` | Pure: the three runtime packages as a path-to-content mapping |
 | `progress.py` | Pure: command output -> progress events, stage weights, bars and ETAs |
 | `cli.py` | Argument parsing, confirmation prompts, wiring |
 

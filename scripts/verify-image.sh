@@ -226,6 +226,30 @@ else
 fi
 
 echo
+echo "Runtime packages"
+test -f "$MNT/var/lib/dpkg/info/portlin-runtime.list" \
+    && pass "portlin-runtime is installed" \
+    || fail "portlin-runtime is not installed (no updates will reach this stick)"
+
+test -f "$MNT/etc/apt/sources.list.d/portlin.sources" \
+    && pass "the portlin apt source is present" \
+    || fail "the portlin apt source is missing"
+
+test -f "$MNT/usr/share/keyrings/portlin-archive-keyring.gpg" \
+    && pass "the archive keyring is present" \
+    || fail "the archive keyring is missing (apt will reject the archive)"
+
+test -L "$MNT/etc/systemd/system/multi-user.target.wants/portlin-finalise-encryption.service" \
+    && pass "the encryption finaliser is enabled" \
+    || fail "the encryption finaliser is not enabled"
+
+for tool in portlin-info portlin-expand portlin-encrypt; do
+    test -x "$MNT/usr/bin/$tool" \
+        && pass "$tool is executable" \
+        || fail "$tool is missing or not executable"
+done
+
+echo
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All checks passed."
 else

@@ -73,6 +73,18 @@ The Xfce desktop is dark out of the box: Greybird-dark across GTK, window decora
 greeter and the terminal. The defaults live in `/etc/xdg`, so Settings > Appearance still changes
 them and the change sticks.
 
+## Updates
+
+The Debian system updates itself: it is a real install, so `apt full-upgrade`
+and kernel upgrades work.
+
+Portlin's own contribution to the stick is split in two. The desktop theme,
+the wallpapers and the `portlin-info`, `portlin-expand` and `portlin-encrypt`
+commands are Debian packages, and update from portlin's archive like anything
+else. The bootloader, the initramfs, `fstab` and `crypttab` are written once
+and stay put, because an update that breaks one of those is a stick that will
+not boot. Moving those forward means writing the stick again.
+
 ## Safety
 
 `write` erases whatever you point it at. Before it does:
@@ -89,7 +101,7 @@ device.
 
 ```
 make image     # build a real image, with progress
-make test      # 387 unit tests, no root, no Linux, ~1s
+make test      # 440 unit tests, no root, no Linux, ~1s
 make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker

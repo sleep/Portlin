@@ -397,14 +397,15 @@ def _remove_boot_splash(chroot: Chroot) -> None:
 
 
 def _install_runtime(chroot: Chroot) -> None:
-    """Install the first-boot wizard into the target.
+    """Install the first-boot wizard, and build and install the runtime packages.
 
-    Deliberately here rather than in the rootfs build. The wizard is portlin's
-    own code, so shipping whatever version was frozen into a cached tarball
-    months ago is a footgun: a fixed wizard would silently not reach the stick
-    until someone remembered to rebuild. Installing it at write time means the
-    stick always carries the current wizard, and iterating on it costs a
-    two-minute write instead of a twenty-minute debootstrap.
+    Deliberately here rather than in the rootfs build. The wizard and the
+    packages are portlin's own code, so shipping whatever version was frozen
+    into a cached tarball months ago is a footgun: a fixed wizard or a fixed
+    command would silently not reach the stick until someone remembered to
+    rebuild. Installing them at write time means the stick always carries the
+    current code, and iterating on it costs a two-minute write instead of a
+    twenty-minute debootstrap.
     """
     from .rootfs import (
         FINALISE_SCRIPT,
@@ -513,7 +514,7 @@ def _build_and_install_packages(chroot: Chroot) -> None:
     staging = "tmp/portlin-packages"
     names = list(pkg.PACKAGES)
     if not _has_desktop(chroot):
-        # 14 MB of wallpaper on a --minimal stick with no desktop to show it.
+        # 11.9 MB of wallpaper on a --minimal stick with no desktop to show it.
         # Recommends rather than Depends is what makes leaving it out legal.
         names.remove("portlin-desktop")
 

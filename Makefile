@@ -47,10 +47,11 @@ harness:
 	  debian:trixie bash -c 'export DEBIAN_FRONTEND=noninteractive; \
 	  apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 	    python3 gdisk e2fsprogs cryptsetup-bin util-linux mount coreutils \
-	    dmsetup cloud-guest-utils >/dev/null; \
+	    dmsetup cloud-guest-utils dpkg-dev >/dev/null; \
 	  python3 -u scripts/test-encrypt-hook.py && \
 	  python3 -u scripts/test-expand.py && \
-	  python3 -u scripts/test-expand.py --encrypt'
+	  python3 -u scripts/test-expand.py --encrypt && \
+	  python3 -u scripts/test-package-upgrade.py'
 
 # The full thing: boot the image, answer every prompt, verify the disk grew.
 prove:
