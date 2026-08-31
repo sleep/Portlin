@@ -36,11 +36,11 @@ REPO = Path(__file__).resolve().parent.parent
 # fails in a container for reasons that look nothing like the cause.
 sys.path.insert(0, str(REPO))
 
-from portlin import progress  # noqa: E402
+from portlin import __version__, progress  # noqa: E402
 from portlin.config import BuildConfig, WriteConfig  # noqa: E402
 from portlin.errors import PortlinError  # noqa: E402
 from portlin.install import write_stick  # noqa: E402
-from portlin.rootfs import VERSION, build_rootfs  # noqa: E402
+from portlin.rootfs import build_rootfs  # noqa: E402
 from portlin.runner import Runner  # noqa: E402
 
 CONTAINER_IMAGE = "debian:trixie"
@@ -465,7 +465,7 @@ def _header(theme, unicode_ok, args, image, timings) -> list[str]:
     logo = render_logo(theme, unicode_ok)
     dot = " · " if unicode_ok else " - "
     facts = [
-        theme(f"portlin {VERSION}", Theme.PAPER),
+        theme(f"portlin {__version__}", Theme.PAPER),
         theme(f"{args.suite}{dot}amd64{dot}{args.image_size} image", Theme.INK),
         theme(describe_host(), Theme.INK),
     ]
