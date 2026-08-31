@@ -8,7 +8,7 @@ and installs locally, so that a later signed archive can update them on a stick
 already in use.
 
 **Architecture:** Three `Architecture: all` packages (`portlin-archive-keyring`,
-`portlin-runtime`, `portlin-wallpapers`) are assembled from files under
+`portlin-runtime`, `portlin-desktop`) are assembled from files under
 `portlin/resources/` by a new pure module, built inside the chroot with
 `dpkg-deb --build` at write time, and installed with `apt-get install` against
 local files. Everything boot-critical stays exactly where it is. One frozen-tier
@@ -484,7 +484,7 @@ thing be asserted by unit tests on a machine with no dpkg.
   - `local_version() -> str` returning `f"{__version__}{LOCAL_SUFFIX}"`
   - `render_control(*, name: str, version: str, description: str, depends: list[str], recommends: list[str] | None = None) -> str`
   - `render_sources_entry() -> str`
-  - `PACKAGES: list[str]`, the build order `["portlin-archive-keyring", "portlin-runtime", "portlin-wallpapers"]`
+  - `PACKAGES: list[str]`, the build order `["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]`
   - `text_files(package: str) -> dict[str, str]` mapping a path relative to the package root to its content
   - `binary_files(package: str) -> dict[str, Path]` mapping a path relative to the package root to a source file on the host
   - `executable_paths(package: str) -> set[str]`, the subset of `text_files` needing mode 0755
@@ -544,8 +544,8 @@ def test_runtime_recommends_rather_than_depends_on_wallpapers():
     # A --minimal stick has no desktop, so 14 MB of wallpaper must not be a
     # hard dependency of the tools.
     control = package.text_files("portlin-runtime")["DEBIAN/control"]
-    assert "Recommends: portlin-wallpapers" in control
-    assert "portlin-wallpapers" not in control.split("Depends:")[1].split("\n")[0]
+    assert "Recommends: portlin-desktop" in control
+    assert "portlin-desktop" not in control.split("Depends:")[1].split("\n")[0]
 
 
 def test_sources_entry_pins_the_architecture():
@@ -618,7 +618,7 @@ KEYRING_PATH = "/usr/share/keyrings/portlin-archive-keyring.gpg"
 
 # Build order: the keyring first, because the others are installed alongside it
 # in one apt transaction that has to resolve.
-PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-wallpapers"]
+PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
 TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
 
@@ -722,7 +722,7 @@ def text_files(package: str) -> dict[str, str]:
                     "cloud-guest-utils",
                     "cryptsetup-bin",
                 ],
-                recommends=["portlin-wallpapers"],
+                recommends=["portlin-desktop"],
             ),
         }
         for tool in TOOLS:
@@ -730,7 +730,7 @@ def text_files(package: str) -> dict[str, str]:
         for destination, source in THEME_FILES.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
         return files
-    if package == "portlin-wallpapers":
+    if package == "portlin-desktop":
         return {
             "DEBIAN/control": render_control(
                 name=package,
@@ -752,7 +752,7 @@ def binary_files(package: str) -> dict[str, Path]:
         }
     if package == "portlin-runtime":
         return {"usr/share/portlin/logo.svg": RESOURCES / "runtime" / "logo.svg"}
-    if package == "portlin-wallpapers":
+    if package == "portlin-desktop":
         return {
             f"usr/share/backgrounds/portlin/portlin-{size}.png":
                 RESOURCES / "wallpapers" / f"portlin-{size}.png"
@@ -1404,7 +1404,7 @@ every stick written from one. As package payload it can be updated."
 - Test: `tests/test_package.py`
 
 **Interfaces:**
-- Produces: the six paths named by `package.binary_files("portlin-wallpapers")`.
+- Produces: the six paths named by `package.binary_files("portlin-desktop")`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1418,7 +1418,7 @@ def test_every_declared_binary_member_exists():
 
 
 def test_wallpapers_carry_every_declared_size():
-    destinations = package.binary_files("portlin-wallpapers")
+    destinations = package.binary_files("portlin-desktop")
     assert len(destinations) == len(package.WALLPAPER_SIZES)
     assert all(d.startswith("usr/share/backgrounds/portlin/") for d in destinations)
 ```
@@ -1539,8 +1539,14 @@ Expected: PASS.
 
 - [ ] **Step 8: Commit**
 
+`out/` is gitignored and has no tracked files, so the render script cannot be
+committed and must not be staged. The generator stays a local tool; this task's
+tracked deliverable is the rendered PNGs, the logo, the keyring placeholder and
+the packaging metadata.
+
 ```bash
-git add out/brand/render.sh pyproject.toml portlin/resources/wallpapers tests/test_package.py
+git add pyproject.toml portlin/resources/wallpapers portlin/resources/runtime/logo.svg \
+        portlin/resources/keyring tests/test_package.py
 git commit -m "feat(brand): render and ship six wallpaper sizes
 
 One 1920x1080 canvas at six device scale factors, from 1366x768 to 8K.
@@ -1685,7 +1691,7 @@ def _build_and_install_packages(chroot: Chroot) -> None:
     if not _has_desktop(chroot):
         # 14 MB of wallpaper on a --minimal stick with no desktop to show it.
         # Recommends rather than Depends is what makes leaving it out legal.
-        names.remove("portlin-wallpapers")
+        names.remove("portlin-desktop")
 
     for name in names:
         root = f"{staging}/{name}"
@@ -1843,8 +1849,7 @@ the script exits on. Read those two lines and a nearby assertion before writing
 these, and match the surrounding style.
 
 ```bash
-chroot "$MNT" dpkg-query -W -f='${Status}' portlin-runtime 2>/dev/null \
-    | grep -q "install ok installed" \
+test -f "$MNT/var/lib/dpkg/info/portlin-runtime.list" \
     && pass "portlin-runtime is installed" \
     || fail "portlin-runtime is not installed (no updates will reach this stick)"
 
