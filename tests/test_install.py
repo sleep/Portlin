@@ -11,9 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from portlin import install
+from portlin import package as pkg
 from portlin.config import WriteConfig
 from portlin.errors import TargetError
-from portlin.install import write_stick
+from portlin.install import assemble_package, write_stick
 from portlin.layout import GIB
 from portlin.runner import Runner
 
@@ -497,3 +499,72 @@ class TestProgressSignals:
         tar = " ".join(self.t.command_at("tar", "-xf"))
         assert "--checkpoint=2000" in tar
         assert "--checkpoint-action=echo" in tar
+
+
+class TestPackageAssemblyIsShared:
+    def test_write_stick_routes_package_assembly_through_the_shared_helper(
+        self, plain_config, runner, monkeypatch
+    ):
+        # Guards against the assembly logic being duplicated again: if
+        # _build_and_install_packages ever inlines its own write/copy/build
+        # loop instead of calling assemble_package, this stops seeing calls
+        # and the assertion below catches it.
+        seen = []
+        monkeypatch.setattr(
+            install, "assemble_package", lambda name, **kwargs: seen.append(name)
+        )
+        write_stick(plain_config, runner)
+        assert seen == list(pkg.PACKAGES)
+
+
+class TestAssemblePackage:
+    """The one place a package's tree turns into a .deb.
+
+    Exercised against fakes here, independent of both callers, so a break in
+    the shared helper itself is caught without needing a chroot or a host
+    dpkg-deb.
+    """
+
+    def test_writes_every_text_file_with_the_right_mode(self):
+        written = {}
+        assemble_package(
+            "portlin-runtime",
+            write=lambda relative, content, mode: written.__setitem__(
+                relative, (content, mode)
+            ),
+            copy=lambda relative, source: None,
+            build=lambda: None,
+        )
+        assert written["DEBIAN/control"][1] == 0o644
+        assert written["usr/bin/portlin-info"][1] == 0o755
+
+    def test_copies_every_binary_file(self):
+        copied = {}
+        assemble_package(
+            "portlin-desktop",
+            write=lambda relative, content, mode: None,
+            copy=lambda relative, source: copied.__setitem__(relative, source),
+            build=lambda: None,
+        )
+        assert copied == pkg.binary_files("portlin-desktop")
+
+    def test_builds_after_writing_and_copying(self):
+        order = []
+        assemble_package(
+            "portlin-archive-keyring",
+            write=lambda relative, content, mode: order.append(("write", relative)),
+            copy=lambda relative, source: order.append(("copy", relative)),
+            build=lambda: order.append(("build",)),
+        )
+        assert order[-1] == ("build",)
+
+    def test_threads_the_requested_version_into_control(self):
+        written = {}
+        assemble_package(
+            "portlin-runtime",
+            write=lambda relative, content, mode: written.__setitem__(relative, content),
+            copy=lambda relative, source: None,
+            build=lambda: None,
+            version="3.1.4",
+        )
+        assert "Version: 3.1.4" in written["DEBIAN/control"]

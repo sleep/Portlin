@@ -76,6 +76,32 @@ def test_every_package_has_a_control_file(name):
     assert "DEBIAN/control" in package.text_files(name)
 
 
+@pytest.mark.parametrize("name", package.PACKAGES)
+def test_text_files_defaults_to_the_local_version(name):
+    control = package.text_files(name)["DEBIAN/control"]
+    assert f"Version: {package.local_version()}" in control
+
+
+@pytest.mark.parametrize("name", package.PACKAGES)
+def test_text_files_stamps_the_requested_version_onto_control(name):
+    # A CI release build stamps a real version onto content this module still
+    # renders with the ~local suffix by default, so the version has to be
+    # threaded into render_control rather than patched into rendered text.
+    control = package.text_files(name, version="2.5.1")["DEBIAN/control"]
+    assert "Version: 2.5.1" in control
+    assert package.local_version() not in control
+
+
+@pytest.mark.parametrize("name", package.PACKAGES)
+def test_requested_version_touches_only_the_control_file(name):
+    # Nothing else in a package's tree names a version, so a version string
+    # must never show up anywhere but DEBIAN/control.
+    files = package.text_files(name, version="2.5.1")
+    for relative, content in files.items():
+        if relative != "DEBIAN/control":
+            assert "2.5.1" not in content, relative
+
+
 def test_runtime_ships_the_shared_device_lookup_module():
     # Two of the three tools need to find the disk or partition backing the
     # root filesystem, and this is the one place that logic is written down.

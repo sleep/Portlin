@@ -109,9 +109,16 @@ def render_sources_entry() -> str:
     )
 
 
-def text_files(package: str) -> dict[str, str]:
-    """Text members of a package, keyed by path relative to the package root."""
-    version = local_version()
+def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
+    """Text members of a package, keyed by path relative to the package root.
+
+    ``version`` stamps the ``DEBIAN/control`` file, so a CI release build can
+    render the same tree as ``write`` does but with a real version instead of
+    the ``~local`` default. It is threaded straight into ``render_control``
+    rather than substituted into rendered text afterward, so the only file
+    that can ever carry a version string is the one that is supposed to.
+    """
+    version = version or local_version()
     if package == "portlin-archive-keyring":
         return {
             "DEBIAN/control": render_control(

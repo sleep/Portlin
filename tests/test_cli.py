@@ -7,6 +7,7 @@ import pytest
 from portlin import cli
 from portlin.errors import AbortedError, PortlinError, TargetError
 from portlin.layout import GIB
+from portlin.runner import Runner
 
 
 class TestParseSize:
@@ -160,3 +161,32 @@ class TestMain:
         cli.main(["--dry-run", "package", "--output", str(tmp_path)])
         out = capsys.readouterr().out
         assert out.count("dpkg-deb --build") == 3
+
+
+class TestPackageSubcommand:
+    def test_stamps_the_requested_version_onto_control(self, tmp_path, monkeypatch):
+        # A real (non-dry-run) Runner so write_file actually lands on disk;
+        # dpkg-deb itself is stubbed out, since this host may not have it.
+        runner = Runner(dry_run=False)
+        monkeypatch.setattr(runner, "run", lambda argv, **kwargs: None)
+        args = argparse.Namespace(output=tmp_path, version="7.0.0")
+
+        cli.cmd_package(args, runner)
+
+        control = (tmp_path / "portlin-runtime" / "DEBIAN" / "control").read_text()
+        assert "Version: 7.0.0" in control
+
+    def test_routes_assembly_through_the_shared_helper(self, tmp_path, monkeypatch):
+        # Guards against cmd_package growing its own write/copy/build loop
+        # again instead of calling install.assemble_package: if it did, this
+        # stops seeing calls and the assertion below catches it.
+        seen = []
+        monkeypatch.setattr(
+            cli.install, "assemble_package", lambda name, **kwargs: seen.append(name)
+        )
+        runner = Runner(dry_run=True)
+        args = argparse.Namespace(output=tmp_path, version=None)
+
+        cli.cmd_package(args, runner)
+
+        assert seen == list(cli.pkg.PACKAGES)

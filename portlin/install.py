@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -475,6 +476,31 @@ def _has_desktop(chroot: Chroot) -> bool:
     )
 
 
+def assemble_package(
+    name: str,
+    *,
+    write: Callable[[str, str, int], None],
+    copy: Callable[[str, Path], None],
+    build: Callable[[], None],
+    version: str | None = None,
+) -> None:
+    """Lay out one package's tree and build it, against either a chroot or the host.
+
+    The one place text_files/binary_files/executable_paths turn into a .deb,
+    so that a package this shares with ``cmd_package`` (built on the host, for
+    CI) and one built here in a chroot (for ``write``) can never drift apart
+    by having their assembly written twice. ``write``, ``copy`` and ``build``
+    are the only place the two callers differ: where the tree gets written to
+    and how dpkg-deb gets invoked against it.
+    """
+    for relative, content in pkg.text_files(name, version=version).items():
+        mode = 0o755 if relative in pkg.executable_paths(name) else 0o644
+        write(relative, content, mode)
+    for relative, source in pkg.binary_files(name).items():
+        copy(relative, source)
+    build()
+
+
 def _build_and_install_packages(chroot: Chroot) -> None:
     """Assemble portlin's own packages in the chroot and install them.
 
@@ -493,12 +519,18 @@ def _build_and_install_packages(chroot: Chroot) -> None:
 
     for name in names:
         root = f"{staging}/{name}"
-        for relative, content in pkg.text_files(name).items():
-            mode = 0o755 if relative in pkg.executable_paths(name) else 0o644
-            chroot.write_file(f"{root}/{relative}", content, mode=mode)
-        for relative, source in pkg.binary_files(name).items():
-            chroot.runner.copy_file(source, chroot.root / root / relative)
-        chroot.run(["dpkg-deb", "--build", f"/{root}", f"/{staging}/{name}.deb"])
+        assemble_package(
+            name,
+            write=lambda relative, content, mode, root=root: chroot.write_file(
+                f"{root}/{relative}", content, mode=mode
+            ),
+            copy=lambda relative, source, root=root: chroot.runner.copy_file(
+                source, chroot.root / root / relative
+            ),
+            build=lambda root=root, name=name: chroot.run(
+                ["dpkg-deb", "--build", f"/{root}", f"/{staging}/{name}.deb"]
+            ),
+        )
 
     # One transaction, so the dependencies between these three resolve against
     # each other. There is no network here and no archive to fall back on.

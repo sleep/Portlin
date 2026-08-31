@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 from . import devices, install, preflight, rootfs
+from . import package as pkg
 from .config import (
     DEFAULT_MIRROR,
     DEFAULT_SECURITY_MIRROR,
@@ -211,23 +212,28 @@ def cmd_create(args: argparse.Namespace, runner: Runner) -> int:
 def cmd_package(args: argparse.Namespace, runner: Runner) -> int:
     """Build the runtime packages without writing a stick.
 
-    Shared with the write path through portlin.package, so that a package
-    published by CI and one built locally can never be assembled by two
-    different code paths.
+    Assembly is shared with the write path through install.assemble_package,
+    so that a package published by CI and one built locally can never be laid
+    out by two different code paths. Only where the tree gets written to and
+    how dpkg-deb is invoked differs: here, directly on the host, rather than
+    inside write's chroot.
     """
-    from . import package as pkg
-
-    output = Path(args.output)
-    version = args.version or pkg.local_version()
+    output = args.output
     for name in pkg.PACKAGES:
         root = output / name
-        for relative, content in pkg.text_files(name).items():
-            mode = 0o755 if relative in pkg.executable_paths(name) else 0o644
-            content = content.replace(pkg.local_version(), version)
-            runner.write_file(root / relative, content, mode=mode)
-        for relative, source in pkg.binary_files(name).items():
-            runner.copy_file(source, root / relative)
-        runner.run(["dpkg-deb", "--build", str(root), str(output / f"{name}.deb")])
+        install.assemble_package(
+            name,
+            write=lambda relative, content, mode, root=root: runner.write_file(
+                root / relative, content, mode=mode
+            ),
+            copy=lambda relative, source, root=root: runner.copy_file(
+                source, root / relative
+            ),
+            build=lambda root=root, name=name: runner.run(
+                ["dpkg-deb", "--build", str(root), str(output / f"{name}.deb")]
+            ),
+            version=args.version,
+        )
     print(f"packages written to {output}")
     return 0
 
