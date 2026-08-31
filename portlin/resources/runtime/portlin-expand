@@ -17,6 +17,7 @@ forced: partition, then LUKS mapping, then filesystem.
 
 from __future__ import annotations
 
+import getpass
 import os
 import subprocess
 import sys
@@ -24,11 +25,11 @@ from pathlib import Path
 
 sys.path.insert(0, "/usr/lib/portlin")
 
-from devices import backing_partition  # noqa: E402
+from devices import backing_partition, command_output, root_source  # noqa: E402
 
 
-def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(argv, capture_output=True, text=True)
+def run(argv: list[str], *, check: bool = True, stdin: str | None = None) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, capture_output=True, text=True, input=stdin)
     if check and proc.returncode != 0:
         raise SystemExit(
             f"portlin-expand: {' '.join(argv)} failed:\n{proc.stderr.strip()}"
@@ -36,19 +37,15 @@ def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return proc
 
 
-def _out(argv: list[str]) -> str:
-    return subprocess.run(
-        argv, capture_output=True, text=True, check=False
-    ).stdout.strip()
-
-
-def _root_source() -> str:
-    return _out(["findmnt", "-no", "SOURCE", "/"])
-
-
 def _split_partition(partition: str) -> tuple[str, str]:
-    """Split a partition kernel name into its disk and its number."""
-    disk = _out(["lsblk", "-no", "PKNAME", f"/dev/{partition}"])
+    """Split a partition kernel name into its disk and its number.
+
+    -d (no-deps) matters on an encrypted stick: without it, lsblk lists the
+    whole subtree rooted at the partition, including the open LUKS mapping on
+    top of it, and PKNAME comes back as two lines instead of one -- the mapper
+    device's own PKNAME (the partition itself) glued onto the partition's.
+    """
+    disk = command_output(["lsblk", "-dno", "PKNAME", f"/dev/{partition}"])
     if not disk:
         raise SystemExit(f"portlin-expand: cannot find the disk behind {partition}")
     number = partition[len(disk):].lstrip("p")
@@ -60,7 +57,7 @@ def main() -> int:
         print("portlin-expand must be run as root.", file=sys.stderr)
         return 1
 
-    source = _root_source()
+    source = root_source()
     if not source:
         print("portlin-expand: cannot determine the root device.", file=sys.stderr)
         return 1
@@ -70,7 +67,11 @@ def main() -> int:
     disk, number = _split_partition(partition)
 
     print(f"Growing {source} to fill {disk}.")
-    answer = input("This cannot be undone, but it does not destroy data. [y/N] ")
+    try:
+        answer = input("This cannot be undone, but it does not destroy data. [y/N] ")
+    except EOFError:
+        print("\nNo input available; nothing was changed.")
+        return 0
     if answer.strip().lower() not in {"y", "yes"}:
         print("Nothing was changed.")
         return 0
@@ -81,10 +82,43 @@ def main() -> int:
     if result.returncode != 0 and "NOCHANGE" not in result.stdout:
         raise SystemExit(f"portlin-expand: growpart failed:\n{result.stderr.strip()}")
 
+    # Unlike the wizard, which returns immediately when growpart reports
+    # NOCHANGE, this keeps going: a partition that already fills the drive can
+    # still have an unresized mapping or filesystem left over from an
+    # interrupted expansion, and repairing that is exactly what this tool is
+    # for.
     if encrypted:
-        # Without a terminal cryptsetup silently prompts for a passphrase and
-        # hangs; the mapping is already open, so it needs no key material.
-        run(["cryptsetup", "resize", Path(source).name])
+        name = Path(source).name
+        # cryptsetup normally takes the volume key from the kernel keyring,
+        # but when it is not there it quietly falls back to prompting for the
+        # passphrase. That prompt is legitimate here: unlike the wizard, which
+        # draws whiptail dialogs on tty1 before a shell exists, this tool
+        # always runs interactively at a terminal someone is sitting in front
+        # of. Try the keyring first, and ask only if that fails.
+        resize = run(["cryptsetup", "resize", name], check=False)
+        if resize.returncode != 0:
+            for _ in range(3):
+                try:
+                    passphrase = getpass.getpass(
+                        "Enter this drive's passphrase to finish expanding it: "
+                    )
+                except EOFError:
+                    break
+                if not passphrase:
+                    break
+                resize = run(
+                    ["cryptsetup", "resize", "--key-file", "-", name],
+                    check=False,
+                    stdin=passphrase,
+                )
+                if resize.returncode == 0:
+                    break
+                print("That passphrase was not accepted.")
+            if resize.returncode != 0:
+                raise SystemExit(
+                    "portlin-expand: could not resize the encrypted mapping:\n"
+                    f"{resize.stderr.strip()}"
+                )
 
     run(["resize2fs", source])
     print("Done. Run portlin-info to see the new size.")
