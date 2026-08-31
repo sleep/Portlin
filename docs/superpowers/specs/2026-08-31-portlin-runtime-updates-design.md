@@ -89,15 +89,32 @@ when the desktop package group is present.
 The Xfce theme conffiles, plus six renders of the wallpaper at 16:9, roughly
 11.9 MB in total.
 
-- `/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/{xsettings,xfwm4,xfce4-desktop}.xml`
-- `/etc/xdg/gtk-3.0/settings.ini`, `/etc/xdg/gtk-4.0/settings.ini`
-- `/etc/xdg/xfce4/terminal/terminalrc`
+- `/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/{xsettings,xfwm4,xfce4-desktop}.xml`
+- `/etc/xdg/xdg-portlin/gtk-3.0/settings.ini`, `/etc/xdg/xdg-portlin/gtk-4.0/settings.ini`
+- `/etc/xdg/xdg-portlin/xfce4/terminal/terminalrc`
+- `/etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs`
 - `/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf`
+
+The defaults sit in a directory of portlin's own rather than at the canonical
+`/etc/xdg` locations, because dpkg permits exactly one installed package to own
+a path and `xfce4-settings` already ships `xsettings.xml` there. Claiming it
+aborts the whole apt transaction at unpack, which takes the other two packages
+down with it; a conffiles declaration is no exemption, and `--force-confnew`
+governs conffile prompts rather than ownership. Everything under `/etc/xdg` is
+resolved through `XDG_CONFIG_DIRS`, so the session snippet prepends the overlay
+to it and republishes it with `dbus-update-activation-environment --systemd`.
+That second step is not optional: `xfconfd` is a D-Bus activated user service,
+started from the activation environment rather than inheriting the session's.
+Debian's own `55xfce4-session` does the same for `XDG_DATA_DIRS`.
+
+The greeter configuration stays outside the overlay because it is not an XDG
+path: lightdm reads its own directory, and the greeter runs before any session
+has set `XDG_CONFIG_DIRS`.
 
 The files under `/etc` become dpkg conffiles, and that is the correct semantics
 rather than a problem to engineer around. xfconf writes a user's own settings to
-`~/.config/xfce4`, never to `/etc/xdg`, so these files are only ever modified by
-someone who edited them deliberately. Preserving such an edit across an upgrade
+`~/.config/xfce4`, never to a system config directory, so these files are only
+ever modified by someone who edited them deliberately. Preserving such an edit across an upgrade
 is the desired behaviour, and the conffile prompt that accompanies it is the
 honest signal that portlin's default and the local file have diverged.
 

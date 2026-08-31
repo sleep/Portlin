@@ -215,7 +215,38 @@ def test_desktop_ships_every_theme_file():
     files = package.text_files("portlin-desktop")
     for destination in package.THEME_FILES:
         assert destination in files, destination
-    assert "Greybird-dark" in files["etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"]
+    assert "Greybird-dark" in files[
+        f"{package.XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+    ]
+
+
+def test_desktop_ships_its_xdg_defaults_only_under_its_own_overlay():
+    # dpkg refuses to let two installed packages own the same path, and a
+    # conffiles declaration buys no exemption: xfce4-settings already ships
+    # etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml, so shipping it
+    # there aborts the entire apt transaction that installs portlin. Anything
+    # under /etc/xdg is found through XDG_CONFIG_DIRS, so portlin's defaults
+    # go in a directory only portlin ships and the session is told to search
+    # it. Asserted over every path rather than that one file, because a future
+    # Debian can start shipping any of the others.
+    files = package.text_files("portlin-desktop")
+    outside = sorted(
+        path for path in files
+        if path.startswith("etc/xdg/") and not path.startswith(f"{package.XDG_OVERLAY}/")
+    )
+    assert outside == []
+
+
+def test_desktop_puts_its_overlay_on_the_session_config_search_path():
+    # The overlay is inert unless something adds it to XDG_CONFIG_DIRS, and
+    # exporting it into the session shell alone is not enough: xfconfd is a
+    # D-Bus activated user service, so it is started from the activation
+    # environment rather than inheriting the session's. Debian's own
+    # 55xfce4-session does exactly this dance for XDG_DATA_DIRS.
+    snippet = package.text_files("portlin-desktop")[package.XSESSION_SNIPPET]
+    assert f"/{package.XDG_OVERLAY}" in snippet
+    assert "XDG_CONFIG_DIRS" in snippet
+    assert "dbus-update-activation-environment" in snippet
 
 
 def test_theme_files_are_not_executable():
@@ -244,12 +275,14 @@ def test_wallpapers_carry_every_declared_size():
     assert all(d.startswith("usr/share/backgrounds/portlin/") for d in destinations)
 
 
-def test_desktop_declares_exactly_its_seven_etc_paths_as_conffiles():
+def test_desktop_declares_exactly_its_eight_etc_paths_as_conffiles():
     # Without this member dpkg treats these /etc files as ordinary package
-    # files and overwrites a locally-edited one silently on every upgrade.
+    # files and overwrites a locally-edited one silently on every upgrade. The
+    # session snippet is counted here too: an admin who has tuned the search
+    # path has as much right to keep that edit as one who has tuned a theme.
     files = package.text_files("portlin-desktop")
     conffiles = files["DEBIAN/conffiles"].splitlines()
-    assert len(conffiles) == 7
+    assert len(conffiles) == 8
     assert set(conffiles) == {f"/{destination}" for destination in package.THEME_FILES}
 
 

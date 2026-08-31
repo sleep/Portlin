@@ -268,6 +268,18 @@ if test -x "$MNT/usr/bin/startxfce4"; then
     test -d "$MNT/usr/share/backgrounds/portlin" \
         && pass "portlin-desktop wallpapers are installed" \
         || fail "portlin-desktop wallpapers are missing (portlin-desktop did not install)"
+
+    test -f "$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" \
+        && pass "the theme defaults are in the xdg directory portlin owns" \
+        || fail "the theme defaults are missing from /etc/xdg/xdg-portlin"
+
+    # Both halves, because either one alone is silent. The defaults are inert
+    # unless the session searches that directory, and a stick whose desktop
+    # merely looks wrong says nothing about which half went missing.
+    grep -q xdg-portlin \
+        "$MNT/etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs" 2>/dev/null \
+        && pass "the session puts portlin's xdg directory on XDG_CONFIG_DIRS" \
+        || fail "nothing puts /etc/xdg/xdg-portlin on XDG_CONFIG_DIRS"
 else
     echo "  (skip) portlin-desktop wallpapers: this is a headless image"
 fi

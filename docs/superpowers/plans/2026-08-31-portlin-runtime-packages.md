@@ -622,14 +622,34 @@ PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
 TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
 
+# Corrected after this plan was executed. The listing below originally put the
+# theme defaults at the canonical /etc/xdg locations, and a real build then
+# failed at unpack: dpkg permits exactly one installed package to own a path,
+# xfce4-settings already ships xsettings.xml there, and the refusal aborted the
+# whole apt transaction, taking all three packages down and leaving the stick
+# unwritten. A conffiles declaration is no exemption, and --force-confnew
+# governs conffile prompts rather than ownership. The defaults therefore live
+# in an overlay directory portlin owns, which the session snippet puts on
+# XDG_CONFIG_DIRS. scripts/test-package-conflicts.py holds that in place.
+XDG_OVERLAY = "etc/xdg/xdg-portlin"
+
+XSESSION_SNIPPET = "etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs"
+
+# Keyed by path relative to a config root rather than by full destination, so
+# these can only ever be written inside XDG_OVERLAY.
+XDG_DEFAULTS = {
+    "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": "xsettings.xml",
+    "xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": "xfwm4.xml",
+    "xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml": "xfce4-desktop.xml",
+    "gtk-3.0/settings.ini": "gtk-3.0-settings.ini",
+    "gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
+    "xfce4/terminal/terminalrc": "terminalrc",
+}
+
 THEME_FILES = {
-    "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": "xsettings.xml",
-    "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": "xfwm4.xml",
-    "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml": "xfce4-desktop.xml",
-    "etc/xdg/gtk-3.0/settings.ini": "gtk-3.0-settings.ini",
-    "etc/xdg/gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
-    "etc/xdg/xfce4/terminal/terminalrc": "terminalrc",
+    **{f"{XDG_OVERLAY}/{relative}": source for relative, source in XDG_DEFAULTS.items()},
     "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": "50-portlin.conf",
+    XSESSION_SNIPPET: "xdg-config-dirs.sh",
 }
 
 WALLPAPER_SIZES = [
@@ -1427,7 +1447,9 @@ def test_runtime_ships_every_theme_file():
     files = package.text_files("portlin-runtime")
     for destination in package.THEME_FILES:
         assert destination in files, destination
-    assert "Greybird-dark" in files["etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"]
+    assert "Greybird-dark" in files[
+        f"{package.XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+    ]
 
 
 def test_theme_files_are_not_executable():
@@ -1982,7 +2004,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-THEME = "etc/xdg/xfce4/terminal/terminalrc"
+THEME = "etc/xdg/xdg-portlin/xfce4/terminal/terminalrc"
 
 
 def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:

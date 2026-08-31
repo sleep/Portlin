@@ -34,14 +34,37 @@ PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
 TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
 
+# dpkg lets exactly one installed package own a path, so portlin's system
+# defaults cannot live at the canonical /etc/xdg locations: xfce4-settings
+# already ships xsettings.xml there, and unpacking over it aborts the whole
+# apt transaction. Everything under /etc/xdg is looked up through
+# XDG_CONFIG_DIRS, so the defaults go in a directory only portlin ships and
+# the session snippet below puts that directory on the search path.
+XDG_OVERLAY = "etc/xdg/xdg-portlin"
+
+# Sourced before the session starts, and the only thing that makes XDG_OVERLAY
+# more than a directory of unread files.
+XSESSION_SNIPPET = "etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs"
+
+# Keyed by path relative to a config root rather than by full destination, so
+# these can only ever be written inside XDG_OVERLAY.
+XDG_DEFAULTS = {
+    "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": "xsettings.xml",
+    "xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": "xfwm4.xml",
+    "xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml": "xfce4-desktop.xml",
+    "gtk-3.0/settings.ini": "gtk-3.0-settings.ini",
+    "gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
+    "xfce4/terminal/terminalrc": "terminalrc",
+}
+
+# Every file portlin-desktop ships under /etc, by destination. The greeter
+# configuration stays outside the overlay because it is not an XDG path:
+# lightdm reads its own directory, and the greeter runs before any session has
+# set XDG_CONFIG_DIRS.
 THEME_FILES = {
-    "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": "xsettings.xml",
-    "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": "xfwm4.xml",
-    "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml": "xfce4-desktop.xml",
-    "etc/xdg/gtk-3.0/settings.ini": "gtk-3.0-settings.ini",
-    "etc/xdg/gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
-    "etc/xdg/xfce4/terminal/terminalrc": "terminalrc",
+    **{f"{XDG_OVERLAY}/{relative}": source for relative, source in XDG_DEFAULTS.items()},
     "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": "50-portlin.conf",
+    XSESSION_SNIPPET: "xdg-config-dirs.sh",
 }
 
 KEYRING_FILE = RESOURCES / "keyring" / "portlin-archive-keyring.gpg"

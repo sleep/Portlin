@@ -34,8 +34,12 @@ REPO = Path(__file__).resolve().parent.parent
 # Two different theme conffiles, one per scenario, so that touching the
 # installed copy of one for the "locally modified" case can never be mistaken
 # for interference with the other's "left alone" case.
-UNMODIFIED = "etc/xdg/xfce4/terminal/terminalrc"
-LOCALLY_MODIFIED = "etc/xdg/gtk-3.0/settings.ini"
+# Both live under the overlay directory portlin-desktop owns, because dpkg
+# lets only one installed package own a path and the canonical /etc/xdg
+# locations belong to Xfce's own packages.
+OVERLAY = "etc/xdg/xdg-portlin"
+UNMODIFIED = f"{OVERLAY}/xfce4/terminal/terminalrc"
+LOCALLY_MODIFIED = f"{OVERLAY}/gtk-3.0/settings.ini"
 
 
 def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:

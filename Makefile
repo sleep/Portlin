@@ -40,18 +40,19 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The four that exercise real devices. Each one caught a bug that unit tests
-# structurally cannot: they run the shipped scripts and commands against real
-# block devices. test-expand.py runs twice more here than the other three: once
-# each for the wizard's own apply_expand and for the packaged portlin-expand
-# command, because the tier rule keeps them as two separate implementations
-# that can drift, and both need real-device coverage.
+# The five that exercise what a unit test structurally cannot see: the shipped
+# scripts and commands against real block devices, and portlin's own packages
+# against a real dpkg. Each one caught a bug the unit tests could not. Of the
+# five, test-expand.py runs four times: the tier rule keeps the wizard's
+# apply_expand and the packaged portlin-expand as two separate implementations
+# that can drift, so both need real-device coverage, encrypted and not.
 harness:
 	docker run --rm --privileged --platform linux/amd64 -v "$$PWD:/src" -w /src \
 	  debian:trixie bash -c 'export DEBIAN_FRONTEND=noninteractive; \
 	  apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 	    python3 gdisk e2fsprogs cryptsetup-bin util-linux mount coreutils \
 	    dmsetup cloud-guest-utils dpkg-dev >/dev/null; \
+	  python3 -u scripts/test-package-conflicts.py && \
 	  python3 -u scripts/test-encrypt-hook.py && \
 	  python3 -u scripts/test-expand.py && \
 	  python3 -u scripts/test-expand.py --encrypt && \

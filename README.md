@@ -70,8 +70,10 @@ The image ships at 8 GB no matter how big the stick is, so one image fits every 
 is fast. On first boot it offers to expand into the rest.
 
 The Xfce desktop is dark out of the box: Greybird-dark across GTK, window decorations, the LightDM
-greeter and the terminal. The defaults live in `/etc/xdg`, so Settings > Appearance still changes
-them and the change sticks.
+greeter and the terminal. The defaults live in `/etc/xdg/xdg-portlin`, which the session adds to
+`XDG_CONFIG_DIRS`, so Settings > Appearance still changes them and the change sticks. They sit in
+a directory of their own because dpkg lets only one installed package own a path, and Xfce's own
+packages already own the canonical `/etc/xdg` locations.
 
 ## Updates
 
@@ -103,7 +105,7 @@ device.
 
 ```
 make image     # build a real image, with progress
-make test      # 473 unit tests, no root, no Linux, ~1s
+make test      # 478 unit tests, no root, no Linux, ~1s
 make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker
