@@ -101,7 +101,7 @@ device.
 
 ```
 make image     # build a real image, with progress
-make test      # 440 unit tests, no root, no Linux, ~1s
+make test      # 443 unit tests, no root, no Linux, ~1s
 make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker
