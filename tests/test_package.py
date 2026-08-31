@@ -107,3 +107,34 @@ def test_expand_tool_resizes_in_the_only_order_that_works():
     source = package.text_files("portlin-runtime")["usr/bin/portlin-expand"]
     assert source.index("growpart") < source.index("cryptsetup")
     assert source.index("cryptsetup") < source.index("resize2fs")
+
+
+def test_encrypt_tool_refuses_without_the_frozen_finaliser():
+    # The frozen tier of a stick written before the finaliser existed cannot be
+    # brought forward, so the tool must detect its absence rather than arm an
+    # encryption nothing on that stick can complete.
+    source = package.text_files("portlin-runtime")["usr/bin/portlin-encrypt"]
+    assert "/usr/local/sbin/portlin-finalise-encryption" in source
+
+
+def test_encrypt_tool_does_not_encrypt_anything_itself():
+    # All the dangerous work stays in the frozen, harness-tested initramfs
+    # script. This tool only sets the flag that wakes it up.
+    source = package.text_files("portlin-runtime")["usr/bin/portlin-encrypt"]
+    assert "reencrypt" not in source
+    assert "luksFormat" not in source
+    assert "portlin.encrypt=ask" in source
+
+
+def test_info_and_expand_use_the_shared_device_module_not_a_hand_copy():
+    # A hand-written /sys/class/block lookup has already reached a USB stick
+    # once in this project's history: it resolves the mapper alias for an
+    # encrypted root, which sysfs never created because cryptsetup made a real
+    # device node there instead of a udev symlink. Both tools must import the
+    # shared lookup in usr/lib/portlin/devices.py rather than repeat that bug.
+    files = package.text_files("portlin-runtime")
+    for tool in ("usr/bin/portlin-info", "usr/bin/portlin-expand"):
+        source = files[tool]
+        assert "/sys/class/block" not in source
+        assert "/usr/lib/portlin" in source
+        assert "from devices import" in source

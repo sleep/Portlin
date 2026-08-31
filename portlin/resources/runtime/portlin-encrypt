@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Encrypt a portlin stick that was written without --encrypt.
+
+This tool encrypts nothing. The work happens in the initramfs on the next
+boot, before the root filesystem is mounted, because a filesystem cannot be
+shrunk and re-encrypted underneath a running system. That script is installed
+on every stick, is covered by scripts/test-encrypt-hook.py against real block
+devices, and does nothing at all unless portlin.encrypt=ask is on the kernel
+command line.
+
+So all this does is set the flag, having first checked that the stick can
+finish what it starts.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+FINALISER = Path("/usr/local/sbin/portlin-finalise-encryption")
+DEFAULT_GRUB = Path("/etc/default/grub")
+FLAG = "portlin.encrypt=ask"
+
+
+def _out(argv: list[str]) -> str:
+    return subprocess.run(
+        argv, capture_output=True, text=True, check=False
+    ).stdout.strip()
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("portlin-encrypt must be run as root.", file=sys.stderr)
+        return 1
+
+    source = _out(["findmnt", "-no", "SOURCE", "/"])
+    if source.startswith("/dev/mapper/"):
+        print("This stick is already encrypted.")
+        return 0
+
+    if not FINALISER.exists():
+        # The finaliser is frozen tier: it is written by portlin at write time
+        # and cannot be delivered by an update. A stick predating it would be
+        # encrypted by the initramfs with nothing left to write its crypttab,
+        # and would need its passphrase typed by hand on every boot.
+        print(
+            "This stick was written by a portlin too old to finish an\n"
+            "encryption started later. Encrypting it now would leave it\n"
+            "unable to record the result.\n\n"
+            "Write the stick again with a current portlin and --encrypt.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not DEFAULT_GRUB.exists():
+        print("portlin-encrypt: /etc/default/grub is missing.", file=sys.stderr)
+        return 1
+
+    text = DEFAULT_GRUB.read_text()
+    if FLAG in text:
+        print("Encryption is already armed. Reboot to begin.")
+        return 0
+
+    print(
+        "This will encrypt the root filesystem of this stick during the next\n"
+        "boot, before the desktop starts. You will be asked to choose a\n"
+        "passphrase then, and for it on every boot afterwards.\n\n"
+        "It takes a while and it must not be interrupted. Back up anything\n"
+        "you cannot lose first, and do not do this on battery."
+    )
+    if input("Arm encryption for the next boot? [y/N] ").strip().lower() not in {
+        "y",
+        "yes",
+    }:
+        print("Nothing was changed.")
+        return 0
+
+    updated = []
+    for line in text.splitlines():
+        if line.startswith("GRUB_CMDLINE_LINUX_DEFAULT=") and FLAG not in line:
+            head, _, tail = line.rpartition('"')
+            line = f'{head} {FLAG}"{tail}' if head else line
+        updated.append(line)
+    DEFAULT_GRUB.write_text("\n".join(updated) + "\n")
+
+    result = subprocess.run(["update-grub"], capture_output=True, text=True)
+    if result.returncode != 0:
+        DEFAULT_GRUB.write_text(text)
+        print(
+            f"portlin-encrypt: update-grub failed, nothing was armed:\n"
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("\nArmed. Reboot when you are ready.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
