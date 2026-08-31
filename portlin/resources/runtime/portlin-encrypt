@@ -12,8 +12,13 @@ on every stick, is covered by scripts/test-encrypt-hook.py against real block
 devices, and does nothing at all unless portlin.encrypt=ask is on the kernel
 command line.
 
-So all this does is set the flag, having first checked that the stick can
-finish what it starts.
+write() arms that flag on every stick it writes without --encrypt, so on
+almost every stick this tool ever runs on, the flag is already present --
+that is the ordinary case, not evidence that this tool has run before. So
+mostly what this does is show the warning nobody has seen yet, confirm, and
+offer to reboot into the encryption that is already armed. It arms the flag
+itself only on the rarer stick where it is genuinely missing, having first
+checked that the stick can finish what it starts.
 """
 
 from __future__ import annotations
@@ -23,15 +28,30 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import root_source  # noqa: E402
+
 FINALISER = Path("/usr/local/sbin/portlin-finalise-encryption")
 DEFAULT_GRUB = Path("/etc/default/grub")
 FLAG = "portlin.encrypt=ask"
 
+WARNING = (
+    "This will encrypt the root filesystem of this stick during the next\n"
+    "boot, before the desktop starts. You will be asked to choose a\n"
+    "passphrase then, and for it on every boot afterwards.\n\n"
+    "It takes a while and it must not be interrupted. Back up anything\n"
+    "you cannot lose first, and do not do this on battery."
+)
 
-def _out(argv: list[str]) -> str:
-    return subprocess.run(
-        argv, capture_output=True, text=True, check=False
-    ).stdout.strip()
+
+def _confirm(prompt: str) -> bool:
+    try:
+        answer = input(prompt)
+    except EOFError:
+        print("\nNo input available; nothing was changed.")
+        return False
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def main() -> int:
@@ -39,7 +59,7 @@ def main() -> int:
         print("portlin-encrypt must be run as root.", file=sys.stderr)
         return 1
 
-    source = _out(["findmnt", "-no", "SOURCE", "/"])
+    source = root_source()
     if source.startswith("/dev/mapper/"):
         print("This stick is already encrypted.")
         return 0
@@ -63,21 +83,19 @@ def main() -> int:
         return 1
 
     text = DEFAULT_GRUB.read_text()
+    print(WARNING)
+
     if FLAG in text:
-        print("Encryption is already armed. Reboot to begin.")
+        # Nothing left to write: the flag is already there, so the only
+        # action left is the reboot that starts the encryption.
+        if not _confirm("\nReboot now to begin? [y/N] "):
+            print("Nothing was changed.")
+            return 0
+        print("\nRebooting.")
+        subprocess.run(["reboot"])
         return 0
 
-    print(
-        "This will encrypt the root filesystem of this stick during the next\n"
-        "boot, before the desktop starts. You will be asked to choose a\n"
-        "passphrase then, and for it on every boot afterwards.\n\n"
-        "It takes a while and it must not be interrupted. Back up anything\n"
-        "you cannot lose first, and do not do this on battery."
-    )
-    if input("Arm encryption for the next boot? [y/N] ").strip().lower() not in {
-        "y",
-        "yes",
-    }:
+    if not _confirm("\nArm encryption for the next boot? [y/N] "):
         print("Nothing was changed.")
         return 0
 
