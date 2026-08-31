@@ -110,11 +110,14 @@ class Display:
     BAR_WIDTH = 26
     MIN_REDRAW_INTERVAL = 0.1
 
-    def __init__(self, timeline: progress.Timeline, header: list[str], stream=sys.stdout):
+    def __init__(self, timeline: progress.Timeline, header: list[str], stream=None):
         self.timeline = timeline
         self.header = header
-        self.stream = stream
-        self.interactive = stream.isatty() and os.environ.get("TERM") != "dumb"
+        # Resolved now rather than defaulted in the signature: a default
+        # argument binds sys.stdout at import time, so anything that replaces
+        # the stream afterwards is written straight past.
+        self.stream = stream if stream is not None else sys.stdout
+        self.interactive = self.stream.isatty() and os.environ.get("TERM") != "dumb"
         self.theme = Theme(self.interactive and "NO_COLOR" not in os.environ)
         self.unicode_ok = "UTF-8" in (os.environ.get("LANG", "") + os.environ.get("LC_ALL", "")).upper()
         self.log: list[str] = []
@@ -123,9 +126,14 @@ class Display:
         self._last_paint = 0.0
         self._last_stage: str | None = None
 
-    def add_log(self, line: str) -> None:
+    def add_log(self, line: str, echo: bool = False) -> None:
         self.log.append(line)
         del self.log[:-self.LOG_LINES]
+        # The verify stage's output is the verdict on the whole build, so it is
+        # the one thing worth printing even when there is no terminal to draw
+        # in. Everything else would just be apt's chatter in a log file.
+        if echo and not self.interactive:
+            print(line, file=self.stream, flush=True)
 
     def refresh(self, force: bool = False) -> None:
         if not self.interactive:
@@ -237,6 +245,11 @@ class Display:
     def finish(self, message: str, ok: bool = True) -> None:
         if self.interactive:
             self.refresh(force=True)
+        elif not ok:
+            # Without a terminal the log pane was never drawn, so a failure
+            # would otherwise end with a verdict and no evidence behind it.
+            for line in self.log:
+                print("  " + line, file=self.stream, flush=True)
         colour = Theme.PAPER if ok else Theme.ACCENT
         print("\n" + self.theme("  " + message, colour) + "\n", file=self.stream, flush=True)
 
@@ -276,7 +289,7 @@ class BuildWatcher:
         elif current in ("tarball", "unpack"):
             self._tar(line)
         else:
-            self.display.add_log(line)
+            self.display.add_log(line, echo=current == "verify")
 
         self.display.refresh()
 
@@ -444,7 +457,9 @@ def build(args: argparse.Namespace) -> int:
         write_stick(write_cfg, runner)
 
         timeline.start("verify")
-        runner.run(["bash", str(REPO / "scripts" / "verify-image.sh"), str(image)], check=False)
+        verified = runner.run(
+            ["bash", str(REPO / "scripts" / "verify-image.sh"), str(image)], check=False
+        )
         timeline.finish()
     except KeyboardInterrupt:
         display.finish("interrupted. Nothing was written to any device.", ok=False)
@@ -455,8 +470,17 @@ def build(args: argparse.Namespace) -> int:
 
     elapsed = time.monotonic() - started
     # Only a complete build produces usable timings; a partial one would teach
-    # the next run's estimate that the build is much shorter than it is.
+    # the next run's estimate that the build is much shorter than it is. Saved
+    # even when verification fails, because the durations are still real.
     progress.save_timings(timings_path, timeline.durations())
+
+    if not verified.ok:
+        # The image is left in place: it is usually nearly right, and inspecting
+        # it is how the failure gets diagnosed. But calling it ready would be a
+        # lie, and this is the one line anyone actually reads.
+        display.finish(f"{image} was written, but verification FAILED", ok=False)
+        return 1
+
     display.finish(f"{image} ready in {progress.format_duration(elapsed)}")
     return 0
 

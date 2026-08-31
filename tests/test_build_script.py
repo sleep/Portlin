@@ -157,3 +157,68 @@ class TestHeader:
         rendered = "\n".join(header)
         for character in ("█", "┌", "│", "·"):
             assert character not in rendered
+
+
+class TestVerificationResult:
+    """The last line of a build is the only one most people read.
+
+    verify-image.sh runs with check=False, because a failed verification should
+    still leave the image on disk to be inspected rather than raising through
+    the display. That makes it easy to drop the result on the floor, which
+    would mean announcing a bad image as ready.
+    """
+
+    @pytest.fixture
+    def build_args(self, script, tmp_path):
+        return script.main.__globals__["argparse"].Namespace(
+            out_dir=tmp_path / "out", name="portlin", suite="trixie",
+            image_size="8G", minimal=True, keep=False,
+        )
+
+    @pytest.fixture
+    def stub_pipeline(self, script, monkeypatch):
+        """Run build() without building anything, with a settable verify result."""
+        outcome = {"ok": True}
+
+        monkeypatch.setattr(script, "build_rootfs", lambda cfg, runner: cfg.output)
+        monkeypatch.setattr(script, "write_stick", lambda cfg, runner: None)
+
+        class FakeResult:
+            @property
+            def ok(self):
+                return outcome["ok"]
+
+        class FakeRunner:
+            def __init__(self, **kwargs):
+                pass
+
+            def run(self, argv, **kwargs):
+                return FakeResult()
+
+        monkeypatch.setattr(script, "Runner", FakeRunner)
+        return outcome
+
+    def test_a_failed_verification_is_not_announced_as_ready(
+        self, script, build_args, stub_pipeline, capsys
+    ):
+        stub_pipeline["ok"] = False
+        assert script.build(build_args) == 1
+        output = capsys.readouterr().out
+        assert "FAILED" in output
+        assert "ready" not in output
+
+    def test_a_passing_verification_reports_success(
+        self, script, build_args, stub_pipeline, capsys
+    ):
+        assert script.build(build_args) == 0
+        assert "ready in" in capsys.readouterr().out
+
+    def test_timings_are_kept_even_when_verification_fails(
+        self, script, build_args, stub_pipeline
+    ):
+        # The durations were really measured; only the verdict on the image is
+        # in doubt. Throwing them away would make the next ETA worse for no
+        # reason.
+        stub_pipeline["ok"] = False
+        script.build(build_args)
+        assert (build_args.out_dir / script.TIMINGS_FILE).exists()
