@@ -147,56 +147,6 @@ class TestPackageSelection:
         assert "tmux" in trace(runner).command_at("apt-get", "install")
 
 
-class TestDesktopTheme:
-    """Where the theme defaults land matters as much as what they say.
-
-    /etc/xdg is xfconf's documented system-default search path: the settings
-    apply to every account without being copied into any home directory, and
-    xfconf only writes to ~/.config once someone changes something. /etc/skel
-    would freeze the same values into each home at useradd time instead, which
-    both misses accounts made later and makes the defaults unrevisable.
-    """
-
-    def test_theme_defaults_are_system_wide_not_copied_into_homes(self, built):
-        assert built.has(
-            "write-file", "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
-        )
-        assert not built.has("write-file", "etc/skel")
-
-    def test_window_manager_gets_its_own_channel(self, built):
-        assert built.has(
-            "write-file", "etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
-        )
-
-    def test_covers_gtk3_and_gtk4(self, built):
-        assert built.has("write-file", "etc/xdg/gtk-3.0/settings.ini")
-        assert built.has("write-file", "etc/xdg/gtk-4.0/settings.ini")
-
-    def test_the_greeter_is_configured_by_drop_in_not_by_conffile(self, built):
-        # lightdm-gtk-greeter.conf is a dpkg conffile; overwriting it would make
-        # every later upgrade of the greeter prompt about local changes.
-        assert built.has(
-            "write-file", "etc/lightdm/lightdm-gtk-greeter.conf.d/10-portlin.conf"
-        )
-        assert not built.has("write-file", "etc/lightdm/lightdm-gtk-greeter.conf ")
-
-    def test_the_terminal_gets_a_matching_scheme(self, built):
-        assert built.has("write-file", "etc/xdg/xfce4/terminal/terminalrc")
-
-    def test_a_headless_build_gets_no_desktop_theme(self, tmp_path, runner, trace):
-        # Nothing on a headless stick reads these, and config for absent
-        # software is just a lie about what the image contains.
-        cfg = BuildConfig(
-            output=tmp_path / "r.tar.zst",
-            work_dir=tmp_path / "w",
-            groups=["boot", "system"],
-        )
-        build_rootfs(cfg, runner)
-        built = trace(runner)
-        assert not built.has("write-file", "xfce-perchannel-xml")
-        assert not built.has("write-file", "lightdm")
-
-
 class TestProgressSignals:
     """The build has to be able to say how far along it is.
 

@@ -138,3 +138,15 @@ def test_info_and_expand_use_the_shared_device_module_not_a_hand_copy():
         assert "/sys/class/block" not in source
         assert "/usr/lib/portlin" in source
         assert "from devices import" in source
+
+
+def test_runtime_ships_every_theme_file():
+    files = package.text_files("portlin-runtime")
+    for destination in package.THEME_FILES:
+        assert destination in files, destination
+    assert "Greybird-dark" in files["etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"]
+
+
+def test_theme_files_are_not_executable():
+    assert not (package.executable_paths("portlin-runtime")
+                & set(package.THEME_FILES))
