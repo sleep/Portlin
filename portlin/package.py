@@ -30,7 +30,7 @@ KEYRING_PATH = "/usr/share/keyrings/portlin-archive-keyring.gpg"
 
 # Build order: the keyring first, because the others are installed alongside it
 # in one apt transaction that has to resolve.
-PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-wallpapers"]
+PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
 TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
 
@@ -127,31 +127,32 @@ def text_files(package: str) -> dict[str, str]:
             "DEBIAN/control": render_control(
                 name=package,
                 version=version,
-                description="Portlin desktop integration and tools",
+                description="Portlin tools and the shared device module",
                 depends=[
                     "portlin-archive-keyring",
                     "python3",
                     "cloud-guest-utils",
                     "cryptsetup-bin",
                 ],
-                recommends=["portlin-wallpapers"],
+                recommends=["portlin-desktop"],
             ),
             "usr/lib/portlin/devices.py": (RESOURCES / "runtime" / "devices.py").read_text(),
         }
         for tool in TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
-        for destination, source in THEME_FILES.items():
-            files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
         return files
-    if package == "portlin-wallpapers":
-        return {
+    if package == "portlin-desktop":
+        files = {
             "DEBIAN/control": render_control(
                 name=package,
                 version=version,
-                description="Portlin desktop wallpapers",
+                description="Portlin desktop theme and wallpapers",
                 depends=[],
             ),
         }
+        for destination, source in THEME_FILES.items():
+            files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
+        return files
     raise KeyError(package)
 
 
@@ -165,7 +166,7 @@ def binary_files(package: str) -> dict[str, Path]:
         }
     if package == "portlin-runtime":
         return {"usr/share/portlin/logo.svg": RESOURCES / "runtime" / "logo.svg"}
-    if package == "portlin-wallpapers":
+    if package == "portlin-desktop":
         return {
             f"usr/share/backgrounds/portlin/portlin-{size}.png":
                 RESOURCES / "wallpapers" / f"portlin-{size}.png"

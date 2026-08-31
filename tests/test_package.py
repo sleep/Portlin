@@ -41,12 +41,12 @@ def test_control_omits_recommends_when_there_are_none():
     assert "Depends:" not in control
 
 
-def test_runtime_recommends_rather_than_depends_on_wallpapers():
-    # A --minimal stick has no desktop, so 14 MB of wallpaper must not be a
-    # hard dependency of the tools.
+def test_runtime_recommends_rather_than_depends_on_desktop():
+    # A --minimal stick has no desktop, so the theme and 14 MB of wallpaper
+    # must not be a hard dependency of the tools.
     control = package.text_files("portlin-runtime")["DEBIAN/control"]
-    assert "Recommends: portlin-wallpapers" in control
-    assert "portlin-wallpapers" not in control.split("Depends:")[1].split("\n")[0]
+    assert "Recommends: portlin-desktop" in control
+    assert "portlin-desktop" not in control.split("Depends:")[1].split("\n")[0]
 
 
 def test_sources_entry_pins_the_architecture():
@@ -140,13 +140,22 @@ def test_info_and_expand_use_the_shared_device_module_not_a_hand_copy():
         assert "from devices import" in source
 
 
-def test_runtime_ships_every_theme_file():
-    files = package.text_files("portlin-runtime")
+def test_desktop_ships_every_theme_file():
+    files = package.text_files("portlin-desktop")
     for destination in package.THEME_FILES:
         assert destination in files, destination
     assert "Greybird-dark" in files["etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"]
 
 
 def test_theme_files_are_not_executable():
-    assert not (package.executable_paths("portlin-runtime")
+    assert not (package.executable_paths("portlin-desktop")
                 & set(package.THEME_FILES))
+
+
+def test_runtime_carries_no_desktop_configuration():
+    # A --minimal stick installs portlin-runtime alone. Theme configuration
+    # for lightdm or xfconf in that package would misrepresent software the
+    # stick does not have, so it belongs only in portlin-desktop.
+    files = package.text_files("portlin-runtime")
+    assert not any(path.startswith("etc/xdg/") for path in files)
+    assert not any(path.startswith("etc/lightdm/") for path in files)
