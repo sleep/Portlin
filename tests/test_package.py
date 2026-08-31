@@ -159,3 +159,24 @@ def test_runtime_carries_no_desktop_configuration():
     files = package.text_files("portlin-runtime")
     assert not any(path.startswith("etc/xdg/") for path in files)
     assert not any(path.startswith("etc/lightdm/") for path in files)
+
+
+def test_every_declared_binary_member_exists():
+    for name in package.PACKAGES:
+        for destination, source in package.binary_files(name).items():
+            assert source.exists(), f"{source} is missing for {destination}"
+
+
+def test_wallpapers_carry_every_declared_size():
+    destinations = package.binary_files("portlin-desktop")
+    assert len(destinations) == len(package.WALLPAPER_SIZES)
+    assert all(d.startswith("usr/share/backgrounds/portlin/") for d in destinations)
+
+
+def test_keyring_package_carries_the_key_at_the_path_the_source_names():
+    # The Signed-By path in the apt source and the path the package installs
+    # the key to are the same string in two files, and apt fails silently on
+    # every update if they drift apart.
+    destinations = package.binary_files("portlin-archive-keyring")
+    assert package.KEYRING_PATH.lstrip("/") in destinations
+    assert package.KEYRING_PATH in package.render_sources_entry()

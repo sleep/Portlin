@@ -25,7 +25,13 @@ portlin = "portlin.cli:main"
 packages = ["portlin"]
 
 [tool.setuptools.package-data]
-portlin = ["resources/firstboot/*"]
+portlin = [
+    "resources/firstboot/*",
+    "resources/runtime/*",
+    "resources/runtime/theme/*",
+    "resources/wallpapers/*",
+    "resources/keyring/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
