@@ -11,12 +11,21 @@ written. It is the one that would have caught the malformed partx argument, the
 empty lsblk PKNAME on dm devices, and the udev-symlink assumption -- each of
 which instead reached a USB stick.
 
-    python3 scripts/test-expand.py [--encrypt]
+The wizard keeps its own copy of this logic (apply_expand), because it runs at
+first boot before any package can be installed, and the packaged tool
+(portlin-expand) is what everyone runs after that. The tier rule accepts that
+the two implementations can drift, which is exactly why --packaged drives the
+real shipped command through this same harness rather than only the wizard's
+copy of it.
+
+    python3 scripts/test-expand.py [--encrypt] [--packaged]
 """
 
 from __future__ import annotations
 
 import argparse
+import builtins
+import getpass
 import os
 import pathlib
 import re
@@ -26,6 +35,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 WIZARD = REPO / "portlin" / "resources" / "firstboot" / "portlin-firstboot"
+RUNTIME_DIR = REPO / "portlin" / "resources" / "runtime"
+TOOL = RUNTIME_DIR / "portlin-expand"
 PASSPHRASE = "expand-harness-passphrase"
 DISK = Path("/tmp/portlin-expand-test.img")
 DISK_SIZE = 32 * 1024**3
@@ -83,6 +94,41 @@ def wizard_functions() -> dict:
     return namespace
 
 
+def run_packaged_expand(root_device: str) -> int:
+    """Run the real shipped portlin-expand, exec'd from the file as written.
+
+    Unlike the wizard, portlin-expand finds the root through the shared
+    ``devices`` module rather than a copy of the same functions inlined into
+    this harness's namespace -- so redirecting its `findmnt -no SOURCE /` means
+    patching the ``subprocess`` name inside that already-imported module,
+    which every one of its functions reads at call time. RUNTIME_DIR is put on
+    sys.path in place of the /usr/lib/portlin the tool expects on a real stick.
+    """
+    if str(RUNTIME_DIR) not in sys.path:
+        sys.path.insert(0, str(RUNTIME_DIR))
+    import devices
+
+    original_subprocess = devices.subprocess
+    original_input = builtins.input
+    original_getpass = getpass.getpass
+    devices.subprocess = _RedirectedSubprocess(str(MOUNT), root_device)
+    # Answers the "This cannot be undone" confirmation. A passphrase is also
+    # primed in case cryptsetup falls back to prompting for one, whether or
+    # not the kernel keyring makes that fallback necessary here.
+    builtins.input = lambda prompt="": "y"
+    getpass.getpass = lambda prompt="": PASSPHRASE
+
+    try:
+        source = TOOL.read_text()
+        namespace: dict = {"__name__": "portlin_expand_under_test"}
+        exec(compile(source, str(TOOL), "exec"), namespace)
+        return namespace["main"]()
+    finally:
+        devices.subprocess = original_subprocess
+        builtins.input = original_input
+        getpass.getpass = original_getpass
+
+
 def filesystem_gib(device: str) -> float:
     dump = run(["dumpe2fs", "-h", device])
     blocks = re.search(r"Block count:\s+(\d+)", dump.stdout)
@@ -95,6 +141,10 @@ def filesystem_gib(device: str) -> float:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--encrypt", action="store_true")
+    parser.add_argument(
+        "--packaged", action="store_true",
+        help="drive the real portlin-expand command instead of the wizard's apply_expand",
+    )
     args = parser.parse_args()
 
     if os.geteuid() != 0 or sys.platform != "linux":
@@ -141,25 +191,37 @@ def main() -> int:
         before = filesystem_gib(root_device)
         print(f"== filesystem before: {before:.1f} GiB ==", flush=True)
 
-        namespace = wizard_functions()
-        # Point the wizard's discovery at this mount rather than the real root.
-        namespace["subprocess"] = _RedirectedSubprocess(str(MOUNT), root_device)
-
-        located = namespace["_root_devices"]()
-        print(f"  discovery -> {located}", flush=True)
         failures = []
-        if located is None:
-            failures.append("the wizard could not identify the root device")
+        expanded = False
+
+        if args.packaged:
+            print("== running the packaged portlin-expand ==", flush=True)
+            rc = run_packaged_expand(root_device)
+            if rc != 0:
+                failures.append(f"portlin-expand exited {rc}")
+            else:
+                expanded = True
         else:
-            disk, part, _ = located
-            free = namespace["_free_space_bytes"](disk, part)
-            print(f"  free space -> {free / 1024**3:.1f} GiB", flush=True)
-            if free < 20 * 1024**3:
-                failures.append(f"only {free / 1024**3:.1f} GiB seen free; expected ~24")
+            namespace = wizard_functions()
+            # Point the wizard's discovery at this mount rather than the real root.
+            namespace["subprocess"] = _RedirectedSubprocess(str(MOUNT), root_device)
 
-            print("== running apply_expand ==", flush=True)
-            namespace["apply_expand"]()
+            located = namespace["_root_devices"]()
+            print(f"  discovery -> {located}", flush=True)
+            if located is None:
+                failures.append("the wizard could not identify the root device")
+            else:
+                disk, part, _ = located
+                free = namespace["_free_space_bytes"](disk, part)
+                print(f"  free space -> {free / 1024**3:.1f} GiB", flush=True)
+                if free < 20 * 1024**3:
+                    failures.append(f"only {free / 1024**3:.1f} GiB seen free; expected ~24")
 
+                print("== running apply_expand ==", flush=True)
+                namespace["apply_expand"]()
+                expanded = True
+
+        if expanded:
             after = filesystem_gib(root_device)
             print(f"== filesystem after: {after:.1f} GiB ==", flush=True)
             if after < 25:
@@ -186,11 +248,12 @@ def main() -> int:
 
 
 class _RedirectedSubprocess:
-    """Makes the wizard's `findmnt /` answer with the test mount instead.
+    """Makes a `findmnt /` answer with the test mount instead of the real root.
 
-    Only that one question is redirected; every other command runs for real, so
-    the device walk, the sysfs reads and the three resize commands are exactly
-    the ones that run on a stick.
+    Shared by both the wizard and the packaged tool's discovery. Only that one
+    question is redirected; every other command runs for real, so the device
+    walk, the sysfs reads and the three resize commands are exactly the ones
+    that run on a stick.
     """
 
     def __init__(self, mountpoint: str, device: str) -> None:

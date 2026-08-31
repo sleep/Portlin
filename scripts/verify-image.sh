@@ -231,13 +231,24 @@ test -f "$MNT/var/lib/dpkg/info/portlin-runtime.list" \
     && pass "portlin-runtime is installed" \
     || fail "portlin-runtime is not installed (no updates will reach this stick)"
 
-test -f "$MNT/etc/apt/sources.list.d/portlin.sources" \
-    && pass "the portlin apt source is present" \
-    || fail "the portlin apt source is missing"
+# The keyring package ships its key and apt source together, and only once a
+# real signing key has been committed to the repository (portlin-archive-
+# keyring.gpg ships as a zero-byte placeholder until then). Asserting either
+# unconditionally would fail this check on every build made before that key
+# exists, for a reason that has nothing to do with the image.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KEYRING_PLACEHOLDER="$REPO_ROOT/portlin/resources/keyring/portlin-archive-keyring.gpg"
+if [[ -s "$KEYRING_PLACEHOLDER" ]]; then
+    test -f "$MNT/etc/apt/sources.list.d/portlin.sources" \
+        && pass "the portlin apt source is present" \
+        || fail "the portlin apt source is missing"
 
-test -f "$MNT/usr/share/keyrings/portlin-archive-keyring.gpg" \
-    && pass "the archive keyring is present" \
-    || fail "the archive keyring is missing (apt will reject the archive)"
+    test -s "$MNT/usr/share/keyrings/portlin-archive-keyring.gpg" \
+        && pass "the archive keyring is present" \
+        || fail "the archive keyring is missing or empty (apt will reject the archive)"
+else
+    echo "  (skip) apt source and archive keyring: no real signing key is committed yet"
+fi
 
 test -L "$MNT/etc/systemd/system/multi-user.target.wants/portlin-finalise-encryption.service" \
     && pass "the encryption finaliser is enabled" \
@@ -248,6 +259,10 @@ for tool in portlin-info portlin-expand portlin-encrypt; do
         && pass "$tool is executable" \
         || fail "$tool is missing or not executable"
 done
+
+test -d "$MNT/usr/share/backgrounds/portlin" \
+    && pass "portlin-desktop wallpapers are installed" \
+    || fail "portlin-desktop wallpapers are missing (portlin-desktop did not install)"
 
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
