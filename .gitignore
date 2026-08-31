@@ -11,3 +11,6 @@ out/
 *.img
 
 .DS_Store
+
+# Subagent-driven development scratch (ledgers, review packages)
+.superpowers/
