@@ -7,7 +7,27 @@ because this file ships onto a stick where only python3 is guaranteed.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
+
+
+def command_output(argv: list[str]) -> str:
+    """Run a command and return its stripped stdout, or "" if it is missing.
+
+    Shared by every tool that shells out to lsblk, findmnt and friends, so the
+    "command not found" handling is written once rather than copied into each.
+    """
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, check=False
+        ).stdout.strip()
+    except FileNotFoundError:
+        return ""
+
+
+def root_source() -> str:
+    """The device or mapper node findmnt reports as the source of ``/``."""
+    return command_output(["findmnt", "-no", "SOURCE", "/"])
 
 
 def sysfs_node(device: str) -> Path | None:
