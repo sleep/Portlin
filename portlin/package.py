@@ -120,7 +120,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
     """
     version = version or local_version()
     if package == "portlin-archive-keyring":
-        return {
+        files = {
             "DEBIAN/control": render_control(
                 name=package,
                 version=version,
@@ -129,7 +129,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             ),
             "etc/apt/sources.list.d/portlin.sources": render_sources_entry(),
         }
-    if package == "portlin-runtime":
+    elif package == "portlin-runtime":
         files = {
             "DEBIAN/control": render_control(
                 name=package,
@@ -147,8 +147,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         }
         for tool in TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
-        return files
-    if package == "portlin-desktop":
+    elif package == "portlin-desktop":
         files = {
             "DEBIAN/control": render_control(
                 name=package,
@@ -159,8 +158,19 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         }
         for destination, source in THEME_FILES.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
-        return files
-    raise KeyError(package)
+    else:
+        raise KeyError(package)
+
+    # dpkg only preserves a locally-edited file across an upgrade, or stays
+    # quiet about an untouched one, for paths it has been told are conffiles.
+    # Without this member every /etc file here is an ordinary package file,
+    # silently overwritten on every upgrade regardless of local edits. Derived
+    # from the files this package actually ships rather than a maintained
+    # list, so it cannot drift when a file is added or moved.
+    conffiles = sorted(path for path in files if path.startswith("etc/"))
+    if conffiles:
+        files["DEBIAN/conffiles"] = "".join(f"/{path}\n" for path in conffiles)
+    return files
 
 
 def binary_files(package: str) -> dict[str, Path]:

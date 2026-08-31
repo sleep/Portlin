@@ -199,6 +199,30 @@ def test_wallpapers_carry_every_declared_size():
     assert all(d.startswith("usr/share/backgrounds/portlin/") for d in destinations)
 
 
+def test_desktop_declares_exactly_its_seven_etc_paths_as_conffiles():
+    # Without this member dpkg treats these /etc files as ordinary package
+    # files and overwrites a locally-edited one silently on every upgrade.
+    files = package.text_files("portlin-desktop")
+    conffiles = files["DEBIAN/conffiles"].splitlines()
+    assert len(conffiles) == 7
+    assert set(conffiles) == {f"/{destination}" for destination in package.THEME_FILES}
+
+
+def test_keyring_declares_its_sources_entry_as_a_conffile():
+    # A user who points portlin.sources at a mirror must not lose that edit
+    # to the next apt update of the keyring package.
+    files = package.text_files("portlin-archive-keyring")
+    assert files["DEBIAN/conffiles"] == "/etc/apt/sources.list.d/portlin.sources\n"
+
+
+def test_runtime_ships_no_etc_files_and_declares_no_conffiles():
+    # portlin-runtime carries no /etc files (test_runtime_carries_no_desktop_
+    # configuration), so a DEBIAN/conffiles member here would either be empty
+    # or, worse, list paths the package does not actually ship.
+    files = package.text_files("portlin-runtime")
+    assert "DEBIAN/conffiles" not in files
+
+
 def test_keyring_package_carries_the_key_at_the_path_the_source_names():
     # The Signed-By path in the apt source and the path the package installs
     # the key to are the same string in two files, and apt fails silently on
