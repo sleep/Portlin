@@ -260,9 +260,17 @@ for tool in portlin-info portlin-expand portlin-encrypt; do
         || fail "$tool is missing or not executable"
 done
 
-test -d "$MNT/usr/share/backgrounds/portlin" \
-    && pass "portlin-desktop wallpapers are installed" \
-    || fail "portlin-desktop wallpapers are missing (portlin-desktop did not install)"
+# portlin-desktop carries the theme and the wallpapers, and write installs it only
+# when the rootfs actually has a desktop. Probing the same way install.py does,
+# rather than asserting unconditionally, keeps a --minimal image from failing a
+# check about software it was never meant to contain.
+if test -x "$MNT/usr/bin/startxfce4"; then
+    test -d "$MNT/usr/share/backgrounds/portlin" \
+        && pass "portlin-desktop wallpapers are installed" \
+        || fail "portlin-desktop wallpapers are missing (portlin-desktop did not install)"
+else
+    echo "  (skip) portlin-desktop wallpapers: this is a headless image"
+fi
 
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
