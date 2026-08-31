@@ -98,3 +98,12 @@ def test_info_tool_is_shipped_and_executable():
     files = package.text_files("portlin-runtime")
     assert files["usr/bin/portlin-info"].startswith("#!/usr/bin/env python3")
     assert "usr/bin/portlin-info" in package.executable_paths("portlin-runtime")
+
+
+def test_expand_tool_resizes_in_the_only_order_that_works():
+    # Each layer can only grow into space the layer beneath it has claimed, so
+    # the order is not a preference. Asserted on the source because the real
+    # behaviour is covered by the harness against a live device.
+    source = package.text_files("portlin-runtime")["usr/bin/portlin-expand"]
+    assert source.index("growpart") < source.index("cryptsetup")
+    assert source.index("cryptsetup") < source.index("resize2fs")

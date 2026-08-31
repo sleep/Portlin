@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Grow a portlin stick into the rest of its drive.
+
+The image ships at a fixed size so that one image fits every drive and the
+flash is quick, and the first-boot wizard offers to expand it. This is the
+same operation for someone who declined then, or who moved the system to a
+larger drive since.
+
+All three resizes run online, on the mounted running system. Each layer can
+only grow into space the layer beneath it has already claimed, so the order is
+forced: partition, then LUKS mapping, then filesystem.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import backing_partition  # noqa: E402
+
+
+def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        raise SystemExit(
+            f"portlin-expand: {' '.join(argv)} failed:\n{proc.stderr.strip()}"
+        )
+    return proc
+
+
+def _out(argv: list[str]) -> str:
+    return subprocess.run(
+        argv, capture_output=True, text=True, check=False
+    ).stdout.strip()
+
+
+def _root_source() -> str:
+    return _out(["findmnt", "-no", "SOURCE", "/"])
+
+
+def _split_partition(partition: str) -> tuple[str, str]:
+    """Split a partition kernel name into its disk and its number."""
+    disk = _out(["lsblk", "-no", "PKNAME", f"/dev/{partition}"])
+    if not disk:
+        raise SystemExit(f"portlin-expand: cannot find the disk behind {partition}")
+    number = partition[len(disk):].lstrip("p")
+    return f"/dev/{disk}", number
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("portlin-expand must be run as root.", file=sys.stderr)
+        return 1
+
+    source = _root_source()
+    if not source:
+        print("portlin-expand: cannot determine the root device.", file=sys.stderr)
+        return 1
+
+    encrypted = source.startswith("/dev/mapper/")
+    partition = backing_partition(source)
+    disk, number = _split_partition(partition)
+
+    print(f"Growing {source} to fill {disk}.")
+    answer = input("This cannot be undone, but it does not destroy data. [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        print("Nothing was changed.")
+        return 0
+
+    # growpart exits 1 with NOCHANGE when there is nothing to do, which is a
+    # success for us: it means the partition already fills the drive.
+    result = run(["growpart", disk, number], check=False)
+    if result.returncode != 0 and "NOCHANGE" not in result.stdout:
+        raise SystemExit(f"portlin-expand: growpart failed:\n{result.stderr.strip()}")
+
+    if encrypted:
+        # Without a terminal cryptsetup silently prompts for a passphrase and
+        # hangs; the mapping is already open, so it needs no key material.
+        run(["cryptsetup", "resize", Path(source).name])
+
+    run(["resize2fs", source])
+    print("Done. Run portlin-info to see the new size.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
