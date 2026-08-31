@@ -77,6 +77,11 @@ class TestImageConfiguration:
     def test_ships_the_grub_defaults(self, built):
         assert built.has("write-file", "etc/default/grub")
 
+    def test_does_not_stamp_the_version_at_build_time(self, built):
+        # The tarball is reusable for months, so a version stamped into it would
+        # describe the tarball rather than the stick written from it.
+        assert not built.has("write-file", "etc/portlin-release")
+
 
 class TestAnonymisation:
     def test_empties_machine_id_so_clones_are_not_twins(self, built):

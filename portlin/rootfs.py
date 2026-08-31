@@ -27,8 +27,6 @@ FIRSTBOOT_SENTINEL = "var/lib/portlin/firstboot-pending"
 FIRSTBOOT_SCRIPT = "usr/local/sbin/portlin-firstboot"
 FIRSTBOOT_UNIT = "etc/systemd/system/portlin-firstboot.service"
 
-VERSION = "0.1.0"
-
 
 def build_rootfs(cfg: BuildConfig, runner: Runner) -> Path:
     """Build the rootfs and return the path to the produced tarball."""
@@ -112,7 +110,6 @@ def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
     chroot.write_file("etc/cryptsetup-initramfs/conf-hook", templates.render_cryptsetup_hook_conf())
     chroot.write_file("etc/default/grub", templates.render_default_grub())
     chroot.write_file("etc/default/zramswap", templates.render_zram_conf())
-    chroot.write_file("etc/portlin-release", templates.render_os_release_extra(VERSION))
 
     chroot.write_file("etc/hostname", f"{cfg.hostname}\n")
     chroot.write_file(

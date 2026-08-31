@@ -103,6 +103,14 @@ class TestUnencryptedWrite:
         assert self.t.before(("grub-install", "--target=i386-pc"), ("grub-mkconfig",))
         assert self.t.before(("grub-install", "--target=x86_64-efi"), ("grub-mkconfig",))
 
+    def test_stamps_the_portlin_version_onto_the_target(self):
+        assert self.t.has("write-file", "etc/portlin-release")
+
+    def test_stamps_the_version_before_entering_the_chroot(self):
+        assert self.t.before(
+            ("write-file", "etc/portlin-release"), ("chroot", "update-initramfs")
+        )
+
     def test_removes_the_boot_splash(self):
         # plymouth owns the console during boot and plymouth-quit-wait can
         # deadlock against a display manager waiting on the wizard. It only ever

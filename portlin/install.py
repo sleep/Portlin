@@ -18,7 +18,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from . import crypto, templates
+from . import __version__, crypto, templates
 from .chroot import Chroot
 from .config import WriteConfig
 from .errors import TargetError
@@ -363,6 +363,13 @@ def _write_target_config(
     runner.write_file(
         mountpoint / "etc/default/grub",
         templates.render_default_grub(offer_encryption=not cfg.encrypt),
+    )
+    # Stamped here rather than during build: the rootfs tarball is reusable for
+    # months, so a version baked into it would describe the tarball rather than
+    # the stick, and the update channel needs a version it can trust.
+    runner.write_file(
+        mountpoint / "etc/portlin-release",
+        templates.render_os_release_extra(__version__),
     )
 
 
