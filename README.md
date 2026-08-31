@@ -80,10 +80,12 @@ and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
 the wallpapers and the `portlin-info`, `portlin-expand` and `portlin-encrypt`
-commands are Debian packages, and update from portlin's archive like anything
-else. The bootloader, the initramfs, `fstab` and `crypttab` are written once
-and stay put, because an update that breaks one of those is a stick that will
-not boot. Moving those forward means writing the stick again.
+commands are Debian packages, and will update from portlin's archive like
+anything else once that archive is published; until then they stay at
+whatever version the stick was written with. The bootloader, the initramfs,
+`fstab` and `crypttab` are written once and stay put, because an update that
+breaks one of those is a stick that will not boot. Moving those forward means
+writing the stick again.
 
 ## Safety
 
@@ -101,7 +103,7 @@ device.
 
 ```
 make image     # build a real image, with progress
-make test      # 443 unit tests, no root, no Linux, ~1s
+make test      # 473 unit tests, no root, no Linux, ~1s
 make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker

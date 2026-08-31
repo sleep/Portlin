@@ -849,79 +849,113 @@ change with the machine it is plugged into.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import backing_partition, command_output, root_source  # noqa: E402
+
 RELEASE = Path("/etc/portlin-release")
+OS_RELEASE = Path("/etc/os-release")
+
+# ext4 metadata -- the superblock, the block and inode group descriptors, the
+# inode tables and the journal -- claims roughly 2-3% of a filesystem's
+# nominal size, and an encrypted root's partition additionally holds a 16 MiB
+# LUKS header the filesystem never sees. 0.3 GB of slack comfortably covers
+# both without masking a real unclaimed gigabyte.
+PARTITION_SLACK_BYTES = 300_000_000
 
 
-def _out(argv: list[str]) -> str:
-    try:
-        return subprocess.run(
-            argv, capture_output=True, text=True, check=False
-        ).stdout.strip()
-    except FileNotFoundError:
-        return ""
-
-
-def _release() -> dict[str, str]:
-    if not RELEASE.exists():
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a simple KEY=value file, tolerating os-release's quoted values."""
+    if not path.exists():
         return {}
     values = {}
-    for line in RELEASE.read_text().splitlines():
-        if "=" in line:
-            key, _, value = line.partition("=")
-            values[key.strip()] = value.strip()
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"')
     return values
 
 
-def _root_source() -> str:
-    return _out(["findmnt", "-no", "SOURCE", "/"])
+def _release() -> dict[str, str]:
+    return _parse_env_file(RELEASE)
 
 
-def _backing_disk(source: str) -> str:
-    """The whole disk behind the root, following a mapping if there is one."""
-    name = Path(source).name
-    slaves = Path("/sys/class/block") / name / "slaves"
-    if slaves.is_dir():
-        entries = sorted(entry.name for entry in slaves.iterdir())
-        if entries:
-            name = entries[0]
-    return _out(["lsblk", "-no", "PKNAME", f"/dev/{name}"]) or name
+def _debian_description() -> str:
+    return _parse_env_file(OS_RELEASE).get("PRETTY_NAME", "unknown")
+
+
+def _backing_disk(partition: str) -> str:
+    """The whole disk behind ``partition``."""
+    return command_output(["lsblk", "-dno", "PKNAME", f"/dev/{partition}"]) or partition
+
+
+def _unclaimed_bytes(filesystem_bytes: int, partition_bytes: int) -> int:
+    """Bytes inside the partition that the filesystem has not claimed.
+
+    Compared against the partition rather than the whole disk: the fixed
+    partitions ahead of root are always a gap between the disk and the
+    partition, on every stick, expanded or not, and comparing against the
+    disk would nag about that gap forever.
+    """
+    return max(0, partition_bytes - filesystem_bytes - PARTITION_SLACK_BYTES)
 
 
 def main() -> int:
     release = _release()
-    source = _root_source()
+    source = root_source()
     encrypted = source.startswith("/dev/mapper/")
-    disk = _backing_disk(source)
+    partition = backing_partition(source)
+    disk = _backing_disk(partition) if partition else ""
 
     used = shutil.disk_usage("/")
     filesystem_gb = used.total / 1_000_000_000
-    disk_bytes = _out(["lsblk", "-bdno", "SIZE", f"/dev/{disk}"]) if disk else ""
-    drive_gb = int(disk_bytes) / 1_000_000_000 if disk_bytes.isdigit() else 0.0
+    partition_bytes_out = command_output(["lsblk", "-bdno", "SIZE", f"/dev/{partition}"]) if partition else ""
+    partition_bytes = int(partition_bytes_out) if partition_bytes_out.isdigit() else 0
+    disk_bytes_out = command_output(["lsblk", "-bdno", "SIZE", f"/dev/{disk}"]) if disk else ""
+    drive_gb = int(disk_bytes_out) / 1_000_000_000 if disk_bytes_out.isdigit() else 0.0
 
     print(f"portlin      {release.get('PORTLIN_VERSION', 'unknown')}")
-    print(f"debian       {_out(['lsb_release', '-ds']) or 'unknown'}")
+    print(f"debian       {_debian_description()}")
     print(f"root         {source}")
     print(f"encrypted    {'yes' if encrypted else 'no'}")
     print(f"drive        /dev/{disk}" if disk else "drive        unknown")
     print(f"filesystem   {filesystem_gb:.1f} GB")
     if drive_gb:
         print(f"capacity     {drive_gb:.1f} GB")
-        # A gigabyte of slack absorbs the partitions ahead of root and the
-        # filesystem's own overhead, so this does not nag about nothing.
-        if drive_gb - filesystem_gb > 1.0:
+    if partition_bytes:
+        unclaimed = _unclaimed_bytes(used.total, partition_bytes)
+        if unclaimed:
             print()
-            print("There is unused space on this drive. Run portlin-expand to claim it.")
-    print(f"booted on    {_out(['uname', '-n'])}, {_out(['uname', '-r'])}")
+            print(
+                f"There is {unclaimed / 1_000_000_000:.1f} GB of unused space on "
+                "this drive. Run portlin-expand to claim it."
+            )
+    print(f"booted on    {command_output(['uname', '-n'])}, {command_output(['uname', '-r'])}")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
 ```
+
+Note: this listing was corrected after a whole-branch review found three bugs
+in the original version: it compared the filesystem against the whole disk
+rather than the root partition, which nagged about unused space on every
+stick, expanded or not; it shelled out to `lsb_release`, which nothing
+installs, so `debian` always read `unknown`; and its `lsblk -no PKNAME` query
+was missing `-d` (no-deps), which on the ordinary case this runs against -- a
+live, mounted, encrypted stick, where an open LUKS mapping sits on top of the
+very partition being asked about -- returns two rows glued into one string
+instead of one. It now compares against the partition, reads `/etc/os-release`
+directly, queries lsblk with `-d`, and shares `backing_partition`/
+`command_output`/`root_source` with the other two tools via
+`usr/lib/portlin/devices.py` instead of a hand-rolled `/sys/class/block`
+lookup. Re-executing this task should start from that shared module and this
+corrected arithmetic.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -997,14 +1031,19 @@ forced: partition, then LUKS mapping, then filesystem.
 
 from __future__ import annotations
 
+import getpass
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, "/usr/lib/portlin")
 
-def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(argv, capture_output=True, text=True)
+from devices import backing_partition, command_output, root_source  # noqa: E402
+
+
+def run(argv: list[str], *, check: bool = True, stdin: str | None = None) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, capture_output=True, text=True, input=stdin)
     if check and proc.returncode != 0:
         raise SystemExit(
             f"portlin-expand: {' '.join(argv)} failed:\n{proc.stderr.strip()}"
@@ -1012,34 +1051,9 @@ def run(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return proc
 
 
-def _out(argv: list[str]) -> str:
-    return subprocess.run(
-        argv, capture_output=True, text=True, check=False
-    ).stdout.strip()
-
-
-def _root_source() -> str:
-    return _out(["findmnt", "-no", "SOURCE", "/"])
-
-
-def _backing_partition(source: str) -> str:
-    """Kernel name of the partition holding ``source``.
-
-    dm devices have no "device" link in sysfs, so lsblk -o PKNAME returns an
-    empty string for them. /sys/block/<dm>/slaves/ is the supported route.
-    """
-    name = Path(source).name
-    slaves = Path("/sys/class/block") / name / "slaves"
-    if slaves.is_dir():
-        entries = sorted(entry.name for entry in slaves.iterdir())
-        if entries:
-            return entries[0]
-    return name
-
-
 def _split_partition(partition: str) -> tuple[str, str]:
     """Split a partition kernel name into its disk and its number."""
-    disk = _out(["lsblk", "-no", "PKNAME", f"/dev/{partition}"])
+    disk = command_output(["lsblk", "-dno", "PKNAME", f"/dev/{partition}"])
     if not disk:
         raise SystemExit(f"portlin-expand: cannot find the disk behind {partition}")
     number = partition[len(disk):].lstrip("p")
@@ -1051,17 +1065,21 @@ def main() -> int:
         print("portlin-expand must be run as root.", file=sys.stderr)
         return 1
 
-    source = _root_source()
+    source = root_source()
     if not source:
         print("portlin-expand: cannot determine the root device.", file=sys.stderr)
         return 1
 
     encrypted = source.startswith("/dev/mapper/")
-    partition = _backing_partition(source)
+    partition = backing_partition(source)
     disk, number = _split_partition(partition)
 
     print(f"Growing {source} to fill {disk}.")
-    answer = input("This cannot be undone, but it does not destroy data. [y/N] ")
+    try:
+        answer = input("This cannot be undone, but it does not destroy data. [y/N] ")
+    except EOFError:
+        print("\nNo input available; nothing was changed.")
+        return 0
     if answer.strip().lower() not in {"y", "yes"}:
         print("Nothing was changed.")
         return 0
@@ -1072,10 +1090,43 @@ def main() -> int:
     if result.returncode != 0 and "NOCHANGE" not in result.stdout:
         raise SystemExit(f"portlin-expand: growpart failed:\n{result.stderr.strip()}")
 
+    # Unlike the wizard, which returns immediately when growpart reports
+    # NOCHANGE, this keeps going: a partition that already fills the drive can
+    # still have an unresized mapping or filesystem left over from an
+    # interrupted expansion, and repairing that is exactly what this tool is
+    # for.
     if encrypted:
-        # Without a terminal cryptsetup silently prompts for a passphrase and
-        # hangs; the mapping is already open, so it needs no key material.
-        run(["cryptsetup", "resize", Path(source).name])
+        name = Path(source).name
+        # cryptsetup normally takes the volume key from the kernel keyring,
+        # but when it is not there it quietly falls back to prompting for the
+        # passphrase. That prompt is legitimate here: unlike the wizard, which
+        # draws whiptail dialogs on tty1 before a shell exists, this tool
+        # always runs interactively at a terminal someone is sitting in front
+        # of. Try the keyring first, and ask only if that fails.
+        resize = run(["cryptsetup", "resize", name], check=False)
+        if resize.returncode != 0:
+            for _ in range(3):
+                try:
+                    passphrase = getpass.getpass(
+                        "Enter this drive's passphrase to finish expanding it: "
+                    )
+                except EOFError:
+                    break
+                if not passphrase:
+                    break
+                resize = run(
+                    ["cryptsetup", "resize", "--key-file", "-", name],
+                    check=False,
+                    stdin=passphrase,
+                )
+                if resize.returncode == 0:
+                    break
+                print("That passphrase was not accepted.")
+            if resize.returncode != 0:
+                raise SystemExit(
+                    "portlin-expand: could not resize the encrypted mapping:\n"
+                    f"{resize.stderr.strip()}"
+                )
 
     run(["resize2fs", source])
     print("Done. Run portlin-info to see the new size.")
@@ -1085,6 +1136,22 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 ```
+
+Note: this listing was corrected after a whole-branch review found the encrypted
+path unreachable in practice. The original comment above claimed cryptsetup
+"needs no key material" because the mapping was already open; in fact cryptsetup
+takes the volume key from the kernel keyring when it can, but silently falls
+back to prompting for the passphrase when it cannot, and the original code had
+no fallback -- it simply failed after growpart had already grown the partition.
+It now matches the wizard's `_resize_mapping`, tries the keyring first, and asks
+for the passphrase up to three times. It also now continues past a growpart
+NOCHANGE rather than returning early, so it can repair a stick whose partition
+already fills the drive but whose mapping or filesystem does not; queries lsblk
+with `-d` (no-deps) in `_split_partition`, without which an already-open LUKS
+mapping on the partition made `lsblk -no PKNAME` return two rows glued into one
+string, so growpart ran with an empty partition number; and shares
+`backing_partition`/`command_output`/`root_source` with the other two tools via
+`usr/lib/portlin/devices.py` instead of a hand-rolled `/sys/class/block` lookup.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
