@@ -13,72 +13,106 @@ change with the machine it is plugged into.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, "/usr/lib/portlin")
 
-from devices import backing_partition  # noqa: E402
+from devices import backing_partition, command_output, root_source  # noqa: E402
 
 RELEASE = Path("/etc/portlin-release")
+OS_RELEASE = Path("/etc/os-release")
+
+# ext4 metadata -- the superblock, the block and inode group descriptors, the
+# inode tables and the journal -- claims roughly 2-3% of a filesystem's
+# nominal size, and an encrypted root's partition additionally holds a 16 MiB
+# LUKS header the filesystem never sees. 0.3 GB of slack comfortably covers
+# both without masking a real unclaimed gigabyte.
+PARTITION_SLACK_BYTES = 300_000_000
 
 
-def _out(argv: list[str]) -> str:
-    try:
-        return subprocess.run(
-            argv, capture_output=True, text=True, check=False
-        ).stdout.strip()
-    except FileNotFoundError:
-        return ""
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a simple KEY=value file, tolerating os-release's quoted values.
 
-
-def _release() -> dict[str, str]:
-    if not RELEASE.exists():
+    /etc/portlin-release and /etc/os-release are both this shape, except
+    os-release wraps its values in double quotes -- PRETTY_NAME="Debian GNU/
+    Linux 13 (trixie)" -- which this strips so both files parse the same way.
+    """
+    if not path.exists():
         return {}
     values = {}
-    for line in RELEASE.read_text().splitlines():
-        if "=" in line:
-            key, _, value = line.partition("=")
-            values[key.strip()] = value.strip()
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"')
     return values
 
 
-def _root_source() -> str:
-    return _out(["findmnt", "-no", "SOURCE", "/"])
+def _release() -> dict[str, str]:
+    return _parse_env_file(RELEASE)
 
 
-def _backing_disk(source: str) -> str:
-    """The whole disk behind the root, following a mapping if there is one."""
-    partition = backing_partition(source)
-    return _out(["lsblk", "-no", "PKNAME", f"/dev/{partition}"]) or partition
+def _debian_description() -> str:
+    return _parse_env_file(OS_RELEASE).get("PRETTY_NAME", "unknown")
+
+
+def _backing_disk(partition: str) -> str:
+    """The whole disk behind ``partition``.
+
+    -d (no-deps) matters here: without it, lsblk lists the whole subtree
+    rooted at the partition, and on the ordinary case this runs against --
+    a live, mounted, encrypted stick, where an open LUKS mapping sits on top
+    of the very partition being asked about -- that is two rows instead of
+    one, and PKNAME comes back as two lines glued together by a newline.
+    """
+    return command_output(["lsblk", "-dno", "PKNAME", f"/dev/{partition}"]) or partition
+
+
+def _unclaimed_bytes(filesystem_bytes: int, partition_bytes: int) -> int:
+    """Bytes inside the partition that the filesystem has not claimed.
+
+    Comparing against the partition rather than the whole disk matters: the
+    fixed partitions ahead of root (see layout.GPT_OVERHEAD_MIB and friends)
+    are always a gap between the disk and the partition, on every stick,
+    expanded or not, and reporting unused space for that gap would nag
+    forever. This only reports space genuinely inside the root partition and
+    not yet claimed by its filesystem.
+    """
+    return max(0, partition_bytes - filesystem_bytes - PARTITION_SLACK_BYTES)
 
 
 def main() -> int:
     release = _release()
-    source = _root_source()
+    source = root_source()
     encrypted = source.startswith("/dev/mapper/")
-    disk = _backing_disk(source)
+    partition = backing_partition(source)
+    disk = _backing_disk(partition) if partition else ""
 
     used = shutil.disk_usage("/")
     filesystem_gb = used.total / 1_000_000_000
-    disk_bytes = _out(["lsblk", "-bdno", "SIZE", f"/dev/{disk}"]) if disk else ""
-    drive_gb = int(disk_bytes) / 1_000_000_000 if disk_bytes.isdigit() else 0.0
+    partition_bytes_out = command_output(["lsblk", "-bdno", "SIZE", f"/dev/{partition}"]) if partition else ""
+    partition_bytes = int(partition_bytes_out) if partition_bytes_out.isdigit() else 0
+    disk_bytes_out = command_output(["lsblk", "-bdno", "SIZE", f"/dev/{disk}"]) if disk else ""
+    drive_gb = int(disk_bytes_out) / 1_000_000_000 if disk_bytes_out.isdigit() else 0.0
 
     print(f"portlin      {release.get('PORTLIN_VERSION', 'unknown')}")
-    print(f"debian       {_out(['lsb_release', '-ds']) or 'unknown'}")
+    print(f"debian       {_debian_description()}")
     print(f"root         {source}")
     print(f"encrypted    {'yes' if encrypted else 'no'}")
     print(f"drive        /dev/{disk}" if disk else "drive        unknown")
     print(f"filesystem   {filesystem_gb:.1f} GB")
     if drive_gb:
         print(f"capacity     {drive_gb:.1f} GB")
-        # A gigabyte of slack absorbs the partitions ahead of root and the
-        # filesystem's own overhead, so this does not nag about nothing.
-        if drive_gb - filesystem_gb > 1.0:
+    if partition_bytes:
+        unclaimed = _unclaimed_bytes(used.total, partition_bytes)
+        if unclaimed:
             print()
-            print("There is unused space on this drive. Run portlin-expand to claim it.")
-    print(f"booted on    {_out(['uname', '-n'])}, {_out(['uname', '-r'])}")
+            print(
+                f"There is {unclaimed / 1_000_000_000:.1f} GB of unused space on "
+                "this drive. Run portlin-expand to claim it."
+            )
+    print(f"booted on    {command_output(['uname', '-n'])}, {command_output(['uname', '-r'])}")
     return 0
 
 
