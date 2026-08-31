@@ -1752,13 +1752,16 @@ a locally built one will drift apart.
 
 In `tests/test_cli.py`:
 
-```python
-def test_package_subcommand_builds_every_package(tmp_path, runner, trace):
-    from portlin.cli import main
+`cli.main` takes only an argv list and constructs its own `Runner` from
+`--dry-run`; it does not accept a runner argument. Tests in this file assert
+against `capsys`, because a dry run prints its command plan to stdout. Follow
+that existing idiom, visible in `TestMain` in the same file:
 
-    main(["package", "--output", str(tmp_path)], runner=runner)
-    t = trace(runner)
-    assert t.count("dpkg-deb", "--build") == 3
+```python
+def test_package_subcommand_builds_every_package(tmp_path, capsys):
+    cli.main(["--dry-run", "package", "--output", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert out.count("dpkg-deb --build") == 3
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1769,13 +1772,14 @@ Expected: FAIL with a SystemExit from argparse, `invalid choice: 'package'`.
 
 - [ ] **Step 3: Add the subcommand**
 
-Follow the existing subparser pattern in `portlin/cli.py`. The handler
+Follow the existing subparser pattern in `portlin/cli.py`. Name it `cmd_package` to match the existing `cmd_doctor`/`cmd_devices`/
+`cmd_build` handlers, which carry no leading underscore. The handler
 assembles each tree on the host with `runner.write_file` and
 `runner.copy_file`, then runs `dpkg-deb --build` on the host rather than in a
 chroot:
 
 ```python
-def _cmd_package(args, runner: Runner) -> int:
+def cmd_package(args: argparse.Namespace, runner: Runner) -> int:
     """Build the runtime packages without writing a stick.
 
     Shared with the write path through portlin.package, so that a package
