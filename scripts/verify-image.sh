@@ -23,6 +23,28 @@ if [[ "$(id -u)" != "0" ]]; then
     exit 2
 fi
 
+# Tools this script cannot do its job without. A missing one is an environment
+# problem, not a finding about the image, and the two must never be reported in
+# the same voice: without sgdisk the partition checks all report FAIL on a
+# perfectly good table, and without cryptsetup an encrypted stick reports as
+# plain and is then mounted as if it were.
+REQUIRED_TOOLS=(sgdisk cryptsetup losetup mount umount mountpoint mknod stat dd grep)
+
+require_tools() {
+    local missing=()
+    local tool
+    for tool in "${REQUIRED_TOOLS[@]}"; do
+        command -v "$tool" >/dev/null || missing+=("$tool")
+    done
+    if (( ${#missing[@]} )); then
+        printf 'verify-image.sh needs these and cannot find them: %s\n' \
+            "${missing[*]}" >&2
+        printf 'Refusing to run: an incomplete check reads as a verdict on the image.\n' >&2
+        exit 2
+    fi
+}
+require_tools
+
 if [[ -b "$IMAGE" ]]; then
     DEV="$IMAGE"
     DETACH=""
@@ -90,7 +112,11 @@ fi
 echo
 echo "Legacy BIOS boot path"
 # GRUB's stage 1 lives in the first sector and identifies itself in plain text.
-if dd if="$DEV" bs=512 count=1 status=none | strings | grep -q GRUB; then
+# grep reads the raw sector directly. -a keeps it from bailing out on the
+# surrounding machine code, and the C locale keeps the match byte-exact.
+# Piping through strings first would also work, but it pulls in binutils, which
+# no other check here needs and which base images do not carry.
+if dd if="$DEV" bs=512 count=1 status=none | LC_ALL=C grep -qa GRUB; then
     pass "GRUB boot code is present in the MBR"
 else
     fail "no GRUB boot code in the MBR"

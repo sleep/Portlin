@@ -42,7 +42,7 @@ if ! command -v sgdisk >/dev/null; then
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
         python3 gdisk parted dosfstools e2fsprogs cryptsetup-bin util-linux \
-        zstd tar mount coreutils binutils >/dev/null
+        zstd tar mount coreutils >/dev/null
 fi
 cd /src
 
