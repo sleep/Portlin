@@ -761,6 +761,20 @@ def binary_files(package: str) -> dict[str, Path]:
     raise KeyError(package)
 
 
+Every branch above falls through to a shared tail that derives the conffiles
+member, so it can never drift when files are added or moved:
+
+```python
+    # Hand-built packages get no conffiles for free. debhelper's dh_installdeb
+    # is what normally registers /etc files, and dpkg-deb does not. Without
+    # this member dpkg treats them as ordinary files and overwrites a user's
+    # edits silently on every upgrade.
+    conffiles = sorted(path for path in files if path.startswith("etc/"))
+    if conffiles:
+        files["DEBIAN/conffiles"] = "".join(f"/{path}\n" for path in conffiles)
+    return files
+```
+
 def executable_paths(package: str) -> set[str]:
     if package == "portlin-runtime":
         return {f"usr/bin/{tool}" for tool in TOOLS}
