@@ -461,6 +461,26 @@ class TestEncryptOnFirstBoot:
         assert "findmnt" in body
         assert "/dev/mapper/" in body
 
+    def test_the_device_lookup_helpers_have_not_drifted_from_the_wizard(self):
+        # The finaliser carries its own copy of _sysfs_node and _backing_partition
+        # rather than importing the wizard. A brief once respecified _sysfs_node
+        # with the plain resolve()-based lookup that only works under udev, which
+        # made finalisation silently fail on the exact boot it matters most: the
+        # one right after the initramfs created the container, with no udev yet.
+        # This pins the two copies together so they cannot drift apart again.
+        wizard = WIZARD.read_text()
+        finalise = FINALISE.read_text()
+
+        def function_body(source: str, name: str) -> str:
+            start = source.index(f"def {name}")
+            end = source.index("\ndef ", start + 1)
+            return source[start:end]
+
+        for name in ("_sysfs_node", "_backing_partition"):
+            assert function_body(wizard, name) == function_body(finalise, name), (
+                f"{name} has drifted between the wizard and the finaliser"
+            )
+
 
 class TestSystemdUnit:
     @pytest.fixture
