@@ -69,6 +69,10 @@ GPT, four partitions:
 The image ships at 8 GB no matter how big the stick is, so one image fits every drive and the flash
 is fast. On first boot it offers to expand into the rest.
 
+The Xfce desktop is dark out of the box: Greybird-dark across GTK, window decorations, the LightDM
+greeter and the terminal. The defaults live in `/etc/xdg`, so Settings > Appearance still changes
+them and the change sticks.
+
 ## Safety
 
 `write` erases whatever you point it at. Before it does:
@@ -89,7 +93,6 @@ make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker
 ```
-
 Unit tests run anywhere, including macOS, because every external command goes through one `Runner`
 that can record instead of execute. That makes `build_rootfs` and `write_stick` assertable as
 ordered command lists, which is where the real risk lives: a `crypttab` written after

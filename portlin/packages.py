@@ -113,6 +113,12 @@ DESKTOP = [
     "thunar-archive-plugin",
     "xarchiver",
     "desktop-base",
+    # The dark theme. GTK3 has Adwaita-dark built in and would cost nothing, but
+    # it has no xfwm4 counterpart, so the window decorations stay light around
+    # dark windows. Greybird-dark carries gtk-2.0, gtk-3.0 and xfwm4 variants
+    # under one name, which is what makes the desktop dark all the way to the
+    # title bar.
+    "greybird-gtk-theme",
     "xdg-utils",
 ]
 

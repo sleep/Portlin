@@ -91,3 +91,13 @@ class TestPortabilityRequirements:
 
     def test_no_swap_package_because_flash_wears_out(self):
         assert "zram-tools" in packages.resolve()
+
+
+class TestDesktopTheme:
+    def test_ships_a_theme_with_both_gtk_and_window_manager_variants(self):
+        # Xfce's built-in themes have no dark variant for xfwm4, so relying on
+        # GTK's built-in Adwaita-dark alone leaves the title bars light.
+        assert "greybird-gtk-theme" in packages.resolve()
+
+    def test_the_theme_is_desktop_only(self):
+        assert "greybird-gtk-theme" not in packages.resolve(packages.MINIMAL_GROUPS)

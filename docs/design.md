@@ -83,7 +83,7 @@ Each module has one job and a testable surface.
 |---|---|
 | `runner.py` | Single subprocess chokepoint. Records every command, supports dry-run, redacts secret stdin |
 | `layout.py` | Pure: target size -> partition plan, sgdisk argv, partition device paths |
-| `templates.py` | Pure: renders fstab, crypttab, `/etc/default/grub`, initramfs conf, sources.list |
+| `templates.py` | Pure: renders fstab, crypttab, `/etc/default/grub`, initramfs conf, sources.list, desktop theme defaults |
 | `devices.py` | Enumerates block devices from `lsblk -J`, evaluates target safety |
 | `target.py` | Uniform interface over a block device and a loop-mounted image file |
 | `chroot.py` | Bind-mount lifecycle, `policy-rc.d`, resolv.conf, command execution |

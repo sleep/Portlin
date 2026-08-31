@@ -159,6 +159,39 @@ def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
     chroot.run(["systemctl", "enable", "zramswap.service"], check=False)
     chroot.run(["systemctl", "enable", "NetworkManager.service"], check=False)
 
+    _configure_desktop(cfg, chroot)
+
+
+def _configure_desktop(cfg: BuildConfig, chroot: Chroot) -> None:
+    """Make the desktop dark by default.
+
+    Everything lands in /etc/xdg, which is where both xfconf and GTK look for
+    system defaults. That keeps the tarball anonymous in the same way the rest
+    of the build does: no home directory is touched, so these are defaults every
+    account inherits rather than values frozen into one user's config at the
+    moment the wizard created them. Changing the theme in Settings writes to
+    ~/.config as usual and wins from then on.
+
+    Skipped entirely for a headless build. None of this software is installed
+    there, and configuration for absent packages misrepresents what is in the
+    image.
+    """
+    if "xfce4" not in cfg.package_list():
+        return
+
+    xfconf = "etc/xdg/xfce4/xfconf/xfce-perchannel-xml"
+    chroot.write_file(f"{xfconf}/xsettings.xml", templates.render_xsettings_channel())
+    chroot.write_file(f"{xfconf}/xfwm4.xml", templates.render_xfwm4_channel())
+    chroot.write_file("etc/xdg/gtk-3.0/settings.ini", templates.render_gtk3_settings())
+    chroot.write_file("etc/xdg/gtk-4.0/settings.ini", templates.render_gtk4_settings())
+    chroot.write_file(
+        "etc/xdg/xfce4/terminal/terminalrc", templates.render_terminal_config()
+    )
+    chroot.write_file(
+        "etc/lightdm/lightdm-gtk-greeter.conf.d/10-portlin.conf",
+        templates.render_lightdm_greeter_conf(),
+    )
+
 
 def _anonymise(runner: Runner, chroot: Chroot) -> None:
     """Strip everything that would make two sticks from this tarball identical.
