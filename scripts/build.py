@@ -372,6 +372,77 @@ def describe_host() -> str:
     return f"{sys.platform}/{platform.machine()}"
 
 
+def _image_is_cached(image: str) -> bool:
+    """Whether docker already holds the image, so the wait can be named.
+
+    docker reports its own pull progress, but only once a pull has begun, and
+    nothing before that says a pull is what the silence is. On a first run this
+    is the longest wait in a build and the least explained.
+    """
+    return subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+
+
+def _step_helper() -> str:
+    """The shell function that prints one bootstrap milestone.
+
+    Deliberately mirrors progress.format_duration, which is what the display
+    uses for every stage it draws: a bootstrap that invented its own time
+    format would make the first lines of a build look like they came from
+    another program. SECONDS belongs to the shell docker starts, so it measures
+    the apt work rather than the image pull, which is announced on the host
+    side before the container exists.
+    """
+    return "\n".join(
+        [
+            "step() {",
+            "    _s=$SECONDS",
+            '    if [ "$_s" -lt 60 ]; then _t="${_s}s"',
+            '    elif [ "$_s" -lt 3600 ]; then _t=$(printf "%dm%02ds" $((_s / 60)) $((_s % 60)))',
+            '    else _t=$(printf "%dh%02dm" $((_s / 3600)) $((_s % 3600 / 60)))',
+            "    fi",
+            '    printf "  [%s] %s\\n" "$_t" "$1"',
+            "}",
+        ]
+    )
+
+
+def _bootstrap_script(args: argparse.Namespace) -> str:
+    """The shell that runs in the container before any display can exist.
+
+    Quiet by default, and narrated either way. This is the only part of a build
+    that cannot be drawn, because the thing that draws it is what is being
+    installed, and dpkg's "Setting up ..." lines would otherwise fill the
+    screen before the display appears. The milestones replace that output with
+    three lines, which is enough to tell a slow install from a hung one.
+    --verbose gives the apt output back to anyone debugging the bootstrap
+    itself. stderr is never redirected either way, so a real apt failure says
+    so whichever mode it is in.
+    """
+    quiet = "" if args.verbose else " -qq"
+    silence = "" if args.verbose else " >/dev/null"
+    return "\n".join(
+        [
+            "set -e",
+            "export DEBIAN_FRONTEND=noninteractive",
+            _step_helper(),
+            'step "apt-get update"',
+            f"apt-get update{quiet}{silence}",
+            f'step "installing {CONTAINER_BOOTSTRAP}"',
+            f"apt-get install -y{quiet} --no-install-recommends"
+            f" {CONTAINER_BOOTSTRAP}{silence}",
+            'step "handing over to the build display"',
+            " ".join(
+                ["python3", "-u", "/src/scripts/build.py", "--in-container"]
+                + _forwarded_flags(args)
+            ),
+        ]
+    )
+
+
 def run_in_container(args: argparse.Namespace) -> int:
     """Re-run this script inside a privileged linux/amd64 container."""
     if shutil.which("docker") is None:
@@ -385,22 +456,7 @@ def run_in_container(args: argparse.Namespace) -> int:
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Silenced deliberately. This is the only part of a build that cannot be
-    # drawn, because the thing that draws it is what is being installed, and
-    # dpkg's "Setting up ..." lines would otherwise fill the screen before the
-    # display appears. stderr is left alone, so a real apt failure still says so.
-    inner = "; ".join(
-        [
-            "set -e",
-            "export DEBIAN_FRONTEND=noninteractive",
-            "apt-get update -qq >/dev/null",
-            f"apt-get install -y -qq --no-install-recommends {CONTAINER_BOOTSTRAP} >/dev/null",
-            " ".join(
-                ["python3", "-u", "/src/scripts/build.py", "--in-container"]
-                + _forwarded_flags(args)
-            ),
-        ]
-    )
+    inner = _bootstrap_script(args)
 
     command = [
         "docker", "run", "--rm", "--name", "portlin-build",
@@ -414,13 +470,17 @@ def run_in_container(args: argparse.Namespace) -> int:
         command.append("-it")
     command += [CONTAINER_IMAGE, "bash", "-c", inner]
 
+    if _image_is_cached(CONTAINER_IMAGE):
+        pull = f"{CONTAINER_IMAGE} is cached locally"
+    else:
+        pull = f"pulling {CONTAINER_IMAGE}, which can take a few minutes on a first run"
+
     # flush: stdout is block-buffered when redirected to a log, and a line
     # that only appears when the build ends is no use to whoever is waiting.
     print(
         f"building in a {CONTAINER_IMAGE} linux/amd64 container "
         f"({describe_host()} cannot build directly)\n"
-        f"fetching the image and installing {CONTAINER_BOOTSTRAP}, "
-        "then the build display takes over",
+        f"  {pull}",
         flush=True,
     )
     return subprocess.run(command).returncode
@@ -600,6 +660,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-docker",
         action="store_true",
         help="refuse to fall back to a container; fail instead",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show the container bootstrap's apt output",
     )
     parser.add_argument("--in-container", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)

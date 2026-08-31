@@ -10,9 +10,12 @@ about the cause.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
+
+from portlin import progress
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -26,8 +29,8 @@ def script():
 
 
 @pytest.fixture
-def container_command(script, monkeypatch, tmp_path):
-    """The docker invocation, without running it."""
+def make_container_command(script, monkeypatch, tmp_path):
+    """A factory for the docker invocation, without running it."""
     captured = {}
 
     def fake_run(command, *args, **kwargs):
@@ -40,12 +43,26 @@ def container_command(script, monkeypatch, tmp_path):
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
     monkeypatch.setattr(script.shutil, "which", lambda _name: "/usr/bin/docker")
-    args = script.main.__globals__["argparse"].Namespace(
-        out_dir=tmp_path / "out", name="portlin", suite="trixie",
-        image_size="8G", minimal=False, keep=False,
-    )
-    script.run_in_container(args)
-    return captured["command"]
+    # Probed by run_in_container to decide whether to warn about a pull. Stubbed
+    # rather than left to fake_run, so the captured command is always the
+    # docker run and never the probe.
+    monkeypatch.setattr(script, "_image_is_cached", lambda _image: True)
+
+    def make(**overrides):
+        fields = {
+            "out_dir": tmp_path / "out", "name": "portlin", "suite": "trixie",
+            "image_size": "8G", "minimal": False, "keep": False, "verbose": False,
+        }
+        args = script.main.__globals__["argparse"].Namespace(**{**fields, **overrides})
+        script.run_in_container(args)
+        return captured["command"]
+
+    return make
+
+
+@pytest.fixture
+def container_command(make_container_command):
+    return make_container_command()
 
 
 class TestContainerHandoff:
@@ -90,6 +107,74 @@ class TestContainerHandoff:
         inner = container_command[-1]
         assert "apt-get install -y -qq --no-install-recommends python3 >/dev/null" in inner
         assert "2>" not in inner
+
+
+class TestBootstrapNarration:
+    """The one stage of a build that cannot draw itself.
+
+    python3 is what runs the display, so until it is installed there is nothing
+    to draw with. On an emulated arm64 host that install is also among the
+    slowest minutes of the whole run, and silence there is indistinguishable
+    from a hang.
+    """
+
+    def test_each_bootstrap_step_announces_itself(self, container_command):
+        inner = container_command[-1]
+        for milestone in ("apt-get update", "installing python3", "handing over"):
+            assert f'step "{milestone}' in inner, milestone
+
+    def test_verbose_lets_apt_speak_without_losing_the_milestones(
+        self, make_container_command
+    ):
+        inner = make_container_command(verbose=True)[-1]
+        assert ">/dev/null" not in inner
+        assert "-qq" not in inner
+        assert 'step "installing python3"' in inner
+
+    def test_the_milestones_read_like_the_rest_of_the_build(self, script):
+        # The display already prints "[12s] packages" for every stage it draws.
+        # A bootstrap that invented its own time format would make the first
+        # three lines of a build look like they came from another program.
+        helper = script._step_helper()
+        for elapsed, expected in ((9, "9s"), (75, "1m15s"), (3700, "1h01m")):
+            result = subprocess.run(
+                ["bash", "-c", f'{helper}\nSECONDS={elapsed}\nstep "probe"'],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 0, result.stderr
+            assert f"[{expected}]" in result.stdout, result.stdout
+            assert progress.format_duration(elapsed) == expected
+
+    def test_the_rendered_bootstrap_is_valid_shell(self, container_command):
+        # Rendered by string assembly and never executed on this side, so a
+        # quoting mistake here would surface only inside a container, minutes
+        # in, as a syntax error with no obvious author.
+        inner = container_command[-1]
+        result = subprocess.run(["bash", "-n", "-c", inner], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+
+class TestPullAnnouncement:
+    """A cold pull is the longest wait in a build and the least explained.
+
+    docker reports its own pull progress on stderr, but nothing says beforehand
+    that a pull is what the wait is, so a first run looks like a stall.
+    """
+
+    def test_a_missing_image_says_it_is_being_pulled(
+        self, script, monkeypatch, make_container_command, capsys
+    ):
+        monkeypatch.setattr(script, "_image_is_cached", lambda _image: False)
+        make_container_command()
+        assert "pulling" in capsys.readouterr().out
+
+    def test_a_cached_image_says_so_rather_than_nothing(
+        self, make_container_command, capsys
+    ):
+        make_container_command()
+        out = capsys.readouterr().out
+        assert "cached" in out
+        assert "pulling" not in out
 
 
 class TestHostDetection:

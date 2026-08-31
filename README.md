@@ -105,7 +105,7 @@ device.
 
 ```
 make image     # build a real image, with progress
-make test      # 478 unit tests, no root, no Linux, ~1s
+make test      # 484 unit tests, no root, no Linux, ~1s
 make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker
@@ -115,6 +115,12 @@ make harness   # shipped scripts against real loop devices, needs Docker
 and an ETA. On a host that cannot build directly (anything but x86_64 Linux as root, which includes
 every Mac) it re-runs itself inside a privileged `linux/amd64` container and renders the same
 display from in there, so the same command works everywhere.
+
+One stage cannot be drawn: the container has to install `python3` before anything can draw at all,
+and on an emulated host that is among the slowest minutes of a build. Those steps narrate
+themselves instead, with the same elapsed-time format the display uses (`  [4s] installing
+python3`), and a cold image pull is announced before it starts rather than looking like a stall.
+`make image ARGS=--verbose` gives back the full apt output for debugging the bootstrap itself.
 
 Every percentage comes from the tool doing the work rather than from a guess about phases: apt's
 `APT::Status-Fd` stream, debootstrap's package lines, tar's checkpoints. The overall ETA is the one
