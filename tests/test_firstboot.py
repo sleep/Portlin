@@ -499,3 +499,114 @@ class TestSystemdUnit:
 
     def test_it_is_installable(self, unit):
         assert "WantedBy=multi-user.target" in unit
+
+
+class TestKeyringUnderAutologin:
+    """Autologin and an encrypted login keyring cannot both be had.
+
+    LightDM authenticates autologin sessions through the lightdm-autologin PAM
+    service, which satisfies auth with pam_permit rather than including
+    common-auth. That substitution is what lets a session start with nothing
+    typed, and it is also why pam_gnome_keyring never sees a password to unlock
+    the login keyring with. The daemon still starts, so every libsecret client
+    meets a locked keyring and asks for the login password instead.
+    """
+
+    @pytest.fixture
+    def source(self):
+        return WIZARD.read_text()
+
+    def test_the_keyring_is_only_unlocked_when_the_stick_is_encrypted(self, source):
+        # The whole trade is that LUKS takes over the job the keyring password
+        # was doing. Without LUKS there is no such handover, and a passwordless
+        # keyring would leave saved passwords readable to whoever finds the
+        # stick -- on a device whose entire purpose is being carried around.
+        applying = source[source.index("    apply_autologin(username, autologin)"):source.index("SENTINEL.unlink")]
+        assert "apply_keyring_autounlock(" in applying, "nothing opens the keyring at all"
+        guard = applying[:applying.index("apply_keyring_autounlock(")]
+        assert "luks_device" in guard, "the keyring must not be opened up on an unencrypted stick"
+        assert "autologin" in guard, "a password login unlocks the keyring by itself"
+
+    def test_the_keyring_password_is_never_an_argument(self, source):
+        # Same rule the LUKS passphrase already follows: anything in argv is
+        # readable from /proc by every user on the machine.
+        body = source[source.index("def apply_keyring_autounlock"):source.index("def refresh_initramfs_for_keymap")]
+        daemon_call = next(l for l in body.splitlines() if "GNOME_KEYRING_DAEMON" in l and "run(" in l or "--login" in l)
+        assert "--password" not in body and "-p " not in daemon_call
+        assert "stdin=" in body, "the password must go in on stdin, empty"
+
+    def test_an_unencrypted_stick_says_what_autologin_costs(self, source):
+        # This bug was invisible: autologin was offered, accepted, and the
+        # consequence only showed up days later as browsers nagging for a
+        # password the user had never knowingly set.
+        body = source[source.index("def step_autologin"):source.index("# ---", source.index("def step_autologin"))]
+        assert "encrypted" in body, "the warning has to know whether LUKS is there"
+        assert "keyring" in body.lower(), "the cost has to be named where the choice is made"
+
+    def test_it_creates_the_keyring_by_the_same_route_pam_uses(self, tmp_path):
+        # Writing gnome-keyring's on-disk format by hand would mean this script
+        # implementing key derivation. --login is the entry point PAM itself
+        # feeds, so an empty stdin produces exactly the keyring wanted.
+        source = WIZARD.read_text()
+        home = tmp_path / "home" / "ada"
+        keyring = home / ".local/share/keyrings/login.keyring"
+        daemon = tmp_path / "gnome-keyring-daemon"
+        daemon.write_text("")
+        calls: list = []
+
+        def fake_run(argv, *, check=True, stdin=None):
+            calls.append((argv, stdin))
+            if "--login" in argv:
+                keyring.parent.mkdir(parents=True, exist_ok=True)
+                keyring.write_bytes(b"GnomeKeyring\n\r\0\n")
+            return None
+
+        class _os:
+            class path:
+                expanduser = staticmethod(lambda p: str(home))
+
+        namespace = {
+            "Path": Path, "os": _os, "run": fake_run, "log": lambda *a: None,
+            "GNOME_KEYRING_DAEMON": str(daemon),
+        }
+        exec(source[source.index("def apply_keyring_autounlock"):source.index("def refresh_initramfs_for_keymap")], namespace)
+
+        assert namespace["apply_keyring_autounlock"]("ada") is True
+        argv, stdin = calls[0]
+        assert "--login" in argv, f"expected the --login entry point, got {argv}"
+        assert stdin == "", "an empty password is what makes the keyring self-unlocking"
+        assert "ada" in argv, "the keyring belongs to the user, not to root"
+
+    def test_it_reports_failure_rather_than_pretending(self, tmp_path):
+        # A silent failure here hands back exactly the symptom being fixed.
+        source = WIZARD.read_text()
+        home = tmp_path / "home" / "ada"
+        daemon = tmp_path / "gnome-keyring-daemon"
+        daemon.write_text("")
+
+        class _os:
+            class path:
+                expanduser = staticmethod(lambda p: str(home))
+
+        namespace = {
+            "Path": Path, "os": _os, "run": lambda *a, **k: None, "log": lambda *a: None,
+            "GNOME_KEYRING_DAEMON": str(daemon),
+        }
+        exec(source[source.index("def apply_keyring_autounlock"):source.index("def refresh_initramfs_for_keymap")], namespace)
+        assert namespace["apply_keyring_autounlock"]("ada") is False
+
+    def test_a_stick_with_no_keyring_at_all_is_not_a_failure(self, tmp_path):
+        # --minimal builds have no gnome-keyring, so nothing can prompt and
+        # there is nothing to fix. That is not the same as the fix failing.
+        source = WIZARD.read_text()
+
+        class _os:
+            class path:
+                expanduser = staticmethod(lambda p: str(tmp_path / "home" / "ada"))
+
+        namespace = {
+            "Path": Path, "os": _os, "run": lambda *a, **k: None, "log": lambda *a: None,
+            "GNOME_KEYRING_DAEMON": str(tmp_path / "absent"),
+        }
+        exec(source[source.index("def apply_keyring_autounlock"):source.index("def refresh_initramfs_for_keymap")], namespace)
+        assert namespace["apply_keyring_autounlock"]("ada") is True

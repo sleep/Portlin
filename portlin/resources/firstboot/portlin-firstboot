@@ -41,6 +41,10 @@ DESIRED_GROUPS = [
     "cdrom", "dip", "lp", "scanner", "bluetooth",
 ]
 
+# Absolute rather than found on PATH: this runs before any login shell has set
+# one up, and its absence is a meaningful answer rather than an error.
+GNOME_KEYRING_DAEMON = "/usr/bin/gnome-keyring-daemon"
+
 COMMON_LOCALES = [
     ("en_US.UTF-8", "English (United States)"),
     ("en_GB.UTF-8", "English (United Kingdom)"),
@@ -676,12 +680,22 @@ def finalise_encryption() -> bool:
     return True
 
 
-def step_autologin(username: str) -> bool:
+def step_autologin(username: str, *, encrypted: bool) -> bool:
+    warning = (
+        "Convenient on a stick you carry, but anyone who boots it reaches your "
+        "desktop without typing anything."
+    )
+    if not encrypted:
+        # An encrypted stick gets a self-unlocking keyring below, so the cost
+        # named here applies only where that trade is not on offer.
+        warning += (
+            "\n\nBecause this stick is not encrypted, it also means the password "
+            "keyring stays locked. Browsers and the Wi-Fi applet will ask for "
+            "your password the first time they need a saved one after each boot."
+        )
     return confirm(
         "Automatic login",
-        f"\nLog in as '{username}' automatically when this stick boots?\n\n"
-        "Convenient on a stick you carry, but anyone who boots it reaches your "
-        "desktop without typing anything.",
+        f"\nLog in as '{username}' automatically when this stick boots?\n\n{warning}",
         default_yes=False,
     )
 
@@ -770,6 +784,59 @@ def apply_autologin(username: str, enabled: bool) -> None:
     )
 
 
+def apply_keyring_autounlock(username: str) -> bool:
+    """Give the account a login keyring that needs no password to open.
+
+    Autologin sessions authenticate through the lightdm-autologin PAM service,
+    which satisfies auth with pam_permit instead of including common-auth. That
+    is what lets the desktop start with nothing typed, and it is also why
+    pam_gnome_keyring never sees a password to unlock the login keyring with.
+    The daemon still starts from common-session, so every libsecret client --
+    browsers, the Wi-Fi applet -- meets a locked keyring and prompts for a login
+    password the user may never have knowingly given the keyring.
+
+    A keyring whose password is empty is opened by the daemon at startup without
+    prompting, so creating one is what makes autologin quiet. This is only ever
+    called for encrypted sticks, where LUKS already protects the secrets at rest
+    and the keyring's own password guards nothing the boot passphrase has not
+    covered. On an unencrypted stick the same change would leave saved passwords
+    readable to anyone who picks the stick up, so step_autologin warns instead.
+
+    gnome-keyring's on-disk format is encrypted even when the password is empty,
+    so writing the file directly would mean deriving keys here. --login is the
+    entry point PAM itself feeds; an empty password on stdin therefore produces
+    exactly the right keyring without this script knowing the format.
+    """
+    home = Path(os.path.expanduser(f"~{username}"))
+    keyring = home / ".local/share/keyrings/login.keyring"
+    if keyring.exists():
+        # Whatever password it already carries is the user's to change, and
+        # replacing it here would silently discard secrets stored under it.
+        return True
+    if not Path(GNOME_KEYRING_DAEMON).exists():
+        # A --minimal stick has no keyring at all, so nothing can prompt.
+        return True
+
+    # --daemonize so the parent exits once the keyring exists; the daemon it
+    # leaves behind belongs to no session, so it is stopped again rather than
+    # left to race the real one the display manager is about to start.
+    run(
+        [
+            "runuser", "-u", username, "--",
+            "env", f"HOME={home}", f"XDG_DATA_HOME={home}/.local/share",
+            GNOME_KEYRING_DAEMON, "--daemonize", "--login",
+        ],
+        stdin="",
+        check=False,
+    )
+    run(["pkill", "-u", username, "-x", "gnome-keyring-daemon"], check=False)
+
+    if not keyring.exists():
+        log(f"keyring: {keyring} was not created; autologin will prompt for secrets")
+        return False
+    return True
+
+
 def refresh_initramfs_for_keymap(encrypted: bool) -> None:
     """Rebuild the initramfs so the LUKS prompt uses the chosen keyboard layout.
 
@@ -796,7 +863,7 @@ def wizard() -> None:
     username, full_name, password = step_account()
 
     luks_device = _luks_device()
-    autologin = step_autologin(username)
+    autologin = step_autologin(username, encrypted=luks_device is not None)
     expand = step_expand()
 
     if not confirm(
@@ -837,6 +904,10 @@ def wizard() -> None:
     apply_hostname(hostname)
     apply_account(username, full_name, password)
     apply_autologin(username, autologin)
+    # Only together: a password login unlocks the keyring by itself, and without
+    # LUKS a passwordless keyring trades away real protection for convenience.
+    if autologin and luks_device:
+        apply_keyring_autounlock(username)
     refresh_initramfs_for_keymap(luks_device is not None)
 
     if luks_device:
