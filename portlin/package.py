@@ -44,6 +44,8 @@ THEME_FILES = {
     "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": "50-portlin.conf",
 }
 
+KEYRING_FILE = RESOURCES / "keyring" / "portlin-archive-keyring.gpg"
+
 WALLPAPER_SIZES = [
     "1365x768",
     "1920x1080",
@@ -52,6 +54,20 @@ WALLPAPER_SIZES = [
     "5120x2880",
     "7680x4320",
 ]
+
+
+def _keyring_is_real() -> bool:
+    """Whether a real signing key has been committed at KEYRING_FILE.
+
+    The repository carries a zero-byte placeholder there until the archive's
+    signing key exists, which is a separate, later decision about custody of a
+    long-lived secret. Keying this off the file itself, rather than a flag
+    someone has to remember to flip, means the keyring package and its apt
+    source start shipping for real the moment a key lands, with no other code
+    change, and can never ship a source pointed at an archive that does not
+    exist yet or a key with nothing in it.
+    """
+    return KEYRING_FILE.exists() and KEYRING_FILE.stat().st_size > 0
 
 
 def local_version() -> str:
@@ -127,8 +143,9 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                 description="Portlin archive signing key and apt source",
                 depends=[],
             ),
-            "etc/apt/sources.list.d/portlin.sources": render_sources_entry(),
         }
+        if _keyring_is_real():
+            files["etc/apt/sources.list.d/portlin.sources"] = render_sources_entry()
     elif package == "portlin-runtime":
         files = {
             "DEBIAN/control": render_control(
@@ -165,9 +182,12 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
     # quiet about an untouched one, for paths it has been told are conffiles.
     # Without this member every /etc file here is an ordinary package file,
     # silently overwritten on every upgrade regardless of local edits. Derived
-    # from the files this package actually ships rather than a maintained
-    # list, so it cannot drift when a file is added or moved.
-    conffiles = sorted(path for path in files if path.startswith("etc/"))
+    # from the files this package actually ships -- text and binary alike --
+    # rather than a maintained list, so it cannot drift when a file is added
+    # or moved.
+    conffiles = sorted(
+        path for path in (*files, *binary_files(package)) if path.startswith("etc/")
+    )
     if conffiles:
         files["DEBIAN/conffiles"] = "".join(f"/{path}\n" for path in conffiles)
     return files
@@ -176,11 +196,11 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
 def binary_files(package: str) -> dict[str, Path]:
     """Binary members, keyed by path relative to the package root."""
     if package == "portlin-archive-keyring":
-        # A dearmoured public key, so it is bytes rather than text.
-        return {
-            KEYRING_PATH.lstrip("/"):
-                RESOURCES / "keyring" / "portlin-archive-keyring.gpg"
-        }
+        # A dearmoured public key, so it is bytes rather than text. Ships only
+        # once KEYRING_FILE holds a real key; see _keyring_is_real.
+        if not _keyring_is_real():
+            return {}
+        return {KEYRING_PATH.lstrip("/"): KEYRING_FILE}
     if package == "portlin-runtime":
         return {"usr/share/portlin/logo.svg": RESOURCES / "runtime" / "logo.svg"}
     if package == "portlin-desktop":
