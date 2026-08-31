@@ -1,0 +1,16 @@
+[Unit]
+Description=Make portlin boot-time encryption permanent
+Documentation=file:/etc/portlin-release
+DefaultDependencies=no
+After=local-fs.target
+Before=portlin-firstboot.service display-manager.service
+ConditionPathExists=/etc/portlin-release
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/portlin-finalise-encryption
+SuccessExitStatus=0 10
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

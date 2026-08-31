@@ -26,6 +26,8 @@ RESOURCES = Path(__file__).parent / "resources"
 FIRSTBOOT_SENTINEL = "var/lib/portlin/firstboot-pending"
 FIRSTBOOT_SCRIPT = "usr/local/sbin/portlin-firstboot"
 FIRSTBOOT_UNIT = "etc/systemd/system/portlin-firstboot.service"
+FINALISE_SCRIPT = "usr/local/sbin/portlin-finalise-encryption"
+FINALISE_UNIT = "etc/systemd/system/portlin-finalise-encryption.service"
 
 
 def build_rootfs(cfg: BuildConfig, runner: Runner) -> Path:

@@ -16,6 +16,7 @@ import pytest
 RESOURCES = Path(__file__).parent.parent / "portlin" / "resources" / "firstboot"
 WIZARD = RESOURCES / "portlin-firstboot"
 UNIT = RESOURCES / "portlin-firstboot.service"
+FINALISE = RESOURCES / "portlin-finalise-encryption"
 
 
 class TestWizardScript:
@@ -435,23 +436,30 @@ class TestEncryptOnFirstBoot:
         assert "copy_exec" in self.HOOK.read_text()
         assert "cryptsetup" in self.HOOK.read_text()
 
-    def test_the_wizard_makes_the_encryption_permanent(self):
-        # The initramfs can unlock for one boot; crypttab, the rebuilt initramfs
-        # and the dropped flag are what make it survive a reboot.
+    def test_the_wizard_only_reports_whether_finalisation_already_happened(self):
+        # The work moved to portlin-finalise-encryption.service, which runs on
+        # every boot and outlives the wizard disabling itself. The wizard now
+        # only reads the breadcrumb it leaves, so it can tell the user.
         body = WIZARD.read_text()
         finalise = body[body.index("def finalise_encryption"):body.index("def step_autologin")]
-        assert "crypttab" in finalise
-        assert "update-initramfs" in finalise
-        assert "portlin.encrypt=ask" in finalise
-        assert "grub-mkconfig" in finalise
+        assert "/run/portlin/finalised" in finalise
+        assert "crypttab" not in finalise
+
+    def test_the_finaliser_makes_the_encryption_permanent(self):
+        # The initramfs can unlock for one boot; crypttab, the rebuilt initramfs
+        # and the dropped flag are what make it survive a reboot.
+        body = FINALISE.read_text()
+        assert "crypttab" in body
+        assert "update-initramfs" in body
+        assert "portlin.encrypt=ask" in body
+        assert "update-grub" in body
 
     def test_finalisation_keys_off_observable_state(self):
         # Not off a flag file that a crash could lose, leaving a stick encrypted
         # but unable to unlock itself.
-        body = WIZARD.read_text()
-        finalise = body[body.index("def finalise_encryption"):body.index("def step_autologin")]
-        assert "findmnt" in finalise
-        assert "/dev/mapper/" in finalise
+        body = FINALISE.read_text()
+        assert "findmnt" in body
+        assert "/dev/mapper/" in body
 
 
 class TestSystemdUnit:

@@ -404,7 +404,14 @@ def _install_firstboot(chroot: Chroot) -> None:
     stick always carries the current wizard, and iterating on it costs a
     two-minute write instead of a twenty-minute debootstrap.
     """
-    from .rootfs import FIRSTBOOT_SCRIPT, FIRSTBOOT_SENTINEL, FIRSTBOOT_UNIT, RESOURCES
+    from .rootfs import (
+        FINALISE_SCRIPT,
+        FINALISE_UNIT,
+        FIRSTBOOT_SCRIPT,
+        FIRSTBOOT_SENTINEL,
+        FIRSTBOOT_UNIT,
+        RESOURCES,
+    )
 
     chroot.write_file(
         FIRSTBOOT_SCRIPT,
@@ -417,6 +424,20 @@ def _install_firstboot(chroot: Chroot) -> None:
     )
     chroot.write_file(FIRSTBOOT_SENTINEL, "pending\n")
     chroot.run(["systemctl", "enable", "portlin-firstboot.service"])
+
+    # Frozen tier, and installed on every stick including unencrypted ones: an
+    # unencrypted stick is precisely the one that may be encrypted later, and
+    # the finaliser is what makes that encryption survive a reboot.
+    chroot.write_file(
+        FINALISE_SCRIPT,
+        (RESOURCES / "firstboot" / "portlin-finalise-encryption").read_text(),
+        mode=0o755,
+    )
+    chroot.write_file(
+        FINALISE_UNIT,
+        (RESOURCES / "firstboot" / "portlin-finalise-encryption.service").read_text(),
+    )
+    chroot.run(["systemctl", "enable", "portlin-finalise-encryption.service"])
 
     # The initramfs side of the encryption offer. Installed on every stick,
     # including encrypted ones, so that a stick is never missing the machinery

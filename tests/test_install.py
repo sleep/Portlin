@@ -132,6 +132,12 @@ class TestUnencryptedWrite:
     def test_the_wizard_is_installed_before_the_initramfs_is_built(self):
         assert self.t.before(("write-file", "portlin-firstboot"), ("update-initramfs",))
 
+    def test_installs_the_encryption_finaliser(self):
+        assert self.t.has("write-file", "usr/local/sbin/portlin-finalise-encryption")
+
+    def test_enables_the_encryption_finaliser(self):
+        assert self.t.has_tokens("systemctl", "enable", "portlin-finalise-encryption.service")
+
     def test_regenerates_the_initramfs_inside_the_chroot(self):
         assert self.t.has("chroot", "update-initramfs")
 
