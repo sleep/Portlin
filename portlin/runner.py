@@ -212,19 +212,29 @@ class Runner:
         path.write_text(content)
         path.chmod(mode)
 
-    def copy_file(self, source: str | Path, destination: str | Path) -> None:
+    def copy_file(
+        self, source: str | Path, destination: str | Path, *, mode: int = 0o644
+    ) -> None:
         """Copy a file, recorded like a command so dry runs stay inspectable.
 
         write_file handles text. Wallpapers are PNGs, and decoding them into a
         str to write them back out would corrupt them.
+
+        mode is set explicitly rather than left to shutil.copyfile's default of
+        0o666 & ~umask, which depends on the umask of whoever ran the build. A
+        hardened umask can leave a package member -- the archive keyring,
+        notably -- unreadable by the unprivileged user apt drops privileges to.
         """
         source, destination = Path(source), Path(destination)
-        self.commands.append(["copy-file", str(source), str(destination)])
+        self.commands.append(
+            ["copy-file", str(source), str(destination), f"mode={mode:o}"]
+        )
         if self.dry_run:
             log.debug("dry-run: copy %s to %s", source, destination)
             return
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
+        destination.chmod(mode)
 
     def rendered(self) -> list[str]:
         """Recorded commands as shell-ish strings, for assertions and logs."""
