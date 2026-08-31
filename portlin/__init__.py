@@ -5,4 +5,4 @@ Licensed under the GNU General Public License, version 3 or later.
 See the LICENSE file, or <https://www.gnu.org/licenses/gpl-3.0.html>.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
