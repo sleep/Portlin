@@ -40,8 +40,12 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The three that exercise real devices. Each one caught a bug that unit tests
-# structurally cannot: they run the shipped scripts against real block devices.
+# The four that exercise real devices. Each one caught a bug that unit tests
+# structurally cannot: they run the shipped scripts and commands against real
+# block devices. test-expand.py runs twice more here than the other three: once
+# each for the wizard's own apply_expand and for the packaged portlin-expand
+# command, because the tier rule keeps them as two separate implementations
+# that can drift, and both need real-device coverage.
 harness:
 	docker run --rm --privileged --platform linux/amd64 -v "$$PWD:/src" -w /src \
 	  debian:trixie bash -c 'export DEBIAN_FRONTEND=noninteractive; \
@@ -51,6 +55,8 @@ harness:
 	  python3 -u scripts/test-encrypt-hook.py && \
 	  python3 -u scripts/test-expand.py && \
 	  python3 -u scripts/test-expand.py --encrypt && \
+	  python3 -u scripts/test-expand.py --packaged && \
+	  python3 -u scripts/test-expand.py --packaged --encrypt && \
 	  python3 -u scripts/test-package-upgrade.py'
 
 # The full thing: boot the image, answer every prompt, verify the disk grew.
