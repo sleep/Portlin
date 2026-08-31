@@ -44,8 +44,7 @@ replace.
 
 ## Reproducing the shipped set
 
-`render.sh` reproduces `portlin-1920x1080.png` and `portlin-3840x2160.png` byte for byte.
-The other four shipped sizes predate this script and were rasterised by a different route:
-they come out at the correct dimensions and are visually equivalent, but differ from the
-committed bytes by under half a percent. Output is written to `out/brand/` rather than over
-`portlin/resources/wallpapers/` so that replacing a shipped wallpaper stays a deliberate act.
+Every wallpaper in `portlin/resources/wallpapers/` is rendered by `render.sh` and
+reproduces byte for byte, so a change to the design can be checked by re-rendering and
+diffing. Output still goes to `out/brand/` rather than over the shipped set, so replacing a
+wallpaper stays a deliberate act: look at the new renders, then copy them across.

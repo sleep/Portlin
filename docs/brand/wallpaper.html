@@ -24,7 +24,7 @@
     --fade-start: 900px;
   }
 
-  html, body { margin: 0; padding: 0; overflow: hidden; }
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #12161C; }
   body { width: 100vw; height: 100vh; }
   #stage {
     width: 1920px; height: 1080px; position: relative; overflow: hidden;
@@ -142,4 +142,5 @@
   </div>
 </div>
 </div>
-<script>document.documentElement.style.setProperty('--k', window.innerWidth / 1920);</script>
+<script>document.documentElement.style.setProperty('--k',
+  Math.max(window.innerWidth / 1920, window.innerHeight / 1080));</script>
