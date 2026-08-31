@@ -222,6 +222,11 @@ def _pack(cfg: BuildConfig, runner: Runner, root: Path) -> None:
             "--xattrs",
             "--xattrs-include=*",
             "--acls",
+            # Progress. tar prints a line every 2000 records, which is one per
+            # MiB of stream, frequent enough to animate a bar and rare enough
+            # not to flood the pipe it shares with everything else.
+            "--checkpoint=2000",
+            "--checkpoint-action=echo",
             "-I", "zstd -T0 -6",
             "-cf", str(output),
             "-C", str(root),

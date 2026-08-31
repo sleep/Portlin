@@ -88,11 +88,23 @@ device.
 ## Development
 
 ```
-make test      # 292 unit tests, no root, no Linux, ~1s
+make image     # build a real image, with progress
+make test      # 387 unit tests, no root, no Linux, ~1s
 make dryrun    # print the full command plan
 make check     # tests plus shellcheck
 make harness   # shipped scripts against real loop devices, needs Docker
 ```
+
+`make image` runs the whole pipeline and shows where it is: a bar per stage, the current package,
+and an ETA. On a host that cannot build directly (anything but x86_64 Linux as root, which includes
+every Mac) it re-runs itself inside a privileged `linux/amd64` container and renders the same
+display from in there, so the same command works everywhere.
+
+Every percentage comes from the tool doing the work rather than from a guess about phases: apt's
+`APT::Status-Fd` stream, debootstrap's package lines, tar's checkpoints. The overall ETA is the one
+estimate, weighted by how long each stage took on this machine last time; the first build has no
+history and says so.
+
 Unit tests run anywhere, including macOS, because every external command goes through one `Runner`
 that can record instead of execute. That makes `build_rootfs` and `write_stick` assertable as
 ordered command lists, which is where the real risk lives: a `crypttab` written after

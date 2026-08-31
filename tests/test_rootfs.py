@@ -190,3 +190,28 @@ class TestDesktopTheme:
         built = trace(runner)
         assert not built.has("write-file", "xfce-perchannel-xml")
         assert not built.has("write-file", "lightdm")
+
+
+class TestProgressSignals:
+    """The build has to be able to say how far along it is.
+
+    Both of these are options on commands that would work fine without them.
+    They exist so that something watching the output can compute a real
+    percentage instead of a phase-level guess.
+    """
+
+    def test_apt_emits_a_machine_readable_status_stream(self, built):
+        # Pointed at stdout, which is already being read, so no extra pipe or
+        # pass_fds is needed to collect it.
+        install = built.command_at("apt-get", "install")
+        assert "APT::Status-Fd=1" in " ".join(install)
+
+    def test_apt_does_not_also_draw_its_own_progress(self, built):
+        # -q suppresses apt's terminal rendering, which is meaningless on a pipe
+        # and would otherwise be noise in the log pane.
+        assert "-q" in built.command_at("apt-get", "install")
+
+    def test_packing_reports_checkpoints(self, built):
+        tar = " ".join(built.command_at("tar", "-cf"))
+        assert "--checkpoint=2000" in tar
+        assert "--checkpoint-action=echo" in tar

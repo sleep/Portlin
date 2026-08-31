@@ -449,3 +449,17 @@ class TestGuards:
             WriteConfig(
                 target="/dev/sdz", rootfs=tmp_path / "r.tar", passphrase="secret"
             )
+
+
+class TestProgressSignals:
+    @pytest.fixture(autouse=True)
+    def _run(self, plain_config, runner, trace):
+        write_stick(plain_config, runner)
+        self.t = trace(runner)
+
+    def test_unpacking_reports_checkpoints(self):
+        # The unpack is several minutes of nothing on a slow stick, and it is
+        # the stage where a stalled build is most often suspected.
+        tar = " ".join(self.t.command_at("tar", "-xf"))
+        assert "--checkpoint=2000" in tar
+        assert "--checkpoint-action=echo" in tar

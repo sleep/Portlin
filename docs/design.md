@@ -91,6 +91,7 @@ Each module has one job and a testable surface.
 | `rootfs.py` | debootstrap + package installation -> cached tarball |
 | `install.py` | Orchestrates `write`: partition, format, unpack, configure, GRUB |
 | `packages.py` | The package set, grouped and overridable |
+| `progress.py` | Pure: command output -> progress events, stage weights, bars and ETAs |
 | `cli.py` | Argument parsing, confirmation prompts, wiring |
 
 The `Runner` chokepoint is the keystone. Because every external command flows

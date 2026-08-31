@@ -1,9 +1,10 @@
-.PHONY: help venv test lint check dryrun harness prove clean
+.PHONY: help venv test lint check dryrun image harness prove clean
 
 PY := .venv/bin/python
 PYTEST := .venv/bin/pytest
 
 help:
+	@echo "make image    - build a full image with progress (container on a Mac)"
 	@echo "make test     - unit tests (runs anywhere, no root, no Linux)"
 	@echo "make dryrun   - print the full command plan for a build and a write"
 	@echo "make check    - tests plus a shellcheck pass if it is installed"
@@ -25,6 +26,11 @@ venv: .venv/bin/pytest
 
 test: venv
 	$(PYTEST)
+
+# Stdlib only and no venv needed: this is the same script the container runs,
+# where nothing is installed but python3.
+image:
+	python3 scripts/build.py $(ARGS)
 
 dryrun: venv
 	@echo "=== build ==="

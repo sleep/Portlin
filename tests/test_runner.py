@@ -87,3 +87,71 @@ class TestExecution:
         runner = Runner()
         runner.run(["sh", "-c", "exit 1"], check=False)
         assert runner.rendered() == ["sh -c exit 1"]
+
+
+class TestStreaming:
+    """The progress hook. Without it the build is silent for an hour.
+
+    The property that matters most is that attaching a hook changes nothing
+    else: CommandResult must still separate stdout from stderr, because
+    CommandError quotes stderr and every failure message in the tool depends on
+    it being the error rather than the error mixed into a megabyte of apt
+    chatter.
+    """
+
+    def test_lines_arrive_as_they_are_produced(self):
+        seen = []
+        runner = Runner(on_output=lambda argv, stream, line: seen.append(line))
+        runner.run(["printf", "one\ntwo\nthree\n"])
+        assert seen == ["one", "two", "three"]
+
+    def test_the_hook_is_told_which_stream_a_line_came_from(self):
+        # debootstrap reports progress on stderr and apt on stdout, so a hook
+        # that cannot tell them apart cannot parse either reliably.
+        seen = []
+        runner = Runner(on_output=lambda argv, stream, line: seen.append((stream, line)))
+        runner.run(["sh", "-c", "echo out; echo err >&2"])
+        assert ("stdout", "out") in seen
+        assert ("stderr", "err") in seen
+
+    def test_the_hook_is_told_which_command_produced_the_line(self):
+        # One hook watches the whole build, so the line alone is ambiguous:
+        # "Unpacking ..." comes from both debootstrap and apt.
+        seen = []
+        runner = Runner(on_output=lambda argv, stream, line: seen.append(argv[0]))
+        runner.run(["echo", "hi"])
+        assert seen == ["echo"]
+
+    def test_streaming_still_separates_stdout_from_stderr(self):
+        runner = Runner(on_output=lambda *a: None)
+        result = runner.run(["sh", "-c", "echo out; echo err >&2"])
+        assert result.stdout.strip() == "out"
+        assert result.stderr.strip() == "err"
+
+    def test_streaming_still_raises_with_the_error_text(self):
+        runner = Runner(on_output=lambda *a: None)
+        with pytest.raises(CommandError) as exc:
+            runner.run(["sh", "-c", "echo bad thing >&2; exit 3"])
+        assert "bad thing" in str(exc.value)
+
+    def test_a_hook_that_raises_does_not_take_the_build_down(self):
+        # The hook draws a progress bar. A terminal that went away, or a bug in
+        # the rendering, must not destroy an hour of build work.
+        def explode(argv, stream, line):
+            raise RuntimeError("bad hook")
+
+        runner = Runner(on_output=explode)
+        assert runner.run(["echo", "fine"]).ok
+
+    def test_a_dry_run_never_calls_the_hook(self):
+        seen = []
+        runner = Runner(dry_run=True, on_output=lambda *a: seen.append(a))
+        runner.run(["echo", "hi"])
+        assert seen == []
+
+    def test_secret_stdin_is_still_never_recorded(self):
+        # Streaming introduces a second execution path, so the guarantee that
+        # passphrases stay out of the command log has to hold on both.
+        runner = Runner(on_output=lambda *a: None)
+        runner.run(["cat"], secret_input="hunter2")
+        assert "hunter2" not in " ".join(" ".join(c) for c in runner.commands)

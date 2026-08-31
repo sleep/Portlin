@@ -126,6 +126,14 @@ class Chroot:
                 "eatmydata",
                 "apt-get",
                 "-y",
+                # -q drops apt's own terminal rendering, which is meaningless on
+                # a pipe. Status-Fd replaces it with a machine-readable stream:
+                # pmstatus:<package>:<percent>:<description>, one line per step,
+                # which is what makes a real progress bar possible. Pointed at
+                # stdout because that pipe is already being read, so it needs no
+                # pass_fds and no extra plumbing.
+                "-q",
+                "-o", "APT::Status-Fd=1",
                 "-o", "Dpkg::Options::=--force-confnew",
                 "-o", "Acquire::Retries=3",
                 *argv,

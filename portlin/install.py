@@ -314,6 +314,8 @@ def _unpack(runner: Runner, tarball: Path, destination: Path) -> None:
             "--xattrs",
             "--xattrs-include=*",
             "--acls",
+            "--checkpoint=2000",
+            "--checkpoint-action=echo",
             "-I", "zstd -d",
             "-xf", str(tarball),
             "-C", str(destination),
