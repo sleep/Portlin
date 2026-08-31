@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Report what this portlin stick is.
+
+Read-only. Everything here comes from asking the running system rather than
+from recorded state, because a stick is portable and half of these answers
+change with the machine it is plugged into.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import backing_partition  # noqa: E402
+
+RELEASE = Path("/etc/portlin-release")
+
+
+def _out(argv: list[str]) -> str:
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, check=False
+        ).stdout.strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _release() -> dict[str, str]:
+    if not RELEASE.exists():
+        return {}
+    values = {}
+    for line in RELEASE.read_text().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _root_source() -> str:
+    return _out(["findmnt", "-no", "SOURCE", "/"])
+
+
+def _backing_disk(source: str) -> str:
+    """The whole disk behind the root, following a mapping if there is one."""
+    partition = backing_partition(source)
+    return _out(["lsblk", "-no", "PKNAME", f"/dev/{partition}"]) or partition
+
+
+def main() -> int:
+    release = _release()
+    source = _root_source()
+    encrypted = source.startswith("/dev/mapper/")
+    disk = _backing_disk(source)
+
+    used = shutil.disk_usage("/")
+    filesystem_gb = used.total / 1_000_000_000
+    disk_bytes = _out(["lsblk", "-bdno", "SIZE", f"/dev/{disk}"]) if disk else ""
+    drive_gb = int(disk_bytes) / 1_000_000_000 if disk_bytes.isdigit() else 0.0
+
+    print(f"portlin      {release.get('PORTLIN_VERSION', 'unknown')}")
+    print(f"debian       {_out(['lsb_release', '-ds']) or 'unknown'}")
+    print(f"root         {source}")
+    print(f"encrypted    {'yes' if encrypted else 'no'}")
+    print(f"drive        /dev/{disk}" if disk else "drive        unknown")
+    print(f"filesystem   {filesystem_gb:.1f} GB")
+    if drive_gb:
+        print(f"capacity     {drive_gb:.1f} GB")
+        # A gigabyte of slack absorbs the partitions ahead of root and the
+        # filesystem's own overhead, so this does not nag about nothing.
+        if drive_gb - filesystem_gb > 1.0:
+            print()
+            print("There is unused space on this drive. Run portlin-expand to claim it.")
+    print(f"booted on    {_out(['uname', '-n'])}, {_out(['uname', '-r'])}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

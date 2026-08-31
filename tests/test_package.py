@@ -92,3 +92,9 @@ def test_runtime_ships_the_shared_device_lookup_module():
     # nothing for an encrypted root.
     assert "st_rdev" in source
     assert "/sys/class/block" not in source
+
+
+def test_info_tool_is_shipped_and_executable():
+    files = package.text_files("portlin-runtime")
+    assert files["usr/bin/portlin-info"].startswith("#!/usr/bin/env python3")
+    assert "usr/bin/portlin-info" in package.executable_paths("portlin-runtime")
