@@ -71,14 +71,12 @@ publish, and reports a fetch failure on every `apt update`.
 ### `portlin-runtime`
 
 Depends on `portlin-archive-keyring`, `python3`, `cloud-guest-utils`,
-`cryptsetup-bin`. Recommends `portlin-wallpapers`.
+`cryptsetup-bin`. Recommends `portlin-desktop`.
 
 A recommendation rather than a dependency because of `--minimal`, which produces
-a stick with no desktop at all. The three commands are useful there, and 14 MB of
-wallpaper is not, so `write` installs `portlin-wallpapers` only when the desktop
-package group is present. The theme conffiles are a few kilobytes and inert
-without Xfce to read them, so they ship either way rather than justifying a
-fourth package.
+a stick with no desktop at all. The three commands are useful there, and neither
+the theme nor 14 MB of wallpaper is, so `write` installs `portlin-desktop` only
+when the desktop package group is present.
 
 - `/usr/bin/portlin-info`
 - `/usr/bin/portlin-expand`
@@ -96,9 +94,10 @@ someone who edited them deliberately. Preserving such an edit across an upgrade
 is the desired behaviour, and the conffile prompt that accompanies it is the
 honest signal that portlin's default and the local file have diverged.
 
-### `portlin-wallpapers`
+### `portlin-desktop`
 
-Six renders of the wallpaper at 16:9, roughly 14 MB in total.
+The Xfce theme conffiles, plus six renders of the wallpaper at 16:9, roughly
+14 MB in total.
 
 | Scale of the authoring canvas | Output |
 |---|---|
