@@ -44,10 +44,24 @@ from portlin.rootfs import build_rootfs  # noqa: E402
 from portlin.runner import Runner  # noqa: E402
 
 CONTAINER_IMAGE = "debian:trixie"
+
+# The one package the container needs before this script can run at all, which
+# is why it is installed by the shell line that launches us rather than by the
+# build: there is no display yet to draw it in.
+CONTAINER_BOOTSTRAP = "python3"
+
+# Everything else is installed by the build itself, as its first stage, so apt
+# reports into the log pane under the bars instead of scrolling past above the
+# banner and pushing the display off the top of the screen.
 CONTAINER_TOOLS = [
-    "python3", "debootstrap", "gdisk", "parted", "dosfstools", "e2fsprogs",
+    "debootstrap", "gdisk", "parted", "dosfstools", "e2fsprogs",
     "cryptsetup-bin", "util-linux", "zstd", "tar", "mount", "ca-certificates",
 ]
+
+# apt-get, told to describe itself. -q drops the terminal rendering that means
+# nothing on a pipe, and Status-Fd replaces it with the machine-readable stream
+# the progress parser reads. The chroot's installs are invoked the same way.
+APT = ["apt-get", "-y", "-q", "-o", "APT::Status-Fd=1", "-o", "Acquire::Retries=3"]
 
 # Beside the output rather than in a home directory: the container's home is
 # thrown away with the container, so a cache kept there would never survive to
@@ -272,9 +286,14 @@ class BuildWatcher:
         self.retrieved = 0
         self.installed = 0
         self.bytes_seen = 0
+        # Set while a stage runs commands that the argv rules would misread.
+        self.pinned: str | None = None
 
     def __call__(self, argv: list[str], stream: str, line: str) -> None:
-        stage = progress.stage_for(argv)
+        # The pin exists for the container's own tool install: those are
+        # apt-get calls like the chroot's, and stage_for would call them
+        # "packages", lighting up a bar for work that has not started.
+        stage = self.pinned or progress.stage_for(argv)
         if stage is not None and stage != self.timeline.current:
             self.timeline.start(stage)
             self.retrieved = 0
@@ -282,7 +301,7 @@ class BuildWatcher:
             self.bytes_seen = 0
 
         current = self.timeline.current
-        if current == "packages":
+        if current in ("packages", "tools"):
             self._apt(argv, line)
         elif current == "debootstrap":
             self._debootstrap(line)
@@ -366,12 +385,16 @@ def run_in_container(args: argparse.Namespace) -> int:
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Silenced deliberately. This is the only part of a build that cannot be
+    # drawn, because the thing that draws it is what is being installed, and
+    # dpkg's "Setting up ..." lines would otherwise fill the screen before the
+    # display appears. stderr is left alone, so a real apt failure still says so.
     inner = "; ".join(
         [
             "set -e",
             "export DEBIAN_FRONTEND=noninteractive",
-            "apt-get update -qq",
-            "apt-get install -y -qq --no-install-recommends " + " ".join(CONTAINER_TOOLS),
+            "apt-get update -qq >/dev/null",
+            f"apt-get install -y -qq --no-install-recommends {CONTAINER_BOOTSTRAP} >/dev/null",
             " ".join(
                 ["python3", "-u", "/src/scripts/build.py", "--in-container"]
                 + _forwarded_flags(args)
@@ -395,7 +418,9 @@ def run_in_container(args: argparse.Namespace) -> int:
     # that only appears when the build ends is no use to whoever is waiting.
     print(
         f"building in a {CONTAINER_IMAGE} linux/amd64 container "
-        f"({describe_host()} cannot build directly)",
+        f"({describe_host()} cannot build directly)\n"
+        f"fetching the image and installing {CONTAINER_BOOTSTRAP}, "
+        "then the build display takes over",
         flush=True,
     )
     return subprocess.run(command).returncode
@@ -420,6 +445,39 @@ def _forwarded_flags(args: argparse.Namespace) -> list[str]:
 # the build
 # --------------------------------------------------------------------------
 
+def _stages(in_container: bool) -> list[progress.Stage]:
+    """The stages this run will actually have.
+
+    A container installs its own build tools, which is a minute natively and
+    many minutes emulated; a native root build already has them. The weights are
+    renormalised so that the total bar still ends at exactly full either way.
+    """
+    stages = list(progress.DEFAULT_STAGES)
+    if not in_container:
+        return stages
+    stages.insert(0, progress.Stage("tools", "tools", 0.05))
+    total = sum(stage.weight for stage in stages)
+    return [progress.Stage(s.key, s.label, s.weight / total) for s in stages]
+
+
+def _install_build_tools(runner: Runner, watcher: BuildWatcher) -> None:
+    """Install the container's build tools, drawn like every other stage.
+
+    Run through the Runner rather than by the shell that launched us purely so
+    that it is visible: the same hook, the same bar, the same log pane. The
+    stage is pinned because these commands are apt-get, which the argv rules
+    read as the packages stage.
+    """
+    env = {"DEBIAN_FRONTEND": "noninteractive"}
+    watcher.pinned = "tools"
+    try:
+        watcher.timeline.start("tools")
+        runner.run(APT + ["update"], env=env)
+        runner.run(APT + ["install", "--no-install-recommends", *CONTAINER_TOOLS], env=env)
+    finally:
+        watcher.pinned = None
+
+
 def build(args: argparse.Namespace) -> int:
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -428,7 +486,7 @@ def build(args: argparse.Namespace) -> int:
     timings_path = out_dir / TIMINGS_FILE
 
     timings = progress.load_timings(timings_path)
-    timeline = progress.Timeline(timings=timings)
+    timeline = progress.Timeline(_stages(args.in_container), timings=timings)
 
     theme = Theme(sys.stdout.isatty() and "NO_COLOR" not in os.environ)
     unicode_ok = "UTF-8" in (os.environ.get("LANG", "") + os.environ.get("LC_ALL", "")).upper()
@@ -440,6 +498,13 @@ def build(args: argparse.Namespace) -> int:
 
     started = time.monotonic()
     try:
+        # Painted before anything runs. The first command's first line of output
+        # can be a minute away, and a blank screen for a minute is the exact
+        # thing this display exists to prevent.
+        display.refresh(force=True)
+        if args.in_container:
+            _install_build_tools(runner, watcher)
+
         build_cfg = BuildConfig(
             output=tarball,
             suite=args.suite,

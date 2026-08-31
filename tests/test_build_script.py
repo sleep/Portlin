@@ -73,10 +73,23 @@ class TestContainerHandoff:
         assert f"{(tmp_path / 'out').resolve()}:/out" in container_command
         assert "--out-dir /out" in container_command[-1]
 
-    def test_the_container_installs_what_the_build_needs(self, container_command):
+    def test_the_bootstrap_installs_only_what_the_display_needs_to_exist(
+        self, container_command, script
+    ):
+        # Everything installed out here is installed with no display to draw it,
+        # so its output lands above the banner. Only python3 has to be, because
+        # it is what runs the display; the rest is a stage inside the build.
         inner = container_command[-1]
+        assert f"--no-install-recommends {script.CONTAINER_BOOTSTRAP} " in inner
         for tool in ("debootstrap", "zstd", "cryptsetup-bin"):
-            assert tool in inner
+            assert tool not in inner
+
+    def test_the_bootstrap_is_quiet_but_still_reports_failure(self, container_command):
+        # >/dev/null on stdout only. dpkg's chatter is what pushes the display
+        # off the screen; apt's errors are on stderr and must survive.
+        inner = container_command[-1]
+        assert "apt-get install -y -qq --no-install-recommends python3 >/dev/null" in inner
+        assert "2>" not in inner
 
 
 class TestHostDetection:
@@ -172,7 +185,7 @@ class TestVerificationResult:
     def build_args(self, script, tmp_path):
         return script.main.__globals__["argparse"].Namespace(
             out_dir=tmp_path / "out", name="portlin", suite="trixie",
-            image_size="8G", minimal=True, keep=False,
+            image_size="8G", minimal=True, keep=False, in_container=False,
         )
 
     @pytest.fixture
@@ -222,3 +235,83 @@ class TestVerificationResult:
         stub_pipeline["ok"] = False
         script.build(build_args)
         assert (build_args.out_dir / script.TIMINGS_FILE).exists()
+
+
+class TestBuildTools:
+    """The container's own tool install, which is a stage like any other.
+
+    It used to run as a shell line in the docker invocation, where its two
+    hundred lines of dpkg output scrolled past before the display existed and
+    pushed the banner off the top of the screen.
+    """
+
+    def test_the_tools_stage_exists_only_in_a_container(self, script):
+        keys = [stage.key for stage in script._stages(in_container=True)]
+        assert keys[0] == "tools"
+        assert "tools" not in [stage.key for stage in script._stages(in_container=False)]
+
+    def test_the_weights_still_add_up_to_a_whole_build(self, script):
+        for in_container in (True, False):
+            total = sum(stage.weight for stage in script._stages(in_container))
+            assert abs(total - 1.0) < 1e-9
+
+    def test_apt_is_asked_for_a_machine_readable_percentage(self, script):
+        # Without Status-Fd there is no percentage to put in the bar, which is
+        # the entire reason for running this through the Runner.
+        assert "APT::Status-Fd=1" in script.APT
+
+    def test_the_install_runs_through_the_runner_pinned_to_the_stage(self, script):
+        class FakeTimeline:
+            def __init__(self):
+                self.started = []
+
+            def start(self, key):
+                self.started.append(key)
+
+        class FakeWatcher:
+            def __init__(self):
+                self.timeline = FakeTimeline()
+                self.pinned = None
+                self.pins_seen = []
+
+        class FakeRunner:
+            def __init__(self, watcher):
+                self.watcher = watcher
+                self.commands = []
+
+            def run(self, argv, **kwargs):
+                self.commands.append(argv)
+                self.watcher.pins_seen.append(self.watcher.pinned)
+
+        watcher = FakeWatcher()
+        runner = FakeRunner(watcher)
+        script._install_build_tools(runner, watcher)
+
+        assert watcher.timeline.started == ["tools"]
+        # Pinned for the whole install and released afterwards: unpinned, these
+        # apt-get calls read as the packages stage and light up its bar early.
+        assert watcher.pins_seen == ["tools", "tools"]
+        assert watcher.pinned is None
+        assert runner.commands[0][-1] == "update"
+        assert "debootstrap" in runner.commands[1]
+
+    def test_a_failed_tool_install_is_not_swallowed(self, script):
+        class Boom(Exception):
+            pass
+
+        class FakeWatcher:
+            class timeline:
+                @staticmethod
+                def start(key):
+                    pass
+
+            pinned = None
+
+        class FakeRunner:
+            def run(self, argv, **kwargs):
+                raise Boom()
+
+        watcher = FakeWatcher()
+        with pytest.raises(Boom):
+            script._install_build_tools(FakeRunner(), watcher)
+        assert watcher.pinned is None
