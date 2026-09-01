@@ -381,3 +381,29 @@ def test_no_backdrop_is_configured_by_monitor_number():
     for name in package.PACKAGES:
         for destination, content in package.text_files(name).items():
             assert "monitor0" not in content, destination
+
+
+def test_desktop_ships_the_about_dialog_and_its_menu_entry():
+    files = package.text_files("portlin-desktop")
+    assert files["usr/bin/portlin-about"].startswith("#!/usr/bin/env python3")
+    assert "usr/share/applications/portlin-about.desktop" in files
+    assert "usr/bin/portlin-about" in package.executable_paths("portlin-desktop")
+
+
+def test_desktop_depends_on_what_the_about_dialog_needs():
+    # The dialog is GTK, reads the logo portlin-runtime installs, and shells out
+    # to portlin-info. dpkg has no way to know any of that from the file list.
+    control = package.text_files("portlin-desktop")["DEBIAN/control"]
+    depends = next(
+        line.split(":", 1)[1] for line in control.splitlines() if line.startswith("Depends:")
+    )
+    for dependency in ("portlin-runtime", "python3-gi", "gir1.2-gtk-3.0"):
+        assert dependency in depends
+
+
+def test_a_minimal_stick_never_pulls_gtk_for_the_about_dialog():
+    # portlin-runtime is what a --minimal, headless stick installs. Putting the
+    # dialog there would drag GTK and its dependencies onto a system with no X.
+    assert "usr/bin/portlin-about" not in package.text_files("portlin-runtime")
+    control = package.text_files("portlin-runtime")["DEBIAN/control"]
+    assert "python3-gi" not in control

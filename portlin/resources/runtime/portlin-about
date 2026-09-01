@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""The About Portlin dialog, opened from the applications menu.
+
+Runs in the user's session as an ordinary user. Everything it shows about the
+drive comes from portlin-info rather than from a second implementation here:
+that report already knows how to answer these questions on a stick that is a
+different device on every machine, and a copy of it in a dialog is the copy
+nobody would notice going stale.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+
+from gi.repository import Gtk  # noqa: E402
+
+RELEASE = Path("/etc/portlin-release")
+OS_RELEASE = Path("/etc/os-release")
+LOGO = Path("/usr/share/portlin/logo.svg")
+
+WEBSITE = "https://github.com/sleep/Portlin"
+TAGLINE = "A real, upgradable Debian install on a USB stick."
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a KEY=value file, tolerating os-release's quoted values."""
+    if not path.exists():
+        return {}
+    values = {}
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"')
+    return values
+
+
+def _details() -> str:
+    """The portlin-info report, or an explanation of why there isn't one.
+
+    Reported rather than swallowed: an empty expander looks like a dialog bug,
+    where the reason is usually something a person can act on.
+    """
+    try:
+        proc = subprocess.run(
+            ["portlin-info"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Could not run portlin-info: {exc}"
+    if proc.returncode != 0:
+        return proc.stderr.strip() or "portlin-info reported an error."
+    return proc.stdout.strip()
+
+
+def _add_details(dialog: Gtk.AboutDialog) -> None:
+    """Fold the portlin-info report into the dialog, collapsed.
+
+    An AboutDialog is an ordinary Gtk.Dialog underneath, so its content area
+    takes extra children. Collapsed by default because a wall of device paths
+    is not what someone opening About came to read -- but it is exactly what
+    they need the moment they are asked what this stick is.
+    """
+    expander = Gtk.Expander(label="Details")
+    report = Gtk.Label(label=_details(), xalign=0.0, selectable=True)
+    report.get_style_context().add_class("monospace")
+    expander.add(report)
+    expander.set_margin_top(12)
+    dialog.get_content_area().pack_start(expander, False, False, 0)
+    expander.show_all()
+
+
+def _set_logo(dialog: Gtk.AboutDialog) -> None:
+    """Draw the portlin mark, if this system can rasterise an SVG.
+
+    The loader for SVG comes from librsvg2-common, which the package depends on
+    -- but a stick is a system people install things on and remove things from,
+    and a missing logo is not a reason to refuse to open an About box.
+    """
+    try:
+        from gi.repository import GdkPixbuf
+
+        dialog.set_logo(
+            GdkPixbuf.Pixbuf.new_from_file_at_scale(str(LOGO), 128, 128, True)
+        )
+    except Exception:
+        dialog.set_logo_icon_name("drive-removable-media")
+
+
+def main() -> int:
+    release = _parse_env_file(RELEASE)
+    debian = _parse_env_file(OS_RELEASE).get("PRETTY_NAME", "")
+
+    dialog = Gtk.AboutDialog()
+    dialog.set_program_name("Portlin")
+    dialog.set_version(release.get("PORTLIN_VERSION", "unknown"))
+    dialog.set_comments(f"{TAGLINE}\n\n{debian}" if debian else TAGLINE)
+    dialog.set_website(WEBSITE)
+    dialog.set_website_label(WEBSITE)
+    dialog.set_license_type(Gtk.License.GPL_3_0)
+    dialog.set_copyright("Copyright (C) 2026 the portlin authors")
+    _set_logo(dialog)
+    _add_details(dialog)
+
+    dialog.connect("response", lambda *_: Gtk.main_quit())
+    dialog.connect("destroy", lambda *_: Gtk.main_quit())
+    dialog.show()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

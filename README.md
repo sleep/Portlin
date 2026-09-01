@@ -81,8 +81,8 @@ The Debian system updates itself: it is a real install, so `apt full-upgrade`
 and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
-the wallpapers and the `portlin-info`, `portlin-expand` and `portlin-encrypt`
-commands are Debian packages, and will update from portlin's archive like
+the wallpapers, the About Portlin menu entry and the `portlin-info`,
+`portlin-expand` and `portlin-encrypt` commands are Debian packages, and will update from portlin's archive like
 anything else once that archive is published; until then they stay at
 whatever version the stick was written with. The bootloader, the initramfs,
 `fstab` and `crypttab` are written once and stay put, because an update that

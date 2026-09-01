@@ -281,6 +281,17 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "the session puts portlin's xdg directory on XDG_CONFIG_DIRS" \
         || fail "nothing puts /etc/xdg/xdg-portlin on XDG_CONFIG_DIRS"
 
+    # The menu entry and the program it names, separately: an entry whose Exec
+    # points at nothing that was installed is not a missing feature, it is a
+    # line in the applications menu that does nothing when clicked.
+    test -x "$MNT/usr/bin/portlin-about" \
+        && pass "portlin-about is executable" \
+        || fail "portlin-about is missing or not executable"
+
+    test -f "$MNT/usr/share/applications/portlin-about.desktop" \
+        && pass "About Portlin is in the applications menu" \
+        || fail "portlin-about.desktop is missing (nothing opens the About dialog)"
+
     # A wallpaper reaches a fresh account only by being the file xfdesktop
     # falls back to when no xfconf property names the monitor, and every step
     # of that takeover fails silently on its own: the account simply comes up

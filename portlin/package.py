@@ -34,6 +34,12 @@ PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
 TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
 
+# The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
+# a --minimal, headless stick installs, and putting a GTK program there would
+# drag X libraries onto a system that has no X.
+DESKTOP_TOOLS = ["portlin-about"]
+MENU_ENTRIES = {"portlin-about.desktop": "usr/share/applications/portlin-about.desktop"}
+
 # dpkg lets exactly one installed package own a path, so portlin's system
 # defaults cannot live at the canonical /etc/xdg locations: xfce4-settings
 # already ships xsettings.xml there, and unpacking over it aborts the whole
@@ -258,12 +264,25 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             "DEBIAN/control": render_control(
                 name=package,
                 version=version,
-                description="Portlin desktop theme and wallpapers",
-                depends=[],
+                description="Portlin desktop theme, wallpapers and About dialog",
+                # None of this is derivable from the file list: the About dialog
+                # is GTK, it draws the logo portlin-runtime installs, it shells
+                # out to portlin-info, and rasterising that SVG logo needs the
+                # gdk-pixbuf loader librsvg2-common carries.
+                depends=[
+                    "portlin-runtime",
+                    "python3-gi",
+                    "gir1.2-gtk-3.0",
+                    "librsvg2-common",
+                ],
             ),
         }
         for destination, source in THEME_FILES.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
+        for tool in DESKTOP_TOOLS:
+            files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
+        for source, destination in MENU_ENTRIES.items():
+            files[destination] = (RESOURCES / "runtime" / source).read_text()
         for action, script in (("add", "preinst"), ("remove", "postrm")):
             files[f"DEBIAN/{script}"] = render_diversion_script(action)
     else:
@@ -316,5 +335,7 @@ def executable_paths(package: str) -> set[str]:
     if package == "portlin-runtime":
         return {f"usr/bin/{tool}" for tool in TOOLS}
     if package == "portlin-desktop":
-        return {"DEBIAN/preinst", "DEBIAN/postrm"}
+        return {"DEBIAN/preinst", "DEBIAN/postrm"} | {
+            f"usr/bin/{tool}" for tool in DESKTOP_TOOLS
+        }
     return set()

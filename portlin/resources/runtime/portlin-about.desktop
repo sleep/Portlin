@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=About Portlin
+Comment=What this stick is, and what it is running on
+Exec=portlin-about
+Icon=/usr/share/portlin/logo.svg
+Terminal=false
+StartupNotify=true
+# The categories xfce4-about.desktop uses. X-Xfce-Toplevel is what puts an
+# entry at the top of the applications menu instead of inside a submenu, which
+# is where the About it sits beside already lives.
+Categories=X-XFCE;X-Xfce-Toplevel;
+Keywords=portlin;about;version;usb;stick;
