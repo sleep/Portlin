@@ -27,6 +27,11 @@ import traceback
 from pathlib import Path
 
 SENTINEL = Path("/var/lib/portlin/firstboot-pending")
+CRYPTTAB = Path("/etc/crypttab")
+# The comment portlin-finalise-encryption puts at the top of the crypttab it
+# writes. Kept as a substring of that header rather than the whole line, so
+# the two files agree on the claim being made and not on its punctuation.
+CRYPTTAB_BOOT_MARKER = "after boot-time encryption"
 LOG = Path("/var/log/portlin-firstboot.log")
 BACKTITLE = "Portlin first-boot setup"
 
@@ -350,10 +355,9 @@ def _luks_device() -> str | None:
     Read from crypttab rather than guessed, so it stays correct no matter how the
     stick's partitions are enumerated on this particular machine.
     """
-    crypttab = Path("/etc/crypttab")
-    if not crypttab.exists():
+    if not CRYPTTAB.exists():
         return None
-    for line in crypttab.read_text().splitlines():
+    for line in CRYPTTAB.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -368,7 +372,26 @@ def _luks_device() -> str | None:
     return None
 
 
+def _encrypted_at_boot() -> bool:
+    """Whether this stick's passphrase was chosen at this machine.
+
+    The initramfs offers encryption on the first boot of any stick written
+    without --encrypt, and whoever accepts types the passphrase there and then.
+    The finaliser records that by writing a crypttab of its own, which outlives
+    the boot -- unlike /run/portlin/finalised, so setup still knows on a later
+    run after a cancelled one.
+    """
+    if not CRYPTTAB.exists():
+        return False
+    return CRYPTTAB_BOOT_MARKER in CRYPTTAB.read_text()
+
+
 def step_change_passphrase(device: str) -> None:
+    # Nothing to offer when the passphrase is already theirs: they typed it into
+    # the initramfs prompt on the way to this wizard.
+    if _encrypted_at_boot():
+        return
+
     if not confirm(
         "Disk encryption",
         "\nThis stick's storage is encrypted.\n\n"
