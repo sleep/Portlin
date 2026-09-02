@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from portlin import __version__, package
+from portlin import __version__, package, packages
 
 
 def test_local_builds_are_suffixed_so_they_sort_below_a_release():
@@ -407,3 +407,55 @@ def test_a_minimal_stick_never_pulls_gtk_for_the_about_dialog():
     assert "usr/bin/portlin-about" not in package.text_files("portlin-runtime")
     control = package.text_files("portlin-runtime")["DEBIAN/control"]
     assert "python3-gi" not in control
+
+
+# The dependency named on the left is not listed in packages.py, but is pulled
+# in by the one on the right, which is. Kept explicit rather than resolved by
+# asking apt, because these tests run on machines with no Debian archive.
+GUARANTEED_TRANSITIVELY = {"cryptsetup-bin": "cryptsetup"}
+
+
+def _declared_depends(name: str) -> list[str]:
+    control = package.text_files(name)["DEBIAN/control"]
+    line = next(
+        (line for line in control.splitlines() if line.startswith("Depends:")), ""
+    )
+    return [dep.strip() for dep in line.partition(":")[2].split(",") if dep.strip()]
+
+
+@pytest.mark.parametrize("name", package.PACKAGES)
+def test_every_dependency_is_already_in_the_rootfs(name):
+    """write installs these .debs into a chroot with no network.
+
+    install.py opens that chroot with network=False, on purpose: a write is
+    meant to work from a cached rootfs on a machine that is offline. So apt has
+    no archive to fetch from and nothing to fall back on, and a Depends naming
+    anything the rootfs does not already carry cannot be satisfied. It does not
+    fail quietly either -- one unsatisfiable dependency aborts the single
+    transaction that installs all three packages, so the stick is written with
+    none of portlin's own files on it.
+
+    The rootfs is whatever `build` installed, which is packages.resolve(). That
+    is the only thing a Depends here may name, besides portlin's own packages.
+    """
+    available = set(packages.resolve()) | set(package.PACKAGES)
+    available |= set(GUARANTEED_TRANSITIVELY)
+    missing = [dep for dep in _declared_depends(name) if dep not in available]
+    assert not missing, (
+        f"{name} depends on {missing}, which `build` never installs into the "
+        f"rootfs -- the offline apt transaction in write cannot satisfy it"
+    )
+
+
+def test_packages_installed_on_a_minimal_stick_need_no_desktop():
+    """portlin-runtime goes onto a --minimal stick, which has no desktop group.
+
+    Its dependencies therefore have to be satisfiable from the minimal groups
+    alone. portlin-desktop is exempt: write leaves it out entirely when the
+    rootfs has no desktop.
+    """
+    minimal = set(packages.resolve(packages.MINIMAL_GROUPS)) | set(package.PACKAGES)
+    minimal |= set(GUARANTEED_TRANSITIVELY)
+    for name in ("portlin-archive-keyring", "portlin-runtime"):
+        missing = [dep for dep in _declared_depends(name) if dep not in minimal]
+        assert not missing, f"{name} depends on {missing}, absent from a --minimal stick"

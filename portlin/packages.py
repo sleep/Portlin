@@ -120,6 +120,16 @@ DESKTOP = [
     # title bar.
     "greybird-gtk-theme",
     "xdg-utils",
+    # For portlin's own About dialog rather than for Xfce. They belong here
+    # rather than only in portlin-desktop's Depends because write installs that
+    # package into a chroot with no network: anything it depends on has to be
+    # in the rootfs already, put there by build, which is the half that can
+    # still reach an archive. python3-gi and the GTK typelib are what the
+    # dialog is written against; librsvg2-common carries the gdk-pixbuf loader
+    # without which its SVG logo does not render.
+    "python3-gi",
+    "gir1.2-gtk-3.0",
+    "librsvg2-common",
 ]
 
 AUDIO = [
