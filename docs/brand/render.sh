@@ -28,6 +28,9 @@ shot() {  # page scale WxH out
 trap 'rm -f .lockup-light.html' EXIT
 
 shot logo.html         2 256,256 portlin-logo.png
+# 1x and opaque, unlike every other asset here: this one is decoded by GRUB's
+# png module at boot, and drawn at exactly this size by the boot theme.
+shot grub-logo.html    1 128,128 portlin-grub-logo.png
 shot lockup.html       2 524,172 portlin-lockup-dark.png
 shot .lockup-light.html 2 524,172 portlin-lockup-light.png
 

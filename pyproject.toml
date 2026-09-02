@@ -27,6 +27,7 @@ packages = ["portlin"]
 [tool.setuptools.package-data]
 portlin = [
     "resources/firstboot/*",
+    "resources/grub/*",
     "resources/runtime/*",
     "resources/runtime/theme/*",
     "resources/wallpapers/*",

@@ -1,0 +1,62 @@
+# The Portlin boot menu.
+#
+# Every file this references is named relative to this one, and all of them
+# have to sit in this directory rather than anywhere tidier: grub-mkconfig
+# scans the theme's own directory and emits a "loadfont" for each .pf2 it
+# finds there and an "insmod png" if it finds a .png. A font or an image kept
+# somewhere else is never loaded, and the theme then draws nothing.
+#
+# The font name is the one recorded inside unicode.pf2 -- "GNU Unifont
+# Regular 16" -- not the file name and not the "Unicode Regular 16" that most
+# theme examples use. GRUB matches on that internal name, and a name it cannot
+# match leaves every menu entry invisible on a screen that otherwise looks
+# fine.
+
+title-text: ""
+desktop-color: "#12161C"
+terminal-font: "GNU Unifont Regular 16"
+
+# Drawn at its natural 128px. GRUB scales images with a nearest-neighbour
+# resampler, so any other size here would visibly stipple the mark's corners.
++ image {
+    file = "logo.png"
+    left = 50%-64
+    top = 15%
+    width = 128
+    height = 128
+}
+
++ boot_menu {
+    left = 50%-220
+    top = 40%
+    width = 440
+    height = 40%
+    item_font = "GNU Unifont Regular 16"
+    item_color = "#7C8B9E"
+    selected_item_color = "#E8EDF3"
+    item_height = 24
+    item_padding = 2
+    item_spacing = 6
+}
+
++ label {
+    id = "__timeout__"
+    text = "Booting in %d s"
+    left = 0
+    top = 85%
+    width = 100%
+    align = "center"
+    color = "#7C8B9E"
+    font = "GNU Unifont Regular 16"
+}
+
+# Real GRUB keys, in the casing GRUB itself uses for them. Not a tagline.
++ label {
+    text = "e - edit entry     c - command line"
+    left = 0
+    top = 90%
+    width = 100%
+    align = "center"
+    color = "#7C8B9E"
+    font = "GNU Unifont Regular 16"
+}

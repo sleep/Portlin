@@ -1,0 +1,22 @@
+<meta charset="utf-8">
+<!--
+  The mark for the GRUB boot menu.
+
+  Rendered onto solid ink rather than transparency, and at exactly the size the
+  theme draws it. GRUB's png module and its software compositor are a long way
+  from a browser's: an opaque image at its natural size is the one case that
+  needs neither alpha blending nor scaling, and the theme paints the same ink
+  behind it, so the square is invisible.
+-->
+<style>
+  html, body { margin: 0; background: #12161C; }
+  body { width: 128px; height: 128px; display: grid; place-items: center; }
+  svg { width: 96px; height: 96px; display: block; }
+</style>
+<svg viewBox="0 0 64 64" fill="none">
+  <rect x="5" y="5" width="54" height="54" rx="12" stroke="#7C8B9E" stroke-width="4"/>
+  <rect x="7" y="17.5" width="10" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="27"   width="22" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="36.5" width="30" height="5" fill="#7C8B9E"/>
+  <rect x="7" y="46"   width="44" height="5" fill="#FF3355"/>
+</svg>

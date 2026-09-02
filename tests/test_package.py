@@ -275,6 +275,31 @@ def test_runtime_carries_no_desktop_configuration():
     assert not any(path.startswith("etc/lightdm/") for path in files)
 
 
+def test_every_resource_directory_is_declared_as_package_data():
+    # A resources directory missing from package-data is invisible here and
+    # fatal once installed: the files are simply absent from the wheel, so the
+    # working tree passes every test in this file and the first pip-installed
+    # copy to read one dies at exactly the wrong moment -- part way through
+    # writing somebody's drive. Derived from the tree rather than listed, so a
+    # new resources directory fails this until pyproject.toml learns about it.
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    declared = set(
+        tomllib.loads((root / "pyproject.toml").read_text())
+        ["tool"]["setuptools"]["package-data"]["portlin"]
+    )
+    resources = root / "portlin" / "resources"
+    needed = {
+        f"{directory.relative_to(root / 'portlin').as_posix()}/*"
+        for directory in resources.rglob("*")
+        if directory.is_dir()
+        and directory.name != "__pycache__"
+        and any(child.is_file() for child in directory.iterdir())
+    }
+    assert needed <= declared, sorted(needed - declared)
+
+
 def test_every_declared_binary_member_exists():
     for name in package.PACKAGES:
         for destination, source in package.binary_files(name).items():

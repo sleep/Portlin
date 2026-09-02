@@ -386,6 +386,38 @@ def _write_target_config(
         mountpoint / "etc/portlin-release",
         templates.render_os_release_extra(__version__),
     )
+    _install_boot_theme(runner, mountpoint)
+
+
+def _install_boot_theme(runner: Runner, mountpoint: Path) -> None:
+    """Put the mark on the boot menu.
+
+    Written here, before the chroot runs grub-mkconfig, because grub-mkconfig
+    reads the theme directory to decide what to emit: a loadfont for every .pf2
+    in it, an "insmod png" if it finds an image, and the theme path itself. A
+    theme that lands afterwards produces a grub.cfg that points at nothing.
+
+    Purely cosmetic, and deliberately unable to be anything else. Everything it
+    touches is under /boot/grub/themes, so the worst a mistake here can do is
+    drop GRUB back to the plain text menu it would have shown anyway.
+    """
+    from .rootfs import RESOURCES
+
+    theme_dir = mountpoint / templates.GRUB_THEME_DIR.lstrip("/")
+    runner.write_file(
+        mountpoint / templates.GRUB_THEME.lstrip("/"),
+        (RESOURCES / "grub" / "theme.txt").read_text(),
+    )
+    # GRUB has no SVG renderer, so the mark ships as the one raster copy in the
+    # tree; logo.svg serves everywhere a real toolkit is doing the drawing.
+    runner.copy_file(RESOURCES / "grub" / "logo.png", theme_dir / "logo.png")
+    # Taken out of the stick's own grub-common rather than shipped with portlin,
+    # so the font can never be a version this stick's GRUB cannot parse. Skipped
+    # rather than fatal when it is absent: a missing font costs a themed menu,
+    # and refusing to finish writing a drive over one would cost the drive.
+    font = mountpoint / "usr/share/grub/unicode.pf2"
+    if runner.dry_run or font.exists():
+        runner.copy_file(font, theme_dir / "unicode.pf2")
 
 
 def _remove_boot_splash(chroot: Chroot) -> None:

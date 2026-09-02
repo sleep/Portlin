@@ -21,6 +21,13 @@ ESP_MOUNT_OPTIONS = "umask=0077,shortname=winnt"
 # names it that way and the initramfs hook copies whatever path it finds there.
 STASH_KEYSCRIPT = "/lib/cryptsetup/scripts/portlin-stash-passphrase"
 
+# Where the boot theme lands on the stick. Under /boot rather than the usual
+# /usr/share/grub because /boot is the one filesystem GRUB can always read: on
+# an encrypted stick everything else is still inside the LUKS container at the
+# moment the menu is drawn.
+GRUB_THEME_DIR = "/boot/grub/themes/portlin"
+GRUB_THEME = f"{GRUB_THEME_DIR}/theme.txt"
+
 
 def render_fstab(*, root_uuid: str, boot_uuid: str, esp_uuid: str) -> str:
     """Render /etc/fstab.
@@ -101,6 +108,10 @@ def render_default_grub(*, offer_encryption: bool = False) -> str:
             "# /boot is plaintext, so GRUB itself never needs to unlock anything.",
             "GRUB_ENABLE_CRYPTODISK=n",
             'GRUB_PRELOAD_MODULES="part_gpt part_msdos"',
+            # gfxmenu cannot draw in text mode, and a theme it cannot draw is a
+            # theme GRUB silently falls back out of.
+            "GRUB_GFXMODE=auto",
+            f'GRUB_THEME="{GRUB_THEME}"',
             "",
         ]
     )

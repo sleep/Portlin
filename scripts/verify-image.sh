@@ -179,6 +179,43 @@ if [[ -f "$MNT/boot/grub/grub.cfg" ]]; then
     grep -q 'search --no-floppy --fs-uuid' "$MNT/boot/grub/grub.cfg" \
         && pass "GRUB locates /boot by filesystem UUID" \
         || fail "GRUB does not locate /boot by UUID"
+
+    # The boot theme. Every part of it fails on its own terms and all of them
+    # end at the same plain text menu, which is also what a stick with no
+    # theme at all shows -- so none of this is visible to the eye afterwards.
+    THEME_DIR="boot/grub/themes/portlin"
+
+    test -f "$MNT/$THEME_DIR/theme.txt" \
+        && pass "the boot theme is installed" \
+        || fail "no /$THEME_DIR/theme.txt (the boot menu is unbranded)"
+
+    head -c 8 "$MNT/$THEME_DIR/logo.png" 2>/dev/null | grep -qa PNG \
+        && pass "the mark is installed for the boot menu" \
+        || fail "/$THEME_DIR/logo.png is missing or is not a PNG"
+
+    # grub-mkconfig emits a loadfont for every .pf2 in the theme's own
+    # directory and looks nowhere else. A font kept somewhere tidier is never
+    # loaded, and the menu entries then draw as nothing on a screen that
+    # otherwise looks entirely correct.
+    test -f "$MNT/$THEME_DIR/unicode.pf2" \
+        && pass "the boot menu font sits in the theme directory" \
+        || fail "/$THEME_DIR/unicode.pf2 is missing (menu entries render blank)"
+
+    # The three lines grub-mkconfig writes only because those files were in
+    # place before it ran. Checked separately from the files themselves: a
+    # theme written after grub-mkconfig leaves the directory looking perfect
+    # and the generated config still pointing at nothing.
+    grep -q 'set theme=.*themes/portlin/theme.txt' "$MNT/boot/grub/grub.cfg" \
+        && pass "grub.cfg selects the portlin boot theme" \
+        || fail "grub.cfg sets no theme (the theme was written too late)"
+
+    grep -q 'loadfont .*themes/portlin/unicode.pf2' "$MNT/boot/grub/grub.cfg" \
+        && pass "grub.cfg loads the boot theme font" \
+        || fail "grub.cfg has no loadfont for the theme font"
+
+    grep -q '^insmod png' "$MNT/boot/grub/grub.cfg" \
+        && pass "grub.cfg loads the png reader for the mark" \
+        || fail "grub.cfg has no insmod png (the mark cannot be decoded)"
 fi
 
 echo

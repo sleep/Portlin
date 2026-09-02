@@ -189,6 +189,41 @@ class TestUnencryptedWrite:
         assert self.t.has("sync")
 
 
+class TestBootTheme:
+    """The mark on the boot menu.
+
+    Cosmetic, but it lives in the frozen half of the stick: /boot is written
+    once at write time and never upgraded, so a mistake here is a mistake for
+    the life of the drive.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _run(self, plain_config, runner, trace):
+        write_stick(plain_config, runner)
+        self.t = trace(runner)
+
+    def test_the_theme_is_in_place_before_grub_reads_it(self):
+        # grub-mkconfig bakes the theme path into grub.cfg. Writing the theme
+        # afterwards leaves a config pointing at a file that was not there.
+        assert self.t.before(
+            ("write-file", "boot/grub/themes/portlin/theme.txt"),
+            ("grub-mkconfig",),
+        )
+
+    def test_the_mark_ships_beside_the_theme(self):
+        # GRUB has no SVG renderer, so this is the one place the mark has to
+        # be a raster copy rather than the shared logo.svg.
+        assert self.t.has("copy-file", "boot/grub/themes/portlin/logo.png")
+
+    def test_the_menu_font_is_taken_from_the_target(self):
+        # Copied out of the stick's own grub-common rather than shipped, so the
+        # font can never be a version the stick's GRUB cannot parse.
+        assert self.t.has(
+            "copy-file", "usr/share/grub/unicode.pf2",
+        )
+        assert self.t.has("copy-file", "boot/grub/themes/portlin/unicode.pf2")
+
+
 class TestEncryptedWrite:
     @pytest.fixture(autouse=True)
     def _run(self, encrypted_config, runner, trace):

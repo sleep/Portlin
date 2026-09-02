@@ -99,6 +99,22 @@ class TestDefaultGrub:
     def test_preloads_both_partition_table_modules(self):
         assert 'GRUB_PRELOAD_MODULES="part_gpt part_msdos"' in templates.render_default_grub()
 
+    def test_the_boot_menu_is_themed(self):
+        # The mark is the only branding the stick shows before the desktop
+        # starts, and GRUB_TIMEOUT keeps that menu on screen long enough to read.
+        assert f'GRUB_THEME="{templates.GRUB_THEME}"' in templates.render_default_grub()
+
+    def test_the_theme_lives_on_the_plaintext_boot_filesystem(self):
+        # GRUB reads the theme before anything is unlocked. Anywhere under /usr
+        # is inside the LUKS container on an encrypted stick, so it would be
+        # unreadable at exactly the moment it is needed.
+        assert templates.GRUB_THEME.startswith("/boot/")
+
+    def test_a_graphics_mode_is_requested_because_a_theme_needs_one(self):
+        # gfxmenu draws nothing in text mode, and a theme with no usable mode
+        # drops GRUB back to the plain menu without saying why.
+        assert "GRUB_GFXMODE=auto" in templates.render_default_grub()
+
 
 class TestInitramfsConf:
     def test_includes_every_driver_not_just_the_build_hosts(self):
