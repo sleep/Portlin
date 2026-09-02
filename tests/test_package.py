@@ -328,6 +328,28 @@ def test_every_surface_that_names_a_theme_asks_for_the_portlin_icons():
     ]
 
 
+def test_the_greeter_shows_the_portlin_wallpaper():
+    # The greeter runs before any session exists, so nothing it displays can
+    # come through the XDG overlay or xfconf: it reads its own drop-in and a
+    # literal path. That path has to be one this same package ships, or the
+    # login screen quietly falls back to lightdm's own grey while every other
+    # assertion in this file still passes. Derived from the file rather than
+    # spelled twice, so pointing it at a render that was never shipped fails
+    # here instead of on a stranger's laptop.
+    conf = package.text_files("portlin-desktop")[
+        "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf"
+    ]
+    background = next(
+        line.removeprefix("background=") for line in conf.splitlines()
+        if line.startswith("background=")
+    )
+    assert background.lstrip("/") in package.binary_files("portlin-desktop")
+    # The same render xfdesktop falls back to. One size has to stand in for
+    # every panel, and the greeter has no more idea than xfdesktop does what
+    # it will be plugged into.
+    assert package.DEFAULT_BACKDROP_SIZE in background
+
+
 def test_theme_files_are_not_executable():
     assert not (package.executable_paths("portlin-desktop")
                 & set(package.THEME_FILES))

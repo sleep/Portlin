@@ -406,6 +406,16 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "the greeter asks for the portlin icon theme" \
         || fail "the greeter names no icon theme (login runs on the stock set)"
 
+    # The greeter reads a literal path: it runs before any session, so there is
+    # no XDG_CONFIG_DIRS and no xfconf to indirect through. A path to a render
+    # that never shipped leaves lightdm's own grey behind the login prompt and
+    # says nothing about it. Resolved out of the file rather than repeated here.
+    GREETER_BACKGROUND="$(sed -n 's/^background=//p' \
+        "$MNT/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf")"
+    test -f "$MNT/$GREETER_BACKGROUND" \
+        && pass "the greeter background is a wallpaper the image ships" \
+        || fail "the greeter background $GREETER_BACKGROUND is not installed"
+
     # The name the plugin asks for is compiled into it, not configurable. A
     # Debian that renames its menu icon leaves every check above passing and
     # every stick showing Xfce's own button. This is the one that notices.
