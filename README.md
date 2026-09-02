@@ -190,7 +190,7 @@ having expanded, and the same three commands work later by hand.
 
 The image ships with no user, an empty machine-id, no SSH host keys and a locked root account.
 `portlin-firstboot.service` runs on tty1 before LightDM and collects the account, hostname, locale,
-keyboard and time zone. On an encrypted stick it also offers to change the LUKS passphrase, so the
+keyboard, time zone and whether sudo should ask that account for a password. On an encrypted stick it also offers to change the LUKS passphrase, so the
 person holding the stick owns the key rather than whoever built it.
 
 If the wizard is cancelled or crashes its sentinel stays in place and it runs again next boot,

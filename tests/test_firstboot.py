@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -1002,3 +1002,82 @@ class TestThemePicker:
     def test_the_summary_shows_the_chosen_theme(self):
         source = WIZARD.read_text()
         assert "Theme:" in source
+
+
+class TestSudoPasswordChoice:
+    """Whether sudo asks the new account for a password is the user's call.
+
+    A stick is carried, lent and left plugged in, so the cost of waiving the
+    prompt is higher here than on a laptop that lives on a desk. The wizard
+    therefore asks rather than assumes, defaults to asking for a password, and
+    writes the waiver in a form that cannot lock the only privileged account
+    out of its own machine.
+    """
+
+    @pytest.fixture
+    def source(self):
+        return WIZARD.read_text()
+
+    @pytest.fixture
+    def step(self, source):
+        return source[source.index("def step_sudo_password"):source.index("def apply_", source.index("def step_sudo_password"))]
+
+    @pytest.fixture
+    def apply(self, source):
+        start = source.index("def apply_sudo_password")
+        return source[start:source.index("\ndef ", start + 1)]
+
+    def test_the_wizard_asks(self, source):
+        wizard = source[source.index("def wizard()"):source.index("def main()")]
+        assert "step_sudo_password(" in wizard
+
+    def test_requiring_a_password_is_the_default(self, step):
+        # whiptail preselects Yes unless told otherwise, and the safe answer is
+        # the one a hurried person gets by pressing Enter.
+        assert "default_yes=False" not in step
+
+    def test_the_warning_names_what_is_given_up(self, step):
+        assert "root" in step, "the prompt must say what a waived password buys an attacker"
+
+    def test_it_warns_harder_when_nothing_else_guards_the_boot(self, step):
+        # Unencrypted plus autologin means cold boot to root with no secret
+        # anywhere on the path -- a different proposition from the same answer
+        # on a stick that asks for a LUKS passphrase first.
+        assert "autologin" in step and "encrypted" in step
+
+    def test_privilege_is_only_granted_once_the_account_exists(self, source):
+        applying = source[source.index("def wizard()"):source.index("SENTINEL.unlink")]
+        assert applying.index("apply_account(") < applying.index("apply_sudo_password(")
+
+    def test_the_rule_names_the_account_and_not_a_group(self, source):
+        # '%sudo ALL=(ALL) NOPASSWD: ALL' would waive the prompt for every
+        # administrator the stick ever grows, not the one who asked for it.
+        rule = module_constant(WIZARD, "SUDOERS_NOPASSWD_RULE")
+        assert rule.startswith("{username}") and "NOPASSWD" in rule
+
+    def test_the_drop_in_name_carries_no_dot(self, source):
+        # sudo silently ignores files in sudoers.d whose names contain a dot,
+        # so a dotted name here would look installed and do nothing.
+        dropin = re.search(r'SUDOERS_DROPIN = Path\("([^"]+)"\)', source).group(1)
+        assert "." not in PurePosixPath(dropin).name
+
+    def test_the_drop_in_is_checked_before_it_takes_effect(self, apply):
+        # A malformed file in sudoers.d disables sudo outright, and root is
+        # locked on this image: the stick would have no path to privilege left.
+        assert "visudo" in apply, "nothing validates the rule before installing it"
+        assert apply.index("visudo") < apply.index(".replace("), \
+            "the rule must be judged while it is still inert"
+
+    def test_the_drop_in_is_not_writable_by_its_own_user(self, apply):
+        # sudo refuses to read a group- or world-writable sudoers file, so the
+        # mode is part of the rule working at all, not only of it being safe.
+        assert "0o440" in apply
+
+    def test_requiring_a_password_removes_any_waiver(self, apply):
+        # Re-running setup must be able to take the waiver back.
+        assert "unlink" in apply
+
+    def test_the_summary_says_which_was_chosen(self, source):
+        start = source.index('"Ready to apply"')
+        summary = source[start:source.index("raise Cancelled()", start)]
+        assert "sudo" in summary.lower()

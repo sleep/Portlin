@@ -37,6 +37,12 @@ STASH_KEYSCRIPT_OPTION = "keyscript=/lib/cryptsetup/scripts/portlin-stash-passph
 # the two files agree on the claim being made and not on its punctuation.
 CRYPTTAB_BOOT_MARKER = "after boot-time encryption"
 LOG = Path("/var/log/portlin-firstboot.log")
+# Where a waiver of the sudo password prompt is written, and the rule it holds.
+# The name carries no dot on purpose: sudo ignores files in sudoers.d whose
+# names contain one, which is also what keeps the draft in apply_sudo_password
+# inert while visudo is deciding whether to allow it.
+SUDOERS_DROPIN = Path("/etc/sudoers.d/50-portlin-nopasswd")
+SUDOERS_NOPASSWD_RULE = "{username} ALL=(ALL) NOPASSWD: ALL\n"
 BACKTITLE = "Portlin first-boot setup"
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -763,6 +769,25 @@ def step_autologin(username: str, *, encrypted: bool) -> bool:
     )
 
 
+def step_sudo_password(username: str, *, encrypted: bool, autologin: bool) -> bool:
+    warning = (
+        "Saying no lets any command run as root without asking, so anyone who "
+        "reaches this desktop owns the whole system."
+    )
+    if autologin and not encrypted:
+        # Neither a passphrase at boot nor a password at the login screen, so
+        # a waiver here would leave nothing at all on the path from plugging
+        # the stick in to root on the machine it was plugged into.
+        warning += (
+            "\n\nThis stick is not encrypted and logs in automatically, so "
+            "nothing else would stand in the way either."
+        )
+    return confirm(
+        "Administrator password",
+        f"\nRequire a password when '{username}' runs sudo?\n\n{warning}",
+    )
+
+
 # --------------------------------------------------------------------------
 # Applying the answers
 # --------------------------------------------------------------------------
@@ -842,6 +867,35 @@ def apply_account(username: str, full_name: str, password: str) -> None:
         ]
     )
     run(["chpasswd"], stdin=f"{username}:{password}\n")
+
+
+def apply_sudo_password(username: str, required: bool) -> bool:
+    """Record whether sudo asks this account for a password.
+
+    Requiring one needs no file: the account is in the 'sudo' group and
+    Debian's stock sudoers already prompts that group. Only the waiver has to
+    be written down, so only the waiver has to be taken back.
+
+    Returns whether the answer was honoured. A rule sudo refuses to parse
+    disables sudo for every account, and root is locked on this image, so the
+    stick would be left with no way to reach privilege at all. The rule is
+    therefore written aside, judged by visudo while it is still inert, and
+    moved into place only if it passes.
+    """
+    if required:
+        SUDOERS_DROPIN.unlink(missing_ok=True)
+        return True
+
+    draft = SUDOERS_DROPIN.with_name(SUDOERS_DROPIN.name + ".draft")
+    draft.write_text(SUDOERS_NOPASSWD_RULE.format(username=username))
+    draft.chmod(0o440)
+    checked = run(["visudo", "--check", "--file", str(draft)], check=False)
+    if checked.returncode != 0:
+        log(f"refusing an unparseable sudoers rule for {username!r}")
+        draft.unlink(missing_ok=True)
+        return False
+    draft.replace(SUDOERS_DROPIN)
+    return True
 
 
 def apply_autologin(username: str, enabled: bool) -> None:
@@ -964,6 +1018,9 @@ def wizard() -> None:
 
     luks_device = _luks_device()
     autologin = step_autologin(username, encrypted=luks_device is not None)
+    sudo_password = step_sudo_password(
+        username, encrypted=luks_device is not None, autologin=autologin
+    )
     theme = step_theme() if _desktop_installed() else ""
     expand = step_expand()
 
@@ -975,6 +1032,7 @@ def wizard() -> None:
         f"Keyboard:  {layout}\n"
         f"Time zone: {timezone}\n"
         f"Autologin: {'yes' if autologin else 'no'}\n"
+        f"Sudo:      {'asks for a password' if sudo_password else 'no password'}\n"
         + (f"Theme:     {theme}\n" if theme else "")
         + f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
         "Apply these settings now?",
@@ -1005,6 +1063,12 @@ def wizard() -> None:
     apply_timezone(timezone)
     apply_hostname(hostname)
     apply_account(username, full_name, password)
+    if not apply_sudo_password(username, sudo_password):
+        message(
+            "Administrator password",
+            "\nThe rule that skips the sudo password could not be installed, "
+            f"so sudo will ask '{username}' for one after all.",
+        )
     if theme:
         apply_theme(theme)
     apply_autologin(username, autologin)
