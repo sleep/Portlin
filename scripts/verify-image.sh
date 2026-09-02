@@ -292,6 +292,13 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "About Portlin is in the applications menu" \
         || fail "portlin-about.desktop is missing (nothing opens the About dialog)"
 
+    # Without this, X-Xfce-Toplevel still keeps the entry out of a submenu,
+    # but it lands wherever the generic merge puts it rather than right above
+    # About Xfce.
+    test -f "$MNT/etc/xdg/menus/xfce-applications-merged/portlin-about.menu" \
+        && pass "About Portlin is positioned above About Xfce in the menu" \
+        || fail "portlin-about.menu is missing (About Portlin lands away from About Xfce)"
+
     test -x "$MNT/usr/bin/portlin-caffeine" \
         && pass "portlin-caffeine is executable" \
         || fail "portlin-caffeine is missing or not executable"

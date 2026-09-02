@@ -18,6 +18,7 @@ from portlin import package
 RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
 ABOUT = RUNTIME / "portlin-about"
 ENTRY = RUNTIME / "portlin-about.desktop"
+LAYOUT = RUNTIME / "portlin-about.menu"
 
 
 class TestAboutTool:
@@ -65,9 +66,10 @@ class TestMenuEntry:
         assert entry["Exec"] == "portlin-about"
         assert entry.get("Terminal", "false") == "false"
 
-    def test_it_sits_beside_about_xfce_at_the_top_of_the_menu(self):
+    def test_it_sits_at_the_root_of_the_menu_rather_than_a_submenu(self):
         # The categories xfce4-about.desktop uses. Without X-Xfce-Toplevel the
-        # entry falls into a submenu, away from the About it belongs next to.
+        # entry falls into a submenu. This puts it at the same level as About
+        # Xfce, not next to it -- see TestMenuLayout for that.
         categories = self._entry()["Categories"].strip(";").split(";")
         assert "X-XFCE" in categories
         assert "X-Xfce-Toplevel" in categories
@@ -81,3 +83,42 @@ class TestMenuEntry:
         icon = self._entry()["Icon"]
         assert icon.startswith("/")
         assert icon.lstrip("/") in package.binary_files("portlin-runtime")
+
+
+class TestMenuLayout:
+    """The xfce-applications.menu override that positions the entry.
+
+    Categories only say the entry belongs at the menu's root; where among the
+    other root items it lands is a separate question, answered by a Layout,
+    and About Xfce is placed there by Filename rather than by category. This
+    file has to match that mechanism to land beside it.
+    """
+
+    def test_it_merges_into_the_stock_root_menu(self):
+        # A <Menu> merges into an existing one of the same Name rather than
+        # replacing the menu tree, and the stock xfce-applications.menu names
+        # its root menu "Xfce".
+        content = LAYOUT.read_text()
+        assert "<Name>Xfce</Name>" in content
+
+    def test_it_places_itself_immediately_above_about_xfce(self):
+        content = LAYOUT.read_text()
+        filenames = [
+            line.strip().removeprefix("<Filename>").removesuffix("</Filename>")
+            for line in content.splitlines()
+            if "<Filename>" in line
+        ]
+        assert filenames == ["portlin-about.desktop", "xfce4-about.desktop"]
+
+    def test_it_ships_under_the_merge_directory_xfce_reads(self):
+        destination = package.MENU_LAYOUT_ENTRIES["portlin-about.menu"]
+        assert destination == "etc/xdg/menus/xfce-applications-merged/portlin-about.menu"
+        assert destination in package.text_files("portlin-desktop")
+
+    def test_it_is_declared_a_conffile(self):
+        # Under /etc, like the theme defaults and the autostart entry: an
+        # admin who deletes or edits this to change the menu has as much
+        # right to keep that edit as one who has tuned a theme.
+        conffiles = package.text_files("portlin-desktop")["DEBIAN/conffiles"].splitlines()
+        destination = package.MENU_LAYOUT_ENTRIES["portlin-about.menu"]
+        assert f"/{destination}" in conffiles

@@ -43,6 +43,19 @@ MENU_ENTRIES = {
     "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
 }
 
+# X-Xfce-Toplevel (see portlin-about.desktop) only keeps About Portlin out of
+# a category submenu; it says nothing about where among the other root-level
+# entries it lands. About Xfce sits at the very bottom of the stock menu not
+# because of a category but because xfce-applications.menu names it by
+# Filename in its own Layout, and the only way to sit next to a name placed
+# that way is the same treatment. This ships under
+# /etc/xdg/menus/xfce-applications-merged, the directory <DefaultMergeDirs/>
+# reads for a menu file named xfce-applications.menu, and is a conffile like
+# the rest of what portlin puts under /etc: see THEME_FILES.
+MENU_LAYOUT_ENTRIES = {
+    "portlin-about.menu": "etc/xdg/menus/xfce-applications-merged/portlin-about.menu",
+}
+
 # Entries that start a program at login rather than from the menu. Kept apart
 # from MENU_ENTRIES because the destination is under /etc, which makes it a
 # conffile: the file is how someone turns the applet off for good, by
@@ -307,7 +320,11 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
-        for source, destination in {**MENU_ENTRIES, **AUTOSTART_ENTRIES}.items():
+        for source, destination in {
+            **MENU_ENTRIES,
+            **AUTOSTART_ENTRIES,
+            **MENU_LAYOUT_ENTRIES,
+        }.items():
             files[destination] = (RESOURCES / "runtime" / source).read_text()
         for action, script in (("add", "preinst"), ("remove", "postrm")):
             files[f"DEBIAN/{script}"] = render_diversion_script(action)

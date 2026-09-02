@@ -7,8 +7,9 @@ Exec=portlin-about
 Icon=/usr/share/portlin/logo.svg
 Terminal=false
 StartupNotify=true
-# The categories xfce4-about.desktop uses. X-Xfce-Toplevel is what puts an
-# entry at the top of the applications menu instead of inside a submenu, which
-# is where the About it sits beside already lives.
+# The categories xfce4-about.desktop uses. X-Xfce-Toplevel keeps the entry
+# out of a submenu and at the applications menu's root level, which is where
+# About Xfce lives too, but not next to it: that placement, right above About
+# Xfce at the bottom of the menu, comes from portlin-about.menu instead.
 Categories=X-XFCE;X-Xfce-Toplevel;
 Keywords=portlin;about;version;usb;stick;

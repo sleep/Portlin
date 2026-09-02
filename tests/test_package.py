@@ -215,7 +215,7 @@ def test_desktop_ships_every_theme_file():
     files = package.text_files("portlin-desktop")
     for destination in package.THEME_FILES:
         assert destination in files, destination
-    assert "Greybird-dark" in files[
+    assert packages.DEFAULT_THEME in files[
         f"{package.XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
     ]
 
@@ -237,13 +237,15 @@ def test_desktop_ships_its_xdg_defaults_only_under_its_own_overlay():
     # What may sit outside the overlay is a drop-in named after a portlin
     # program, in a directory dpkg lets every desktop package drop into --
     # /etc/xdg/autostart is shared by xfce4-notifyd, blueman and the rest, and
-    # a file nobody else can be named collides with nobody. A default that
-    # another package also ships is the thing that cannot go there, and this
-    # fails the moment one is added under any name.
+    # xfce-applications-merged is the same idea for menu.spec's
+    # <DefaultMergeDirs/>. A file nobody else can be named collides with
+    # nobody. A default that another package also ships is the thing that
+    # cannot go there, and this fails the moment one is added under any name.
+    SHARED_DROPIN_DIRS = {"autostart", "xfce-applications-merged"}
     assert all(Path(path).name.startswith("portlin-") for path in outside), outside
     assert not {Path(path).name for path in outside} & set(package.XDG_DEFAULTS.values())
     assert not {
-        path for path in outside if Path(path).parent.name != "autostart"
+        path for path in outside if Path(path).parent.name not in SHARED_DROPIN_DIRS
     }
 
 
@@ -296,12 +298,17 @@ def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
     # files and overwrites a locally-edited one silently on every upgrade. The
     # session snippet is counted here too: an admin who has tuned the search
     # path has as much right to keep that edit as one who has tuned a theme,
-    # and so has one who has stopped the caffeine applet starting at login.
+    # one who has stopped the caffeine applet starting at login, or one who
+    # has edited the menu layout override back out.
     files = package.text_files("portlin-desktop")
     conffiles = files["DEBIAN/conffiles"].splitlines()
     expected = {
         f"/{destination}"
-        for destination in (*package.THEME_FILES, *package.AUTOSTART_ENTRIES.values())
+        for destination in (
+            *package.THEME_FILES,
+            *package.AUTOSTART_ENTRIES.values(),
+            *package.MENU_LAYOUT_ENTRIES.values(),
+        )
     }
     assert set(conffiles) == expected
     assert len(conffiles) == len(expected)
@@ -407,6 +414,7 @@ def test_desktop_ships_the_about_dialog_and_its_menu_entry():
     assert files["usr/bin/portlin-about"].startswith("#!/usr/bin/env python3")
     assert "usr/share/applications/portlin-about.desktop" in files
     assert "usr/bin/portlin-about" in package.executable_paths("portlin-desktop")
+    assert "etc/xdg/menus/xfce-applications-merged/portlin-about.menu" in files
 
 
 def test_desktop_depends_on_what_the_about_dialog_needs():

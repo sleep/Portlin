@@ -1,0 +1,22 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+ "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+<!--
+Part of portlin. Merges into the root Xfce menu from
+/etc/xdg/menus/xfce-applications-merged, so this Layout is combined with
+the stock one rather than replacing the whole menu: the last <Layout> for
+a given <Menu> wins, and this is the only way to place an entry next to
+About Xfce, which the stock file also names by Filename rather than by
+category.
+-->
+<Menu>
+  <Name>Xfce</Name>
+  <Layout>
+    <Merge type="menus"/>
+    <Merge type="files"/>
+    <Separator/>
+    <Menuname>Settings</Menuname>
+    <Separator/>
+    <Filename>portlin-about.desktop</Filename>
+    <Filename>xfce4-about.desktop</Filename>
+  </Layout>
+</Menu>
