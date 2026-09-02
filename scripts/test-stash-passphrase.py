@@ -36,6 +36,7 @@ NAME = "portlin_root"
 PASSPHRASE = "harness pass with $dollar and spaces"
 SMALL = 64 * 1024**2
 LARGE = 128 * 1024**2
+MOUNT = Path("/mnt/portlin-stash-test")
 
 
 def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -86,6 +87,27 @@ def unlock_through_keyscript(loop: str) -> subprocess.CompletedProcess:
     return opened
 
 
+def stick_contains_passphrase() -> list[str]:
+    """Every file on the mounted stick whose bytes contain the passphrase.
+
+    Deliberately the decrypted view. Grepping the raw image would come back
+    clean whatever happened, because the filesystem sits inside the LUKS
+    container and is ciphertext on disk -- which would make this a test that
+    can only pass. What matters is whether the passphrase became a file on the
+    stick at all, and that is only visible through the mapping.
+    """
+    needle = PASSPHRASE.encode()
+    hits = []
+    for path in MOUNT.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            try:
+                if needle in path.read_bytes():
+                    hits.append(str(path))
+            except OSError:
+                continue
+    return hits
+
+
 def main() -> int:
     if os.geteuid() != 0:
         print("this harness needs root", file=sys.stderr)
@@ -110,6 +132,17 @@ def main() -> int:
     if formatted.returncode != 0:
         run(["losetup", "-d", loop])
         raise SystemExit(f"could not format the container: {formatted.stderr}")
+
+    # A filesystem inside the container, made before the flow runs, so the scan
+    # below inspects a stick that has actually been lived in rather than an
+    # empty device that could not have held anything.
+    prepared = subprocess.run(["cryptsetup", "open", "--key-file", "-", loop, NAME],
+                              input=PASSPHRASE, capture_output=True, text=True)
+    if prepared.returncode != 0:
+        run(["losetup", "-d", loop])
+        raise SystemExit(f"could not open the container to format it: {prepared.stderr}")
+    must(["mkfs.ext4", "-q", f"/dev/mapper/{NAME}"])
+    run(["cryptsetup", "close", NAME])
 
     try:
         STASH.unlink(missing_ok=True)
@@ -150,6 +183,34 @@ def main() -> int:
         if after <= before:
             failures.append(f"the mapping did not grow ({before} -> {after})")
 
+        # Now the question the whole design turns on: after a real unlock, a
+        # real stash and a real expansion, is the passphrase anywhere on the
+        # stick?
+        MOUNT.mkdir(parents=True, exist_ok=True)
+        must(["mount", f"/dev/mapper/{NAME}", str(MOUNT)])
+        must(["resize2fs", f"/dev/mapper/{NAME}"])
+
+        # Positive control first. A scan that reports nothing is worth having
+        # only once it has been shown to report something.
+        planted = MOUNT / "control"
+        planted.write_bytes(PASSPHRASE.encode())
+        run(["sync"])
+        if not stick_contains_passphrase():
+            failures.append("the scan cannot detect a passphrase it was handed; it proves nothing")
+        planted.unlink()
+        run(["sync"])
+
+        leaked = stick_contains_passphrase()
+        if leaked:
+            failures.append(f"the passphrase was written to the stick: {leaked}")
+
+        # And the stash itself is on another filesystem entirely, not this one.
+        if STASH.exists():
+            if STASH.stat().st_dev == MOUNT.stat().st_dev:
+                failures.append("the stash shares a filesystem with the stick")
+
+        run(["umount", str(MOUNT)])
+
         # The stash is an optimisation; the unlock is the machine booting at all.
         # Permission bits cannot express this, because the keyscript runs as root
         # and root writes into a 0500 directory regardless. Putting a plain file
@@ -168,6 +229,7 @@ def main() -> int:
 
         return report(failures)
     finally:
+        run(["umount", str(MOUNT)])
         run(["cryptsetup", "close", NAME])
         run(["losetup", "-d", loop])
         DISK.unlink(missing_ok=True)
@@ -183,7 +245,7 @@ def report(failures: list[str]) -> int:
         for failure in failures:
             print(f"FAIL: {failure}")
         return 1
-    print("PASS: keyscript unlocks, stashes root-only, and expands without a prompt")
+    print("PASS: unlocks, stashes to RAM only, expands without a prompt,\n      and leaves no copy of the passphrase on the stick")
     return 0
 
 
