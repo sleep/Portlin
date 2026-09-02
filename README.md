@@ -75,13 +75,18 @@ greeter and the terminal. The defaults live in `/etc/xdg/xdg-portlin`, which the
 a directory of their own because dpkg lets only one installed package own a path, and Xfce's own
 packages already own the canonical `/etc/xdg` locations.
 
+A coffee cup sits in the panel: click it and the machine stops sleeping, blanking and dimming until
+you click it again, or for a span you pick from `Activate for`. It holds a logind lock over
+`idle:sleep:handle-lid-switch`, so a closed lid does not suspend either. Right-click for
+preferences; untick it in Settings > Session and Startup to stop it appearing at all.
+
 ## Updates
 
 The Debian system updates itself: it is a real install, so `apt full-upgrade`
 and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
-the wallpapers, the About Portlin menu entry and the `portlin-info`,
+the wallpapers, the caffeine applet, the About Portlin menu entry and the `portlin-info`,
 `portlin-expand` and `portlin-encrypt` commands are Debian packages, and will update from portlin's archive like
 anything else once that archive is published; until then they stay at
 whatever version the stick was written with. The bootloader, the initramfs,

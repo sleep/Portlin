@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Caffeine
+GenericName=Sleep Inhibitor
+Comment=Stop this machine sleeping, blanking or dimming
+Exec=portlin-caffeine
+Icon=/usr/share/portlin/caffeine-off.svg
+Terminal=false
+StartupNotify=false
+# Utility rather than Settings: it is a switch that runs, not a page of
+# options, and the applications menu files Settings entries away where nobody
+# looks for a program to launch.
+Categories=Utility;
+Keywords=caffeine;sleep;suspend;awake;insomnia;screensaver;blank;dpms;

@@ -40,10 +40,11 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The five that exercise what a unit test structurally cannot see: the shipped
-# scripts and commands against real block devices, and portlin's own packages
-# against a real dpkg. Each one caught a bug the unit tests could not. Of the
-# five, test-expand.py runs four times: the tier rule keeps the wizard's
+# The six that exercise what a unit test structurally cannot see: the shipped
+# scripts and commands against real block devices, portlin's own packages
+# against a real dpkg, and the caffeine applet against a real X server. Each
+# one caught a bug the unit tests could not. Of the six, test-expand.py runs
+# four times: the tier rule keeps the wizard's
 # apply_expand and the packaged portlin-expand as two separate implementations
 # that can drift, so both need real-device coverage, encrypted and not.
 harness:
@@ -51,7 +52,9 @@ harness:
 	  debian:trixie bash -c 'export DEBIAN_FRONTEND=noninteractive; \
 	  apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 	    python3 gdisk e2fsprogs cryptsetup-bin util-linux mount coreutils \
-	    dmsetup cloud-guest-utils dpkg-dev >/dev/null; \
+	    dmsetup cloud-guest-utils dpkg-dev \
+	    python3-gi gir1.2-gtk-3.0 librsvg2-common xvfb x11-xserver-utils >/dev/null; \
+	  python3 -u scripts/test-caffeine.py && \
 	  python3 -u scripts/test-package-conflicts.py && \
 	  python3 -u scripts/test-encrypt-hook.py && \
 	  python3 -u scripts/test-expand.py && \

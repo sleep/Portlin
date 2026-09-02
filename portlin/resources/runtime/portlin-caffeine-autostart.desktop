@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Caffeine
+Comment=Stop this machine sleeping, blanking or dimming
+Exec=portlin-caffeine
+Icon=/usr/share/portlin/caffeine-off.svg
+Terminal=false
+StartupNotify=false
+# Installed to /etc/xdg/autostart, so it starts for every account on the stick
+# and appears in Xfce's own Session and Startup list, where someone who does
+# not want a cup in their panel can untick it. Deliberately not NoDisplay:
+# a background program nobody can find the switch for is the worse default.
+X-GNOME-Autostart-enabled=true

@@ -37,8 +37,27 @@ TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
 # The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
 # a --minimal, headless stick installs, and putting a GTK program there would
 # drag X libraries onto a system that has no X.
-DESKTOP_TOOLS = ["portlin-about"]
-MENU_ENTRIES = {"portlin-about.desktop": "usr/share/applications/portlin-about.desktop"}
+DESKTOP_TOOLS = ["portlin-about", "portlin-caffeine"]
+MENU_ENTRIES = {
+    "portlin-about.desktop": "usr/share/applications/portlin-about.desktop",
+    "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
+}
+
+# Entries that start a program at login rather than from the menu. Kept apart
+# from MENU_ENTRIES because the destination is under /etc, which makes it a
+# conffile: the file is how someone turns the applet off for good, by
+# unticking it in Session and Startup or editing it, and an ordinary package
+# file would be put back, enabled, by the next upgrade.
+AUTOSTART_ENTRIES = {
+    "portlin-caffeine-autostart.desktop": "etc/xdg/autostart/portlin-caffeine.desktop",
+}
+
+# The two states of the caffeine applet's panel icon. Both ship, because the
+# icon is the only thing that says whether the machine is being kept awake.
+CAFFEINE_ICONS = {
+    f"usr/share/portlin/caffeine-{state}.svg": f"caffeine-{state}.svg"
+    for state in ("on", "off")
+}
 
 # dpkg lets exactly one installed package own a path, so portlin's system
 # defaults cannot live at the canonical /etc/xdg locations: xfce4-settings
@@ -269,11 +288,18 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                 # is GTK, it draws the logo portlin-runtime installs, it shells
                 # out to portlin-info, and rasterising that SVG logo needs the
                 # gdk-pixbuf loader librsvg2-common carries.
+                # The caffeine applet adds the last two: it reads and restores
+                # the X blanking settings with xset, and takes its logind lock
+                # by running systemd-inhibit. Neither shows in the file list,
+                # and without either the applet still starts, still looks
+                # right, and still lets the machine go to sleep.
                 depends=[
                     "portlin-runtime",
                     "python3-gi",
                     "gir1.2-gtk-3.0",
                     "librsvg2-common",
+                    "x11-xserver-utils",
+                    "systemd",
                 ],
             ),
         }
@@ -281,7 +307,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
-        for source, destination in MENU_ENTRIES.items():
+        for source, destination in {**MENU_ENTRIES, **AUTOSTART_ENTRIES}.items():
             files[destination] = (RESOURCES / "runtime" / source).read_text()
         for action, script in (("add", "preinst"), ("remove", "postrm")):
             files[f"DEBIAN/{script}"] = render_diversion_script(action)
@@ -324,7 +350,11 @@ def binary_files(package: str) -> dict[str, Path]:
         # be turned into a dangling link by anything that reorganises the
         # renders, which is the one file on the stick whose absence leaves a
         # fresh account with no wallpaper at all.
-        return renders | {
+        icons = {
+            destination: RESOURCES / "runtime" / source
+            for destination, source in CAFFEINE_ICONS.items()
+        }
+        return renders | icons | {
             DEFAULT_BACKDROP:
                 RESOURCES / "wallpapers" / f"portlin-{DEFAULT_BACKDROP_SIZE}.png"
         }

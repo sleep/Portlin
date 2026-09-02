@@ -292,6 +292,41 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "About Portlin is in the applications menu" \
         || fail "portlin-about.desktop is missing (nothing opens the About dialog)"
 
+    test -x "$MNT/usr/bin/portlin-caffeine" \
+        && pass "portlin-caffeine is executable" \
+        || fail "portlin-caffeine is missing or not executable"
+
+    test -f "$MNT/usr/share/applications/portlin-caffeine.desktop" \
+        && pass "Caffeine is in the applications menu" \
+        || fail "portlin-caffeine.desktop is missing (nothing launches the applet)"
+
+    # The applet is meant to be in the panel without anyone launching it, and
+    # the autostart entry is the only thing that puts it there. Its absence
+    # looks exactly like a working stick until someone goes looking for a cup
+    # that never appeared.
+    test -f "$MNT/etc/xdg/autostart/portlin-caffeine.desktop" \
+        && pass "Caffeine starts with the session" \
+        || fail "no autostart entry (the applet never reaches the panel)"
+
+    # Both states, because the icon is the whole indicator: a stick missing the
+    # active one keeps the machine awake showing an empty cup.
+    for state in on off; do
+        test -f "$MNT/usr/share/portlin/caffeine-$state.svg" \
+            && pass "the caffeine $state icon is installed" \
+            || fail "caffeine-$state.svg is missing (the panel cannot show that state)"
+    done
+
+    # The two commands the applet shells out to. Neither is in its file list,
+    # both are declared dependencies, and without either the applet still
+    # starts and still shows a filled cup while the machine goes to sleep.
+    test -x "$MNT/usr/bin/xset" \
+        && pass "xset is installed for the caffeine applet" \
+        || fail "xset is missing (nothing stops X blanking the screen)"
+
+    test -x "$MNT/usr/bin/systemd-inhibit" \
+        && pass "systemd-inhibit is installed for the caffeine applet" \
+        || fail "systemd-inhibit is missing (nothing takes the logind lock)"
+
     # A wallpaper reaches a fresh account only by being the file xfdesktop
     # falls back to when no xfconf property names the monitor, and every step
     # of that takeover fails silently on its own: the account simply comes up

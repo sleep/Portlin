@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- On: the same cup, filled and steaming. Filled rather than recoloured,
+       because a panel icon is 16 to 24 px on a dark bar: at that size a change
+       of shade is invisible and a change of mass is not. -->
+  <g stroke="#E8EDF3" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 24 H42 V38 A18 18 0 0 1 12 38 Z" fill="#E8EDF3"/>
+    <path d="M42 27 A7 7 0 0 1 42 41"/>
+    <path d="M9 53 H51"/>
+    <path d="M21 17 C24 13 18 10 21 6"/>
+    <path d="M33 17 C36 13 30 10 33 6"/>
+  </g>
+</svg>

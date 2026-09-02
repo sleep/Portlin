@@ -1,0 +1,679 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""A cup in the panel that stops the machine going to sleep.
+
+A stick spends its life in other people's laptops, on power settings nobody
+chose and cannot be bothered to change for one long copy. This is the switch
+for that: click the cup, and nothing suspends, blanks or dims until it is
+clicked again.
+
+Keeping a machine awake takes three separate refusals, because each covers a
+route to sleep the others do not reach. logind decides suspends, idle timers
+and what a closing lid means, and a systemd-inhibit lock is what blocks all
+three. The session's own screensaver and power manager blank the display
+without ever consulting logind, and each has its own D-Bus inhibit call. The X
+server underneath both has a blanking timer and a DPMS timer that answer to
+neither, and only xset turns those off. Any one of the three alone leaves a
+hole, and the hole is invisible until a machine sleeps anyway.
+"""
+
+from __future__ import annotations
+
+import configparser
+import os
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+
+from gi.repository import Gio, GLib, Gtk  # noqa: E402
+
+APP_ID = "org.portlin.Caffeine"
+ICONS = {True: "/usr/share/portlin/caffeine-on.svg",
+         False: "/usr/share/portlin/caffeine-off.svg"}
+# Stock names from the icon naming spec, used only if the SVGs above cannot be
+# rasterised. Distinct in both directions, because a fallback that shows the
+# same picture in both states is a switch with no indicator on it.
+FALLBACK_ICONS = {True: "user-available", False: "user-idle"}
+
+# All three, and in block mode. --mode=delay only postpones a suspend by a few
+# seconds before letting it happen, which would look like caffeine working
+# right up until the machine slept anyway.
+INHIBIT_WHAT = "idle:sleep:handle-lid-switch"
+WHO = "Portlin Caffeine"
+
+# Fixed rather than the menu's own status line, which counts down: the reason
+# is recorded with the lock when it is taken and never updated, so a countdown
+# there would be wrong within a minute of being written.
+WHY = "Caffeine is active"
+
+SUSPEND_BLANKING_ARGV = ["xset", "s", "off", "-dpms"]
+
+SECTION = "caffeine"
+
+DURATIONS = [
+    (15 * 60, "15 minutes"),
+    (30 * 60, "30 minutes"),
+    (60 * 60, "1 hour"),
+    (2 * 60 * 60, "2 hours"),
+    (5 * 60 * 60, "5 hours"),
+    (None, "Until turned off"),
+]
+
+
+@dataclass(frozen=True)
+class SessionInhibitor:
+    """One session service that has to be told separately to stop blanking."""
+
+    name: str
+    path: str
+    interface: str
+
+
+# The two the Xfce session runs. Neither sees the logind lock: that one stops
+# the machine suspending, and these two are what stop the screen going dark
+# while it stays awake.
+SESSION_INHIBITORS = (
+    SessionInhibitor(
+        "org.freedesktop.ScreenSaver",
+        "/org/freedesktop/ScreenSaver",
+        "org.freedesktop.ScreenSaver",
+    ),
+    SessionInhibitor(
+        "org.freedesktop.PowerManagement",
+        "/org/freedesktop/PowerManagement/Inhibit",
+        "org.freedesktop.PowerManagement.Inhibit",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class Settings:
+    """What the applet remembers between sessions."""
+
+    active: bool = False
+    deadline: float | None = None
+    restore_at_login: bool = True
+    default_duration: int | None = None
+    notify_on_expiry: bool = True
+
+
+def inhibit_argv(why: str) -> list[str]:
+    """The systemd-inhibit command whose lifetime is the logind lock.
+
+    systemd-inhibit holds the lock for exactly as long as the command it runs,
+    so the command has to be one that never exits on its own and the lock is
+    released by killing it -- including by the process dying, which is what
+    makes a crash here fail safe rather than leaving a machine that will not
+    sleep and nothing on screen to say why.
+
+    Asked of systemd-inhibit rather than by holding the D-Bus file descriptor
+    directly, because a lock held through Gio's file-descriptor list is a call
+    that cannot be exercised anywhere but a booted stick, and this is the layer
+    that must not quietly fail. Nothing is lost by shelling out: logind lists
+    every lock whoever took it, so this one still answers for itself under the
+    name below when someone asks why their laptop stopped suspending.
+    """
+    return [
+        "systemd-inhibit",
+        f"--what={INHIBIT_WHAT}",
+        f"--who={WHO}",
+        f"--why={why}",
+        "--mode=block",
+        "sleep",
+        "infinity",
+    ]
+
+
+def duration_index(seconds: int | None) -> int:
+    """Where a stored duration sits in DURATIONS, for the Preferences chooser.
+
+    Falls back to the open-ended entry rather than raising. The settings file
+    is editable by hand, and a number matching no entry would otherwise throw
+    while opening the one dialog that could correct it.
+    """
+    for index, (offered, _) in enumerate(DURATIONS):
+        if offered == seconds:
+            return index
+    return len(DURATIONS) - 1
+
+
+def die_with_parent() -> None:
+    """Ask the kernel to kill this process when the one that forked it dies.
+
+    Run in the forked child, before exec. Without it a killed applet leaves
+    systemd-inhibit behind holding the machine awake, with no icon left in the
+    panel to explain it and nothing left to click: the lock outlives every
+    trace of what took it.
+
+    Every failure is swallowed, and that is the point. An exception raised in
+    preexec_fn comes back out of Popen, so an unguarded prctl that failed
+    would cost the lock itself -- and a lock that is merely hard to clean up
+    after a crash beats no lock at all.
+    """
+    try:
+        import ctypes
+
+        # prctl(PR_SET_PDEATHSIG, SIGTERM). systemd-inhibit releases the lock
+        # by exiting, so the default terminating disposition is enough and no
+        # handler has to survive the exec to do it.
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(
+            PR_SET_PDEATHSIG, signal.SIGTERM
+        )
+    except Exception:
+        pass
+
+
+def _numbers(line: str) -> list[int]:
+    """The integers in an xset report line, in order."""
+    values = []
+    for field in line.replace(":", " ").split():
+        try:
+            values.append(int(field))
+        except ValueError:
+            continue
+    return values
+
+
+def parse_xset(text: str) -> dict:
+    """Read the screen-blanking settings out of `xset q`.
+
+    Read before changing them so they can be put back exactly. `xset s
+    default` would be one line shorter and wrong: the numbers a person chose
+    in the power manager are not the X server's compiled-in defaults, and
+    turning caffeine off is not a reason to quietly replace one with the other.
+    """
+    saved: dict = {}
+    for line in (line.strip() for line in text.splitlines()):
+        if line.startswith("timeout:"):
+            values = _numbers(line)
+            if len(values) >= 2:
+                saved["screensaver"] = (values[0], values[1])
+        elif line.startswith("Standby:"):
+            values = _numbers(line)
+            if len(values) >= 3:
+                saved["dpms"] = (values[0], values[1], values[2])
+        elif line.startswith("DPMS is"):
+            saved["dpms_enabled"] = line.endswith("Enabled")
+    return saved
+
+
+def restore_argv(saved: dict) -> list[str]:
+    """The xset command that puts back what parse_xset read.
+
+    Empty when there was nothing to read -- no xset on the system, or no
+    display -- because restoring from an empty reading would invent timeouts
+    nobody set.
+
+    The +dpms/-dpms switch goes last on purpose: `xset dpms <standby>
+    <suspend> <off>` turns DPMS on as a side effect of setting the numbers, so
+    a -dpms written before them is undone by the very next argument.
+    """
+    argv: list[str] = []
+    screensaver = saved.get("screensaver")
+    if screensaver:
+        argv += ["s", str(screensaver[0]), str(screensaver[1])]
+    dpms = saved.get("dpms")
+    if dpms:
+        argv += ["dpms", *(str(value) for value in dpms)]
+    enabled = saved.get("dpms_enabled")
+    if enabled is not None:
+        argv.append("+dpms" if enabled else "-dpms")
+    return ["xset", *argv] if argv else []
+
+
+def format_remaining(seconds: float) -> str:
+    """How much is left, as a person would say it rather than as a clock."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "less than a minute"
+    hours, minutes = divmod(seconds // 60, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if minutes:
+        parts.append(f"{minutes} minute" + ("s" if minutes != 1 else ""))
+    return " ".join(parts)
+
+
+def status_text(active: bool, deadline: float | None, now: float) -> str:
+    """The line at the top of the menu, which is the whole state in one string."""
+    if not active:
+        return "Caffeine is off"
+    if deadline is None:
+        return "Caffeine is active"
+    return f"Caffeine is active for another {format_remaining(deadline - now)}"
+
+
+def settings_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "portlin" / "caffeine.ini"
+
+
+def parse_settings(text: str, now: float | None = None) -> Settings:
+    """Read stored settings, and decide what this session starts as.
+
+    Two things can turn a remembered `active` back off, and both are decided
+    here rather than at the call site so that "what state does a session begin
+    in" has one answer. A deadline that has already passed is one: a stick
+    shut down with ten minutes left and booted a week later would otherwise
+    keep a machine awake on the strength of a countdown that ended before it
+    started. A cleared restore preference is the other.
+    """
+    now = time.time() if now is None else now
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+        if not parser.has_section(SECTION):
+            return Settings()
+        section = parser[SECTION]
+        settings = Settings(
+            active=section.getboolean("active", fallback=False),
+            deadline=_optional_number(section.get("deadline", "")),
+            restore_at_login=section.getboolean("restore_at_login", fallback=True),
+            default_duration=_optional_number(section.get("default_duration", ""), int),
+            notify_on_expiry=section.getboolean("notify_on_expiry", fallback=True),
+        )
+    except (configparser.Error, ValueError):
+        # A file edited by hand into something unparseable is not a reason to
+        # refuse to start, and least of all a reason to start caffeinated.
+        return Settings()
+    expired = settings.deadline is not None and settings.deadline <= now
+    if expired or not settings.restore_at_login:
+        settings = replace(settings, active=False, deadline=None)
+    return settings
+
+
+def _optional_number(value: str, cast=float):
+    value = value.strip()
+    if not value or value.lower() in {"none", "never"}:
+        return None
+    return cast(float(value))
+
+
+def render_settings(settings: Settings) -> str:
+    return "\n".join(
+        [
+            "# Written by portlin-caffeine. Edit it or delete it; the applet",
+            "# falls back to its defaults for anything it cannot read.",
+            f"[{SECTION}]",
+            f"active = {str(settings.active).lower()}",
+            f"deadline = {'none' if settings.deadline is None else int(settings.deadline)}",
+            f"restore_at_login = {str(settings.restore_at_login).lower()}",
+            f"default_duration = "
+            f"{'none' if settings.default_duration is None else settings.default_duration}",
+            f"notify_on_expiry = {str(settings.notify_on_expiry).lower()}",
+            "",
+        ]
+    )
+
+
+def load_settings() -> Settings:
+    try:
+        return parse_settings(settings_path().read_text())
+    except OSError:
+        return Settings()
+
+
+def save_settings(settings: Settings) -> None:
+    path = settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_settings(settings))
+    except OSError as exc:
+        # A read-only home is a reason to forget the state, not to stop
+        # keeping the machine awake.
+        print(f"portlin-caffeine: could not save settings: {exc}", file=sys.stderr)
+
+
+class Caffeine:
+    """The tray icon, and the three refusals it holds while it is active."""
+
+    def __init__(self, settings: Settings, application) -> None:
+        self.settings = settings
+        self.application = application
+        self.inhibitor: subprocess.Popen | None = None
+        self.cookies: list[tuple[SessionInhibitor, int]] = []
+        self.saved_screen: dict = {}
+        self.expiry_source: int | None = None
+        self.menu = None
+        self.icon_size = 22
+
+        self.icon = Gtk.StatusIcon()
+        self.icon.set_title("Caffeine")
+        self.icon.connect("activate", lambda *_: self.toggle())
+        self.icon.connect("popup-menu", self._on_popup)
+        self.icon.connect("size-changed", self._on_size_changed)
+
+        if self.settings.active:
+            self._acquire()
+        self._schedule_expiry()
+        self._refresh()
+
+    # -- the three refusals ------------------------------------------------
+
+    def _bus(self):
+        try:
+            return Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except GLib.Error:
+            return None
+
+    def _acquire(self) -> None:
+        """Take every lock. Each is optional; between them one always lands."""
+        if self.inhibitor is None:
+            try:
+                # Not start_new_session: staying in this process group means
+                # the lock goes when the session does, on top of the death
+                # signal armed above.
+                self.inhibitor = subprocess.Popen(
+                    inhibit_argv(WHY),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    preexec_fn=die_with_parent,
+                )
+            except OSError as exc:
+                print(f"portlin-caffeine: no logind lock: {exc}", file=sys.stderr)
+
+        bus = self._bus()
+        if bus is not None and not self.cookies:
+            for service in SESSION_INHIBITORS:
+                try:
+                    result = bus.call_sync(
+                        service.name,
+                        service.path,
+                        service.interface,
+                        "Inhibit",
+                        GLib.Variant("(ss)", (WHO, WHY)),
+                        GLib.VariantType("(u)"),
+                        Gio.DBusCallFlags.NONE,
+                        5000,
+                        None,
+                    )
+                except GLib.Error:
+                    # Nothing is listening on that name. Expected on a session
+                    # running neither, and covered by the xset call below.
+                    continue
+                self.cookies.append((service, result.unpack()[0]))
+
+        if not self.saved_screen:
+            self.saved_screen = parse_xset(self._xset_query())
+        self._run(SUSPEND_BLANKING_ARGV)
+
+    def _release(self) -> None:
+        if self.inhibitor is not None:
+            self.inhibitor.terminate()
+            try:
+                self.inhibitor.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.inhibitor.kill()
+            self.inhibitor = None
+
+        bus = self._bus()
+        for service, cookie in self.cookies:
+            if bus is None:
+                break
+            try:
+                bus.call_sync(
+                    service.name,
+                    service.path,
+                    service.interface,
+                    "UnInhibit",
+                    GLib.Variant("(u)", (cookie,)),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    5000,
+                    None,
+                )
+            except GLib.Error:
+                continue
+        self.cookies = []
+
+        self._run(restore_argv(self.saved_screen))
+        self.saved_screen = {}
+
+    @staticmethod
+    def _xset_query() -> str:
+        try:
+            proc = subprocess.run(
+                ["xset", "q"], capture_output=True, text=True, timeout=5
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return proc.stdout
+
+    @staticmethod
+    def _run(argv: list[str]) -> None:
+        if not argv:
+            return
+        try:
+            subprocess.run(argv, check=False, timeout=5)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"portlin-caffeine: {argv[0]} failed: {exc}", file=sys.stderr)
+
+    # -- state -------------------------------------------------------------
+
+    def toggle(self) -> None:
+        if self.settings.active:
+            self.set_active(False)
+        else:
+            self.set_active(True, self.settings.default_duration)
+
+    def set_active(self, active: bool, duration: int | None = None) -> None:
+        deadline = time.time() + duration if active and duration else None
+        self.settings = replace(self.settings, active=active, deadline=deadline)
+        if active:
+            self._acquire()
+        else:
+            self._release()
+        self._schedule_expiry()
+        self._refresh()
+        save_settings(self.settings)
+
+    def _schedule_expiry(self) -> None:
+        """Wake once, when the countdown ends, rather than ticking to find out."""
+        if self.expiry_source is not None:
+            GLib.source_remove(self.expiry_source)
+            self.expiry_source = None
+        if not (self.settings.active and self.settings.deadline):
+            return
+        remaining = max(1, int(self.settings.deadline - time.time()))
+        self.expiry_source = GLib.timeout_add_seconds(remaining, self._on_expiry)
+
+    def _on_expiry(self) -> bool:
+        self.expiry_source = None
+        self.set_active(False)
+        if self.settings.notify_on_expiry:
+            self._notify(
+                "Caffeine has turned off",
+                "The time you set has run out. This machine can sleep again.",
+            )
+        return GLib.SOURCE_REMOVE
+
+    def _notify(self, summary: str, body: str) -> None:
+        """Say so over the session bus the applet is already speaking.
+
+        Rather than libnotify, which would add a gir dependency to
+        portlin-desktop for one string, and rather than nothing: a timed
+        session ending in silence is a machine that changed behaviour with no
+        explanation on screen.
+        """
+        bus = self._bus()
+        if bus is None:
+            return
+        try:
+            bus.call_sync(
+                "org.freedesktop.Notifications",
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "Notify",
+                GLib.Variant(
+                    "(susssasa{sv}i)",
+                    (WHO, 0, ICONS[False], summary, body, [], {}, 8000),
+                ),
+                None,
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+            )
+        except GLib.Error:
+            pass
+
+    # -- the icon and its menu ---------------------------------------------
+
+    def _on_size_changed(self, _icon, size: int) -> bool:
+        self.icon_size = size
+        self._refresh()
+        return True
+
+    def _refresh(self) -> None:
+        active = self.settings.active
+        path = ICONS[active]
+        try:
+            from gi.repository import GdkPixbuf
+
+            self.icon.set_from_pixbuf(
+                GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                    path, self.icon_size, self.icon_size, True
+                )
+            )
+        except Exception:
+            # A stick is a system people remove packages from, and a panel with
+            # no cup in it is worse than a panel with the wrong cup in it.
+            self.icon.set_from_icon_name(FALLBACK_ICONS[active])
+        self.icon.set_tooltip_text(
+            status_text(active, self.settings.deadline, time.time())
+        )
+
+    def _on_popup(self, icon, button: int, activate_time: int) -> None:
+        # Kept on the instance, not in a local: the only reference to a menu
+        # built here is the Python one, and letting it fall out of scope
+        # destroys the menu at the moment it is being shown.
+        menu = self.menu = self._build_menu()
+        menu.show_all()
+        menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, activate_time)
+
+    def _build_menu(self) -> Gtk.Menu:
+        """Built fresh on every click, so the countdown in it is never stale."""
+        menu = Gtk.Menu()
+
+        header = Gtk.MenuItem(
+            label=status_text(
+                self.settings.active, self.settings.deadline, time.time()
+            )
+        )
+        header.set_sensitive(False)
+        menu.append(header)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        about = Gtk.MenuItem(label="About Portlin")
+        about.connect("activate", lambda *_: self._run(["portlin-about"]))
+        menu.append(about)
+
+        preferences = Gtk.MenuItem(label="Preferences...")
+        preferences.connect("activate", lambda *_: self._open_preferences())
+        menu.append(preferences)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        activate_for = Gtk.MenuItem(label="Activate for")
+        submenu = Gtk.Menu()
+        for seconds, label in DURATIONS:
+            item = Gtk.MenuItem(label=label)
+            item.connect(
+                "activate", lambda _item, s=seconds: self.set_active(True, s)
+            )
+            submenu.append(item)
+        activate_for.set_submenu(submenu)
+        menu.append(activate_for)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", lambda *_: self.quit())
+        menu.append(quit_item)
+        return menu
+
+    def _open_preferences(self) -> None:
+        dialog = Gtk.Dialog(title="Caffeine Preferences")
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        dialog.set_border_width(12)
+        box = dialog.get_content_area()
+        box.set_spacing(8)
+
+        restore = Gtk.CheckButton(label="Restore the last state when I log in")
+        restore.set_active(self.settings.restore_at_login)
+        box.pack_start(restore, False, False, 0)
+
+        notify = Gtk.CheckButton(label="Tell me when a timed session runs out")
+        notify.set_active(self.settings.notify_on_expiry)
+        box.pack_start(notify, False, False, 0)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.pack_start(Gtk.Label(label="Clicking the cup activates for"), False, False, 0)
+        chooser = Gtk.ComboBoxText()
+        for _, label in DURATIONS:
+            chooser.append_text(label)
+        chooser.set_active(duration_index(self.settings.default_duration))
+        row.pack_start(chooser, False, False, 0)
+        box.pack_start(row, False, False, 0)
+
+        def apply(*_args):
+            self.settings = replace(
+                self.settings,
+                restore_at_login=restore.get_active(),
+                notify_on_expiry=notify.get_active(),
+                default_duration=DURATIONS[chooser.get_active()][0],
+            )
+            save_settings(self.settings)
+            dialog.destroy()
+
+        # Closing the window sends a response too, so there is no path out of
+        # this dialog that skips saving what was ticked in it.
+        dialog.connect("response", apply)
+        dialog.show_all()
+
+    def quit(self) -> None:
+        """Give the machine back before going, whether asked to or killed."""
+        self._release()
+        save_settings(self.settings)
+        self.application.quit()
+
+
+def main() -> int:
+    application = Gtk.Application(application_id=APP_ID)
+    running: dict[str, Caffeine] = {}
+
+    def on_activate(app) -> None:
+        # Fired again when a second copy is launched from the menu: that
+        # process exits and this one is asked to show itself. There is nothing
+        # to raise -- a tray icon is always visible -- and building a second
+        # one would put two cups in the panel holding two sets of locks.
+        if running:
+            return
+        app.hold()
+        applet = running["applet"] = Caffeine(load_settings(), app)
+
+        def on_signal() -> bool:
+            # Logging out is the ordinary way this ends, and it arrives as a
+            # signal rather than a click on Quit. Handled so the screen
+            # settings are put back on the way out.
+            applet.quit()
+            return GLib.SOURCE_REMOVE
+
+        for number in (signal.SIGINT, signal.SIGTERM):
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, number, on_signal)
+
+    application.connect("activate", on_activate)
+    return application.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

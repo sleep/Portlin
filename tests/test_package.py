@@ -234,7 +234,17 @@ def test_desktop_ships_its_xdg_defaults_only_under_its_own_overlay():
         path for path in files
         if path.startswith("etc/xdg/") and not path.startswith(f"{package.XDG_OVERLAY}/")
     )
-    assert outside == []
+    # What may sit outside the overlay is a drop-in named after a portlin
+    # program, in a directory dpkg lets every desktop package drop into --
+    # /etc/xdg/autostart is shared by xfce4-notifyd, blueman and the rest, and
+    # a file nobody else can be named collides with nobody. A default that
+    # another package also ships is the thing that cannot go there, and this
+    # fails the moment one is added under any name.
+    assert all(Path(path).name.startswith("portlin-") for path in outside), outside
+    assert not {Path(path).name for path in outside} & set(package.XDG_DEFAULTS.values())
+    assert not {
+        path for path in outside if Path(path).parent.name != "autostart"
+    }
 
 
 def test_desktop_puts_its_overlay_on_the_session_config_search_path():
@@ -275,18 +285,27 @@ def test_wallpapers_carry_every_declared_size():
     destinations = package.binary_files("portlin-desktop")
     renders = [d for d in destinations if d.startswith("usr/share/backgrounds/portlin/")]
     assert len(renders) == len(package.WALLPAPER_SIZES)
-    assert set(destinations) - set(renders) == {package.DEFAULT_BACKDROP}
+    assert set(destinations) - set(renders) == {
+        package.DEFAULT_BACKDROP,
+        *package.CAFFEINE_ICONS,
+    }
 
 
-def test_desktop_declares_exactly_its_seven_etc_paths_as_conffiles():
+def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
     # Without this member dpkg treats these /etc files as ordinary package
     # files and overwrites a locally-edited one silently on every upgrade. The
     # session snippet is counted here too: an admin who has tuned the search
-    # path has as much right to keep that edit as one who has tuned a theme.
+    # path has as much right to keep that edit as one who has tuned a theme,
+    # and so has one who has stopped the caffeine applet starting at login.
     files = package.text_files("portlin-desktop")
     conffiles = files["DEBIAN/conffiles"].splitlines()
-    assert len(conffiles) == 7
-    assert set(conffiles) == {f"/{destination}" for destination in package.THEME_FILES}
+    expected = {
+        f"/{destination}"
+        for destination in (*package.THEME_FILES, *package.AUTOSTART_ENTRIES.values())
+    }
+    assert set(conffiles) == expected
+    assert len(conffiles) == len(expected)
+    assert conffiles == sorted(conffiles)
 
 
 def test_keyring_declares_its_sources_entry_as_a_conffile(tmp_path, monkeypatch):
@@ -401,6 +420,45 @@ def test_desktop_depends_on_what_the_about_dialog_needs():
         assert dependency in depends
 
 
+def test_desktop_ships_the_caffeine_applet_and_both_its_entries():
+    files = package.text_files("portlin-desktop")
+    assert files["usr/bin/portlin-caffeine"].startswith("#!/usr/bin/env python3")
+    assert "usr/share/applications/portlin-caffeine.desktop" in files
+    assert "etc/xdg/autostart/portlin-caffeine.desktop" in files
+    assert "usr/bin/portlin-caffeine" in package.executable_paths("portlin-desktop")
+
+
+def test_desktop_ships_both_states_of_the_caffeine_icon():
+    # Two files, because the panel icon is the only thing that says whether
+    # the machine is being kept awake. One of them missing is a switch with no
+    # indicator on it.
+    icons = package.binary_files("portlin-desktop")
+    assert "usr/share/portlin/caffeine-on.svg" in icons
+    assert "usr/share/portlin/caffeine-off.svg" in icons
+
+
+def test_the_autostart_entry_is_a_conffile():
+    # It is how someone stops the applet starting at login: untick it in
+    # Session and Startup, or edit the file. Without this member dpkg treats
+    # /etc/xdg/autostart/portlin-caffeine.desktop as an ordinary package file
+    # and puts it back, enabled, on the next upgrade.
+    conffiles = package.text_files("portlin-desktop")["DEBIAN/conffiles"]
+    assert "/etc/xdg/autostart/portlin-caffeine.desktop" in conffiles.splitlines()
+
+
+def test_desktop_depends_on_what_the_caffeine_applet_needs():
+    # xset comes from x11-xserver-utils and systemd-inhibit from systemd.
+    # Neither is derivable from the file list, and each is a layer of the
+    # inhibition: without them the applet starts, looks right, and lets the
+    # machine sleep.
+    control = package.text_files("portlin-desktop")["DEBIAN/control"]
+    depends = next(
+        line.split(":", 1)[1] for line in control.splitlines() if line.startswith("Depends:")
+    )
+    for dependency in ("x11-xserver-utils", "systemd"):
+        assert dependency in depends
+
+
 def test_a_minimal_stick_never_pulls_gtk_for_the_about_dialog():
     # portlin-runtime is what a --minimal, headless stick installs. Putting the
     # dialog there would drag GTK and its dependencies onto a system with no X.
@@ -412,7 +470,12 @@ def test_a_minimal_stick_never_pulls_gtk_for_the_about_dialog():
 # The dependency named on the left is not listed in packages.py, but is pulled
 # in by the one on the right, which is. Kept explicit rather than resolved by
 # asking apt, because these tests run on machines with no Debian archive.
-GUARANTEED_TRANSITIVELY = {"cryptsetup-bin": "cryptsetup"}
+GUARANTEED_TRANSITIVELY = {
+    "cryptsetup-bin": "cryptsetup",
+    # systemd-timesyncd is versioned-depends on systemd, so a stick that
+    # keeps its clock also has systemd-inhibit.
+    "systemd": "systemd-timesyncd",
+}
 
 
 def _declared_depends(name: str) -> list[str]:
