@@ -42,9 +42,25 @@ target size comes out exact. Deriving sizes from a rounded `--force-device-scale
 instead is what produced the 2559x1440 and 5121x2880 wallpapers that `fb9cec5` had to
 replace.
 
+## Where the mark ships
+
+| Surface | File | Mechanism |
+|---|---|---|
+| Boot menu | `portlin/resources/grub/logo.png` | GRUB theme in `/boot/grub/themes/portlin`, selected by `GRUB_THEME` |
+| Applications menu button | `portlin/resources/runtime/logo.svg` | An icon theme that answers to `org.xfce.panel.applicationsmenu` |
+| About Portlin, window list, appfinder | same SVG | Installed into hicolor as `portlin`, named by `Icon=` and `set_default_icon_name` |
+| About dialog | same SVG | `/usr/share/portlin/logo.svg`, drawn by `set_logo` |
+
+The boot menu is the one place the mark cannot be an SVG: GRUB has no SVG renderer, so
+`grub-logo.html` rasterises it at exactly the size the theme draws it, at 1x and onto
+solid ink. GRUB resamples with nearest-neighbour and its own compositor is not a browser's,
+so an opaque image at its natural size is the only case that needs neither scaling nor
+alpha blending. The theme paints the same ink behind it, which is what makes the square
+invisible.
+
 ## Reproducing the shipped set
 
-Every wallpaper in `portlin/resources/wallpapers/` is rendered by `render.sh` and
-reproduces byte for byte, so a change to the design can be checked by re-rendering and
+Every wallpaper in `portlin/resources/wallpapers/`, and the boot menu's
+`portlin/resources/grub/logo.png`, is rendered by `render.sh` and reproduces byte for byte, so a change to the design can be checked by re-rendering and
 diffing. Output still goes to `out/brand/` rather than over the shipped set, so replacing a
 wallpaper stays a deliberate act: look at the new renders, then copy them across.

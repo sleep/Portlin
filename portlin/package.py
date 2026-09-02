@@ -72,6 +72,40 @@ CAFFEINE_ICONS = {
     for state in ("on", "off")
 }
 
+# The icon theme portlin ships, and the one icon in it.
+#
+# xfce4-panel's applications menu takes its button icon from a name compiled
+# into the plugin: Debian's panel layout declares the plugin with no
+# button-icon at all. Answering to that name from a theme portlin owns changes
+# the menu button without freezing Debian's panel layout into the image and
+# without diverting the eight files -- one SVG and seven PNG sizes --
+# xfce4-panel ships for that icon.
+ICON_THEME = "Portlin"
+ICON_THEME_DIR = f"usr/share/icons/{ICON_THEME}"
+MENU_BUTTON_ICON = "org.xfce.panel.applicationsmenu"
+
+# portlin's own icon, by the name desktop entries use. In hicolor rather than
+# the theme above, because every icon theme falls back to hicolor and none
+# falls back to Portlin: an entry that says Icon=portlin has to resolve even
+# for someone who has since picked a different icon theme in Settings.
+APP_ICON = "portlin"
+HICOLOR_APP_ICON = f"usr/share/icons/hicolor/scalable/apps/{APP_ICON}.svg"
+
+# Both copies of the mark, keyed by destination. Copies rather than symlinks
+# into portlin-runtime's logo.svg for the same reason the default backdrop is
+# a copy: 614 bytes each, against a dangling link the day anything moves.
+MARK_ICONS = {
+    f"{ICON_THEME_DIR}/scalable/apps/{MENU_BUTTON_ICON}.svg": "logo.svg",
+    HICOLOR_APP_ICON: "logo.svg",
+}
+
+# The icon theme's index. Not in THEME_FILES because that dict is what lands
+# under /etc, which is what the conffiles member is derived from; this one
+# lives under /usr/share and is an ordinary package file.
+ICON_THEME_FILES = {
+    f"{ICON_THEME_DIR}/index.theme": "icon-theme-index.theme",
+}
+
 # dpkg lets exactly one installed package own a path, so portlin's system
 # defaults cannot live at the canonical /etc/xdg locations: xfce4-settings
 # already ships xsettings.xml there, and unpacking over it aborts the whole
@@ -313,10 +347,15 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     "librsvg2-common",
                     "x11-xserver-utils",
                     "systemd",
+                    # The icon theme portlin's own one-icon theme inherits.
+                    # Without it, naming Portlin in xsettings does not fall
+                    # back to the stock icons -- it leaves the desktop with
+                    # the menu button and nothing else.
+                    "adwaita-icon-theme",
                 ],
             ),
         }
-        for destination, source in THEME_FILES.items():
+        for destination, source in {**THEME_FILES, **ICON_THEME_FILES}.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
@@ -369,7 +408,7 @@ def binary_files(package: str) -> dict[str, Path]:
         # fresh account with no wallpaper at all.
         icons = {
             destination: RESOURCES / "runtime" / source
-            for destination, source in CAFFEINE_ICONS.items()
+            for destination, source in {**CAFFEINE_ICONS, **MARK_ICONS}.items()
         }
         return renders | icons | {
             DEFAULT_BACKDROP:

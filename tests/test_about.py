@@ -36,6 +36,22 @@ class TestAboutTool:
         assert "/etc/portlin-release" in source
         assert "PORTLIN_VERSION" in source
 
+    def test_it_names_its_window_icon_so_the_mark_reaches_the_window_list(self):
+        # set_logo draws inside the dialog and nowhere else. What the window
+        # manager, the task list and the alt-tab switcher show is a separate
+        # icon, and a window that never names one gets a generic placeholder.
+        # The name is the one the packages install into hicolor, so this and
+        # the desktop entry cannot drift apart.
+        source = ABOUT.read_text()
+        assert "Gtk.Window.set_default_icon_name(ICON_NAME)" in source
+        assert f'ICON_NAME = "{package.APP_ICON}"' in source
+        # And that name has to be one the packages actually install, or the
+        # window falls back to the placeholder this exists to replace.
+        assert (
+            f"usr/share/icons/hicolor/scalable/apps/{package.APP_ICON}.svg"
+            in package.binary_files("portlin-desktop")
+        )
+
     def test_it_asks_portlin_info_for_the_details_rather_than_recomputing_them(self):
         # Two implementations of "how big is this drive" is one too many, and
         # the dialog is the copy nobody would notice going stale.
@@ -79,10 +95,19 @@ class TestMenuEntry:
         shipped = package.text_files("portlin-desktop")
         assert f"usr/bin/{exec_name}" in shipped
 
-    def test_its_icon_names_a_file_the_packages_install(self):
+    def test_its_icon_is_a_name_the_packages_install_into_hicolor(self):
+        # A name rather than a path. The path this used to carry pointed into
+        # portlin-runtime from an entry portlin-desktop ships, so the two
+        # packages had to agree on a filename forever; a name is looked up in
+        # the icon theme, and the file backing it can move between packages
+        # without the entry knowing. It is also what the dialog hands
+        # set_default_icon_name to get the mark into the window list.
         icon = self._entry()["Icon"]
-        assert icon.startswith("/")
-        assert icon.lstrip("/") in package.binary_files("portlin-runtime")
+        assert "/" not in icon
+        assert (
+            f"usr/share/icons/hicolor/scalable/apps/{icon}.svg"
+            in package.binary_files("portlin-desktop")
+        )
 
 
 class TestMenuLayout:

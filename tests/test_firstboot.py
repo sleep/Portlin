@@ -985,6 +985,33 @@ class TestThemePicker:
         }
         assert set(module_constant(WIZARD, "THEME_TARGETS")) == shipped
 
+    def test_applying_a_theme_leaves_the_icon_theme_alone(self):
+        # The picker changes the widget theme. These files now carry a second
+        # theme key beside it -- the icon theme -- and in two of them the
+        # widget key is a literal substring of the icon one: theme-name= sits
+        # inside icon-theme-name=, ThemeName inside IconThemeName. What keeps
+        # them apart is the anchoring in the wizard's own patterns, so a
+        # pattern that loses its anchor or is aimed at the wrong key takes the
+        # mark off the menu button and reports nothing.
+        #
+        # Run against the real patterns and the real shipped files, because
+        # the hazard is precisely that the two drift apart.
+        targets = module_constant(WIZARD, "THEME_TARGETS")
+        chosen = "Blackbird"
+        assert chosen in packages.THEME_PACKAGES
+        for destination, (pattern, replacement) in targets.items():
+            body = (
+                self.THEME_RESOURCES
+                / package.THEME_FILES[destination.lstrip("/")]
+            ).read_text()
+            rewritten = re.sub(
+                pattern, replacement.format(theme=chosen), body, count=1
+            )
+            assert chosen in rewritten, destination
+            assert rewritten.count(package.ICON_THEME) == body.count(
+                package.ICON_THEME
+            ), destination
+
     def test_the_wizard_asks_and_applies(self):
         source = WIZARD.read_text()
         wizard = source[source.index("def wizard("):source.index("def main(")]

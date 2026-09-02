@@ -261,6 +261,73 @@ def test_desktop_puts_its_overlay_on_the_session_config_search_path():
     assert "dbus-update-activation-environment" in snippet
 
 
+def test_desktop_ships_the_portlin_icon_theme():
+    files = package.text_files("portlin-desktop")
+    assert f"{package.ICON_THEME_DIR}/index.theme" in files
+
+
+def test_the_icon_theme_inherits_the_stock_set_rather_than_replacing_it():
+    # It provides one icon. Everything else -- every application, every mime
+    # type, every stock arrow -- has to come from the theme it inherits, or
+    # naming this one in xsettings strips the icons off the whole desktop.
+    index = package.text_files("portlin-desktop")[
+        f"{package.ICON_THEME_DIR}/index.theme"
+    ]
+    inherits = [line for line in index.splitlines() if line.startswith("Inherits=")]
+    assert inherits, index
+    assert "Adwaita" in inherits[0]
+    # Last, and always present: hicolor is where portlin's own icon lands, and
+    # the spec makes it the fallback every theme ends at.
+    assert inherits[0].strip().endswith("hicolor")
+
+
+def test_the_icon_theme_carries_the_applications_menu_button():
+    # xfce4-panel does not set button-icon in Debian's panel layout, so the
+    # plugin falls back to the icon name compiled into it. Answering to that
+    # name is the whole mechanism by which the mark reaches the menu button.
+    destinations = package.binary_files("portlin-desktop")
+    icon = f"{package.ICON_THEME_DIR}/scalable/apps/{package.MENU_BUTTON_ICON}.svg"
+    assert icon in destinations
+    assert destinations[icon].name == "logo.svg"
+
+
+def test_the_mark_is_installed_under_its_own_name_in_hicolor():
+    # Icon=portlin in a desktop entry resolves here. hicolor rather than the
+    # portlin theme because this one has to be found whichever icon theme is
+    # active: every theme falls back to hicolor, none falls back to Portlin.
+    destinations = package.binary_files("portlin-desktop")
+    assert package.HICOLOR_APP_ICON in destinations
+    assert destinations[package.HICOLOR_APP_ICON].name == "logo.svg"
+
+
+def test_the_about_entry_asks_for_the_icon_by_name():
+    # A named icon is what puts the mark in the window list, the alt-tab
+    # switcher and the appfinder; an absolute path is honoured by the menu and
+    # ignored by most of the rest.
+    entry = package.text_files("portlin-desktop")[
+        package.MENU_ENTRIES["portlin-about.desktop"]
+    ]
+    assert f"Icon={package.APP_ICON}\n" in entry
+
+
+def test_every_surface_that_names_a_theme_asks_for_the_portlin_icons():
+    # The four files that spell a theme name each need the icon theme too, and
+    # the greeter is one of them: it runs before any session exists, so it
+    # reads its own directory rather than the XDG overlay.
+    files = package.text_files("portlin-desktop")
+    overlay = f"{package.XDG_OVERLAY}"
+    assert f'"IconThemeName" type="string" value="{package.ICON_THEME}"' in files[
+        f"{overlay}/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+    ]
+    for relative in ("gtk-3.0/settings.ini", "gtk-4.0/settings.ini"):
+        assert f"gtk-icon-theme-name={package.ICON_THEME}" in files[
+            f"{overlay}/{relative}"
+        ], relative
+    assert f"icon-theme-name={package.ICON_THEME}" in files[
+        "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf"
+    ]
+
+
 def test_theme_files_are_not_executable():
     assert not (package.executable_paths("portlin-desktop")
                 & set(package.THEME_FILES))
@@ -315,6 +382,7 @@ def test_wallpapers_carry_every_declared_size():
     assert set(destinations) - set(renders) == {
         package.DEFAULT_BACKDROP,
         *package.CAFFEINE_ICONS,
+        *package.MARK_ICONS,
     }
 
 
@@ -490,6 +558,31 @@ def test_desktop_depends_on_what_the_caffeine_applet_needs():
     )
     for dependency in ("x11-xserver-utils", "systemd"):
         assert dependency in depends
+
+
+def test_desktop_depends_on_the_icon_theme_its_own_theme_inherits():
+    # The Portlin icon theme carries one icon and inherits the rest. Naming it
+    # in xsettings makes it the theme for the entire desktop, so if the theme
+    # it inherits from is not installed the result is not "the stock icons" --
+    # it is one menu button and blank space where every other icon was. Not
+    # derivable from the file list: the dependency is a line inside a data
+    # file this package ships.
+    control = package.text_files("portlin-desktop")["DEBIAN/control"]
+    depends = next(
+        line.split(":", 1)[1] for line in control.splitlines() if line.startswith("Depends:")
+    )
+    index = package.text_files("portlin-desktop")[
+        f"{package.ICON_THEME_DIR}/index.theme"
+    ]
+    inherits = next(
+        line.removeprefix("Inherits=") for line in index.splitlines()
+        if line.startswith("Inherits=")
+    )
+    # hicolor is the spec's terminal fallback and comes from hicolor-icon-theme,
+    # which every GTK stack already pulls; the themes named ahead of it are the
+    # ones that have to be asked for.
+    for theme in [name for name in inherits.split(",") if name != "hicolor"]:
+        assert f"{theme.lower()}-icon-theme" in depends, theme
 
 
 def test_a_minimal_stick_never_pulls_gtk_for_the_about_dialog():

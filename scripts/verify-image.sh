@@ -371,6 +371,58 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "systemd-inhibit is installed for the caffeine applet" \
         || fail "systemd-inhibit is missing (nothing takes the logind lock)"
 
+    # The applications menu button. Debian's panel layout declares the plugin
+    # with no button-icon, so it falls back to the icon name compiled into it
+    # and portlin's icon theme answers to that name. Every step here fails
+    # invisibly: the button simply keeps Xfce's own icon.
+    ICON_THEME_DIR="usr/share/icons/Portlin"
+
+    test -f "$MNT/$ICON_THEME_DIR/index.theme" \
+        && pass "the portlin icon theme is installed" \
+        || fail "no /$ICON_THEME_DIR/index.theme (the icon theme does not exist)"
+
+    # It provides one icon. Without an Inherits line, selecting it does not
+    # fall back to the stock icons -- it takes every other icon off the
+    # desktop, which is a far louder failure than the one it was meant to fix.
+    grep -q "^Inherits=" "$MNT/$ICON_THEME_DIR/index.theme" \
+        && pass "the icon theme inherits a stock set" \
+        || fail "Portlin/index.theme inherits nothing (the desktop loses every other icon)"
+
+    test -d "$MNT/usr/share/icons/Adwaita" \
+        && pass "the inherited icon theme is installed" \
+        || fail "Adwaita is missing (the portlin theme inherits from nothing)"
+
+    test -f "$MNT/$ICON_THEME_DIR/scalable/apps/org.xfce.panel.applicationsmenu.svg" \
+        && pass "the mark is installed as the applications menu button" \
+        || fail "the menu button icon is missing (the menu keeps Xfce's own)"
+
+    grep -q 'IconThemeName" type="string" value="Portlin"' \
+        "$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" \
+        && pass "the session asks for the portlin icon theme" \
+        || fail "xsettings names no icon theme (nothing ever selects it)"
+
+    grep -q "^icon-theme-name=Portlin" \
+        "$MNT/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf" \
+        && pass "the greeter asks for the portlin icon theme" \
+        || fail "the greeter names no icon theme (login runs on the stock set)"
+
+    # The name the plugin asks for is compiled into it, not configurable. A
+    # Debian that renames its menu icon leaves every check above passing and
+    # every stick showing Xfce's own button. This is the one that notices.
+    PANEL_PLUGIN="$MNT/usr/lib/x86_64-linux-gnu/xfce4/panel/plugins/libapplicationsmenu.so"
+    if test -f "$PANEL_PLUGIN"; then
+        grep -qa "org.xfce.panel.applicationsmenu" "$PANEL_PLUGIN" \
+            && pass "the panel still asks for the icon name portlin provides" \
+            || fail "libapplicationsmenu asks for some other icon name now"
+    fi
+
+    # Icon=portlin in the About entry resolves here. In hicolor rather than in
+    # the portlin theme, because every icon theme falls back to hicolor and
+    # none falls back to Portlin.
+    test -f "$MNT/usr/share/icons/hicolor/scalable/apps/portlin.svg" \
+        && pass "the mark is installed under its own icon name" \
+        || fail "hicolor apps/portlin.svg is missing (About Portlin has no icon)"
+
     # A wallpaper reaches a fresh account only by being the file xfdesktop
     # falls back to when no xfconf property names the monitor, and every step
     # of that takeover fails silently on its own: the account simply comes up

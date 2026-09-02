@@ -138,6 +138,12 @@ DESKTOP = [
     "xarchiver",
     "desktop-base",
     *THEME_PACKAGES.values(),
+    # Icons, as opposed to the widget themes above. portlin ships a one-icon
+    # theme that takes over the applications menu button and inherits this one
+    # for everything else, so it is a hard requirement rather than whatever
+    # GTK happened to drag in: an inherited theme that is not installed leaves
+    # the desktop with the menu button and blank space.
+    "adwaita-icon-theme",
     "xdg-utils",
     # For portlin's own About dialog rather than for Xfce. They belong here
     # rather than only in portlin-desktop's Depends because write installs that

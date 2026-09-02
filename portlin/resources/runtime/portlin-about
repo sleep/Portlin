@@ -28,6 +28,11 @@ RELEASE = Path("/etc/portlin-release")
 OS_RELEASE = Path("/etc/os-release")
 LOGO = Path("/usr/share/portlin/logo.svg")
 
+# The icon name portlin-desktop installs into hicolor. Named rather than
+# loaded from a path so the window manager, the task list and the alt-tab
+# switcher all get the mark: set_logo below only reaches inside the dialog.
+ICON_NAME = "portlin"
+
 WEBSITE = "https://github.com/sleep/Portlin"
 TAGLINE = "A real, upgradable Debian install on a USB stick."
 
@@ -99,6 +104,8 @@ def _set_logo(dialog: Gtk.AboutDialog) -> None:
 def main() -> int:
     release = _parse_env_file(RELEASE)
     debian = _parse_env_file(OS_RELEASE).get("PRETTY_NAME", "")
+
+    Gtk.Window.set_default_icon_name(ICON_NAME)
 
     dialog = Gtk.AboutDialog()
     dialog.set_program_name("Portlin")

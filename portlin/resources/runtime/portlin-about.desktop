@@ -4,7 +4,7 @@ Type=Application
 Name=About Portlin
 Comment=What this stick is, and what it is running on
 Exec=portlin-about
-Icon=/usr/share/portlin/logo.svg
+Icon=portlin
 Terminal=false
 StartupNotify=true
 # The categories xfce4-about.desktop uses. X-Xfce-Toplevel keeps the entry
