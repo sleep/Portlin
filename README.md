@@ -212,17 +212,27 @@ would leave an unbootable drive.
 | Integration | Linux or Docker, privileged | `ROOTFS=... scripts/integration-test.sh` |
 | End to end | qemu | `make prove` |
 
-`make harness` earns its keep. It runs the *shipped* scripts against real block devices in about
-three minutes: `test-encrypt-hook.py` drives the initramfs encryption script against a loop device
-(prompts, fsck, shrink, encrypt, unlock, mount, and a canary file to prove the data survived), and
-`test-expand.py` runs the wizard's own discovery and expansion code against a real mounted
-filesystem, encrypted and not.
+`make harness` earns its keep. It runs the *shipped* scripts and packages against real block
+devices, a real dpkg and a real X server, in about three minutes. Six harnesses, nine runs:
+
+| Harness | What only a real device shows |
+|---|---|
+| `test-encrypt-hook.py` | the initramfs encryption script end to end: prompts, fsck, shrink, encrypt, unlock, mount, and a canary file proving the data survived |
+| `test-expand.py` | the expansion path against a real mounted filesystem. Four runs: the wizard's `apply_expand` and the packaged `portlin-expand` are separate implementations that can drift, each tested encrypted and not |
+| `test-stash-passphrase.py` | the crypttab keyscript, whose stdout *is* key material, and that the passphrase reaches the wizard without ever becoming a file on the stick |
+| `test-package-conflicts.py` | portlin's packages installing where something else already owns `/etc/xdg` |
+| `test-package-upgrade.py` | conffiles surviving an upgrade, against a real dpkg |
+| `test-caffeine.py` | the applet actually moving the screen settings, against a real X server |
 
 Between them they caught a malformed `partx` argument, `lsblk -o PKNAME` returning empty for
 device-mapper volumes, an assumption that udev had created `/dev/mapper` symlinks, a filesystem
 left larger than its container, and `cryptsetup resize` silently prompting for a passphrase with no
 terminal. Every one had already reached a USB stick, because the only test covering them was a
 fifteen-minute emulated boot.
+
+That last one is now fixed rather than merely survived: the volume key is unreachable once the
+initramfs has exited, so a crypttab keyscript keeps the boot passphrase in `/run` for the wizard to
+finish the expansion with, and deletes it on first use.
 
 `verify-image.sh` is the one to run after any change to the write path: it loop-mounts a finished
 image and checks the things that only show up as "this machine won't boot it" - the UEFI fallback
