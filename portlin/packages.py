@@ -59,6 +59,9 @@ SYSTEM = [
     "tzdata",
     "whiptail",
     "python3",
+    # lspci, for the Software app's hardware scan. Here rather than in TOOLS
+    # because a --minimal stick carries portlin-runtime, which runs it.
+    "pciutils",
     "zram-tools",
     "bash-completion",
     "less",
@@ -155,6 +158,12 @@ DESKTOP = [
     "python3-gi",
     "gir1.2-gtk-3.0",
     "librsvg2-common",
+    # For the Software app. pkexec is what it elevates through, and it is a
+    # separate package from polkitd in trixie. mate-polkit is the agent that
+    # draws the password prompt in an Xfce session; it arrives as a Recommends
+    # of xfce4 today, but a line in someone else's package is not a promise.
+    "pkexec",
+    "mate-polkit",
 ]
 
 AUDIO = [
@@ -182,7 +191,6 @@ TOOLS = [
     "htop",
     "rsync",
     "git",
-    "pciutils",
     "usbutils",
     "lshw",
     "file",

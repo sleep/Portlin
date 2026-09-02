@@ -89,6 +89,11 @@ class TestPortabilityRequirements:
         assert "whiptail" in resolved
         assert "python3" in resolved
 
+    def test_a_minimal_stick_can_identify_its_hardware(self):
+        # portlin-install scan reads lspci, and portlin-runtime goes onto a
+        # --minimal stick, so pciutils has to come from a minimal group.
+        assert "pciutils" in packages.resolve(packages.MINIMAL_GROUPS)
+
     def test_no_swap_package_because_flash_wears_out(self):
         assert "zram-tools" in packages.resolve()
 
@@ -110,3 +115,20 @@ class TestDesktopTheme:
         resolved = packages.resolve(packages.MINIMAL_GROUPS)
         for name in packages.THEME_PACKAGES.values():
             assert name not in resolved, name
+
+
+class TestSoftwareApp:
+    def test_the_desktop_can_ask_for_a_password(self):
+        # pkexec is what the Software app elevates through, and it is a
+        # separate package from polkitd in trixie. mate-polkit is the agent
+        # that draws the prompt in an Xfce session; without one, pkexec fails
+        # with "no authentication agent" and the app cannot install anything.
+        resolved = packages.resolve()
+        assert "pkexec" in resolved
+        assert "mate-polkit" in resolved
+        assert "polkitd" in resolved
+
+    def test_elevation_is_desktop_only(self):
+        minimal = packages.resolve(packages.MINIMAL_GROUPS)
+        assert "pkexec" not in minimal
+        assert "mate-polkit" not in minimal
