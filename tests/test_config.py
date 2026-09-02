@@ -17,6 +17,13 @@ class TestBuildConfig:
         assert cfg.suite == DEFAULT_SUITE
         assert "non-free-firmware" in cfg.components
 
+    def test_new_images_can_reach_non_free(self, tmp_path):
+        # nvidia-driver and nvidia-detect live in non-free. Enabling the
+        # component installs nothing by itself; it is what lets the Software
+        # app offer them without first editing apt sources.
+        cfg = BuildConfig(output=tmp_path / "r.tar.zst")
+        assert "non-free" in cfg.component_list
+
     def test_components_split_into_a_list(self, tmp_path):
         cfg = BuildConfig(output=tmp_path / "r.tar.zst")
         assert cfg.component_list == DEFAULT_COMPONENTS.split()

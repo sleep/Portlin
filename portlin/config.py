@@ -18,8 +18,11 @@ DEFAULT_MIRROR = "http://deb.debian.org/debian"
 DEFAULT_SECURITY_MIRROR = "http://security.debian.org/debian-security"
 
 # non-free-firmware carries the wifi and GPU blobs that make an unknown laptop
-# usable. Without it the stick boots but frequently has no network.
-DEFAULT_COMPONENTS = "main contrib non-free-firmware"
+# usable. Without it the stick boots but frequently has no network. non-free
+# carries the NVIDIA driver; enabling it installs nothing on its own, and the
+# Software app can then offer the driver without first editing apt sources on
+# a stick that may already be years old.
+DEFAULT_COMPONENTS = "main contrib non-free non-free-firmware"
 
 DEFAULT_HOSTNAME = "portlin"
 DEFAULT_LOCALE = "en_US.UTF-8"
