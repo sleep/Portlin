@@ -30,6 +30,9 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from portlin import package as pkg  # noqa: E402
 
 # Two different theme conffiles, one per scenario, so that touching the
 # installed copy of one for the "locally modified" case can never be mistaken
@@ -57,6 +60,24 @@ def build(output: Path, version: str) -> None:
         sys.exit(f"building {version} failed:\n{result.stderr}")
 
 
+def clear_previous_installs() -> None:
+    """Remove any portlin packages this container already carries.
+
+    make harness runs several of these in one container, and the one before
+    this installs portlin's packages at the working tree's own version. The
+    first install below is deliberately an older v1, and apt refuses to
+    downgrade -- so without this the versions here would have to be bumped in
+    step with every release, and forgetting turns the whole gate red for a
+    reason that has nothing to do with what any of these harnesses test.
+
+    Purged rather than removed: dpkg -r leaves conffiles on disk, and this
+    harness exists to assert what happens to conffiles across an upgrade.
+
+    Derived from pkg.PACKAGES so a fourth package cannot be left behind.
+    """
+    run(["dpkg", "--purge", "--force-depends", *pkg.PACKAGES])
+
+
 def install(debs: list[Path]) -> subprocess.CompletedProcess:
     env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
     return subprocess.run(
@@ -76,6 +97,7 @@ def main() -> int:
         first.mkdir()
         second.mkdir()
 
+        clear_previous_installs()
         build(first, "0.1.0~test")
         debs = sorted(first.glob("*.deb"))
         if len(debs) != 3:
