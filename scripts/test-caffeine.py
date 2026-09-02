@@ -21,6 +21,13 @@ and it is the one where a bug is invisible. Every optional layer fails here,
 so what is left is the xset layer alone -- which is precisely the backstop that
 has to work when the other two are missing.
 
+It also rasterises both panel icons through the library that draws them. The
+applet answers a pixbuf it cannot load by putting a stock icon in the panel
+instead, which is right on a machine somebody has taken librsvg off and is
+also why a malformed drawing ships unnoticed: there is always a cup-shaped
+hole, and something is always in it. Only a real rasteriser can say the icon
+that appears is the icon in the repository.
+
 What it cannot reach is DPMS. Xvfb does not implement the extension, with or
 without +extension DPMS, so a server here has screen-blanking settings and no
 display-power ones. The blanking half is exercised end to end; the DPMS half
@@ -41,7 +48,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-APPLET = REPO / "portlin" / "resources" / "runtime" / "portlin-caffeine"
+RUNTIME = REPO / "portlin" / "resources" / "runtime"
+APPLET = RUNTIME / "portlin-caffeine"
 DISPLAY = ":99"
 
 # What the applet must find, and must put back. Not the X server's defaults:
@@ -69,6 +77,27 @@ def load_applet():
     sys.modules[loader.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def check_icons(caffeine) -> None:
+    """Load every icon the applet names, at the size the panel asks for."""
+    from gi.repository import GdkPixbuf
+
+    for active, installed in caffeine.ICONS.items():
+        path = RUNTIME / Path(installed).name
+        if not path.exists():
+            raise SystemExit(f"the applet draws {active} with {installed}, not shipped")
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), 22, 22, True)
+        except Exception as error:
+            raise SystemExit(f"{path.name} will not rasterise: {error}")
+        # A pixbuf of nothing loads without complaint. The drawing has to have
+        # put something opaque in it, or an empty file would pass this.
+        if not pixbuf.get_has_alpha() or pixbuf.get_width() != 22:
+            raise SystemExit(f"{path.name} rasterised to {pixbuf.get_width()} px")
+        if not any(pixbuf.get_pixels()[3::4]):
+            raise SystemExit(f"{path.name} rasterised to a blank square")
+    print("ok: both panel icons rasterised at panel size")
 
 
 def start_xvfb() -> subprocess.Popen:
@@ -99,6 +128,7 @@ def main() -> int:
     server = start_xvfb()
     try:
         caffeine = load_applet()
+        check_icons(caffeine)
         home = Path("/tmp/caffeine-harness-home")
         os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
 

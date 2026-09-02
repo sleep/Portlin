@@ -14,6 +14,7 @@ from __future__ import annotations
 import configparser
 import importlib.machinery
 import importlib.util
+import re
 import sys
 import types
 from pathlib import Path
@@ -328,6 +329,102 @@ class TestTheSessionServicesItAsks:
         assert "org.freedesktop.Notifications" in source
         assert 'require_version("Notify"' not in source
         assert "import Notify" not in source
+
+
+class TestThePanelIcons:
+    """The two SVGs, taken as files something else has to rasterise.
+
+    The applet falls back to a stock icon when a pixbuf will not load, which is
+    right on a stick people remove packages from and wrong as the only thing
+    between a malformed drawing and a shipped image: the panel still has an
+    icon in it, so nothing anywhere says the cup never appeared. These are the
+    assertions the fallback would otherwise swallow.
+    """
+
+    def test_both_states_point_at_an_icon_the_package_ships(self, caffeine):
+        assert set(caffeine.ICONS) == {True, False}
+        for path in caffeine.ICONS.values():
+            assert path.lstrip("/") in package.CAFFEINE_ICONS
+
+    def test_the_icons_are_xml_a_parser_will_take(self):
+        # librsvg reads these with an XML parser: a file that fails here is a
+        # file the panel quietly swaps for the fallback icon, in the one state
+        # it fails in. Skipped rather than assumed where there is no parser to
+        # ask, which is why the narrower check below does not lean on one.
+        pytest.importorskip(
+            "xml.parsers.expat",
+            exc_type=ImportError,
+            reason="no XML parser in this python to check with",
+        )
+        import xml.etree.ElementTree as ET
+
+        for name in package.CAFFEINE_ICONS.values():
+            ET.parse(RUNTIME / name)
+
+    def test_no_comment_in_them_contains_a_double_hyphen(self):
+        # XML forbids it inside a comment, and these icons carry long prose
+        # ones, so it is an easy thing to write and an invisible thing to ship:
+        # the drawing simply never loads and a stock icon stands in for it.
+        for name in package.CAFFEINE_ICONS.values():
+            for comment in re.findall(
+                r"<!--(.*?)-->", (RUNTIME / name).read_text(), re.DOTALL
+            ):
+                assert "--" not in comment, f"{name}: {comment.strip()[:60]}"
+
+    def test_the_off_cup_is_empty_and_the_on_cup_is_not(self):
+        # The states are told apart by mass rather than shade, so the fill is
+        # the difference: the root fill="none" and nothing else in the off cup.
+        off = (RUNTIME / "caffeine-off.svg").read_text()
+        on = (RUNTIME / "caffeine-on.svg").read_text()
+        assert 'fill="none"' in off and off.count("fill=") == 1
+        assert on.count("fill=") > 1
+
+
+class TestTheFallbackSaysSomething:
+    """What the panel does when a drawing will not load, and how loudly.
+
+    The fallback is right and it is also the reason a broken icon can ship: a
+    cup is always in the panel, so the substitution has to announce itself
+    somewhere or nothing does. Once per path, because a repaint happens on
+    every toggle and every panel size change.
+    """
+
+    @pytest.fixture
+    def broken_pixbuf(self):
+        pixbuf = sys.modules["gi.repository.GdkPixbuf"]
+        pixbuf.Pixbuf.new_from_file_at_scale.side_effect = OSError("no such file")
+        yield
+        pixbuf.Pixbuf.new_from_file_at_scale.side_effect = None
+
+    def test_it_names_the_file_and_what_stood_in_for_it(
+        self, caffeine, broken_pixbuf, capsys
+    ):
+        caffeine.Caffeine(caffeine.Settings(), MagicMock())
+        warning = capsys.readouterr().err
+        assert caffeine.ICONS[False] in warning
+        assert caffeine.FALLBACK_ICONS[False] in warning
+
+    def test_it_says_it_once_however_often_the_panel_repaints(
+        self, caffeine, broken_pixbuf, capsys
+    ):
+        applet = caffeine.Caffeine(caffeine.Settings(), MagicMock())
+        applet._refresh()
+        applet._on_size_changed(applet.icon, 24)
+        assert len(_warnings(capsys.readouterr().err)) == 1
+
+    def test_a_second_broken_drawing_is_still_worth_a_line(
+        self, caffeine, broken_pixbuf, capsys
+    ):
+        # Per path rather than per process: the two states are two files, and
+        # the state nobody happened to be in is the one that ships broken.
+        applet = caffeine.Caffeine(caffeine.Settings(), MagicMock())
+        applet.settings = caffeine.Settings(active=True)
+        applet._refresh()
+        assert len(_warnings(capsys.readouterr().err)) == 2
+
+
+def _warnings(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if "could not draw" in line]
 
 
 def _entry(path: Path) -> configparser.SectionProxy:

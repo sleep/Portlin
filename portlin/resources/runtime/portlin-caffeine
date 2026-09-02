@@ -348,6 +348,11 @@ class Caffeine:
         self.expiry_source: int | None = None
         self.menu = None
         self.icon_size = 22
+        # Paths already complained about. The panel repaints on every size
+        # change and every toggle, so an unguarded message about a file that
+        # is still broken is a line a second in the session log for as long as
+        # the session lasts.
+        self.icons_warned: set[str] = set()
 
         self.icon = Gtk.StatusIcon()
         self.icon.set_title("Caffeine")
@@ -546,9 +551,21 @@ class Caffeine:
                     path, self.icon_size, self.icon_size, True
                 )
             )
-        except Exception:
+        except Exception as exc:
             # A stick is a system people remove packages from, and a panel with
-            # no cup in it is worse than a panel with the wrong cup in it.
+            # no cup in it is worse than a panel with the wrong cup in it. But
+            # the substitution is silent from the panel's side: a cup is always
+            # there and nothing says it is the wrong one, so a shipped drawing
+            # that no longer loads looks like a drawing somebody chose. Said
+            # once per path, that is a line in the log; said on every repaint
+            # it is noise nobody reads on a machine with no librsvg at all.
+            if path not in self.icons_warned:
+                self.icons_warned.add(path)
+                print(
+                    f"portlin-caffeine: could not draw {path}: {exc}; "
+                    f"falling back to {FALLBACK_ICONS[active]}",
+                    file=sys.stderr,
+                )
             self.icon.set_from_icon_name(FALLBACK_ICONS[active])
         self.icon.set_tooltip_text(
             status_text(active, self.settings.deadline, time.time())

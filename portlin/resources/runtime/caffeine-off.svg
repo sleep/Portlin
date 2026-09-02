@@ -1,10 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
-  <!-- Off: an empty cup, drawn in the mark's muted line weight so it reads as
-       inactive beside the panel's other icons. No steam, no fill, no accent --
-       crimson belongs to the encrypted root partition and nothing else. -->
-  <g stroke="#7C8B9E" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 24 H42 V38 A18 18 0 0 1 12 38 Z"/>
-    <path d="M42 27 A7 7 0 0 1 42 41"/>
+  <!-- Off: the same cup as the on icon, empty. The rim is drawn as a full
+       ellipse rather than a flat line, so the cup is seen slightly from above
+       and the eye looks into an empty bowl: emptiness is a shape here, not an
+       absence of one. Nothing is recoloured to say off, because the on icon
+       carries its state in mass and a second, contradictory cue in shade is
+       the one that loses at 22 px on a dark panel. No steam, and no crimson:
+       that accent belongs to the encrypted root partition and nothing else. -->
+  <g stroke="#E8EDF3" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="27" cy="24" rx="15" ry="6"/>
+    <path d="M12 24 C12 38 17 45 27 45 C37 45 42 38 42 24"/>
+    <path d="M42 28 A7 7 0 0 1 42 40"/>
     <path d="M9 53 H51"/>
   </g>
 </svg>
