@@ -36,6 +36,30 @@ plymouth quit >/dev/null 2>&1 || true
 CONSOLE="${PORTLIN_CONSOLE:-/dev/console}"
 say() { printf '%s\n' "$1" > "$CONSOLE"; }
 
+# Hand the passphrase to the first-boot wizard, which is minutes away and will
+# need it to grow the LUKS mapping into the rest of the drive.
+#
+# On every later boot the crypttab keyscript does this. It cannot do it on this
+# one: crypttab is written by portlin-finalise-encryption, in userspace, after
+# the disk is already open, so on the boot the container is created this script
+# is the only thing that ever holds the passphrase in the clear. Expansion runs
+# on exactly this boot, and the volume key is unrecoverable once the initramfs
+# is gone -- so without this the wizard has to ask for a passphrase typed a
+# minute earlier at the same keyboard.
+#
+# Same terms as the keyscript: /run is tmpfs and is moved onto the real root at
+# pivot, so the passphrase reaches the wizard without ever being written to the
+# stick, and the wizard deletes it the moment it is spent. The umask covers the
+# directory and the file in one go, leaving no moment where either exists at the
+# default mode. Failure is silent and harmless: it costs the wizard one prompt,
+# which is not worth risking the boot over.
+stash_passphrase() {
+    (
+        umask 077
+        mkdir -p /run/portlin && printf '%s' "$1" > /run/portlin/luks-pass
+    ) 2>/dev/null || true
+}
+
 # Resolve the root device, trying every form the kernel command line can take.
 # local-top runs before initramfs-tools does its own wait for the root device,
 # and a USB stick takes a second or two to enumerate -- so on real hardware the
@@ -103,6 +127,9 @@ if cryptsetup isLuks "$ROOT_DEV" 2>/dev/null; then
         if printf '%s' "$recover" | cryptsetup open --key-file - "$ROOT_DEV" portlin_root; then
             ROOT=/dev/mapper/portlin_root
             export ROOT
+            # Setup is about to run again, expansion and all, so it needs this
+            # for the same reason the encrypt path below does.
+            stash_passphrase "$recover"
             say "Unlocked. Continuing boot."
             exit 0
         fi
@@ -233,6 +260,8 @@ fi
 # boot at the unlocked mapping instead of the now-encrypted raw partition.
 ROOT=/dev/mapper/portlin_root
 export ROOT
+
+stash_passphrase "$pass1"
 
 # Breadcrumb for the first-boot wizard, which finishes the job in userspace:
 # writes crypttab, rebuilds the initramfs and drops portlin.encrypt=ask so the

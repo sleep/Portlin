@@ -22,6 +22,7 @@ GIB = 1024**3
 RESOURCES = Path(__file__).parent.parent / "portlin" / "resources" / "firstboot"
 KEYSCRIPT = RESOURCES / "portlin-stash-passphrase"
 WIZARD = RESOURCES / "portlin-firstboot"
+ENCRYPT_HOOK = RESOURCES / "portlin-encrypt.local-top"
 
 
 class TestTheStashStaysInRam:
@@ -46,6 +47,46 @@ class TestTheStashStaysInRam:
         ]
         assert len(redirections) == 1, f"expected one write, found {redirections}"
         assert "$STASH" in redirections[0]
+
+
+class TestTheHookStashesOnTheSameTerms:
+    """The encrypt hook writes the same stash on the boot it creates the
+    container, so the two writers have to be held to one standard."""
+
+    def test_it_stashes_to_the_same_place_the_keyscript_does(self):
+        # One path, because the wizard reads one path. The two writers reaching
+        # different files would present as the stash silently never working.
+        assert "/run/portlin/luks-pass" in ENCRYPT_HOOK.read_text()
+
+    def test_the_passphrase_is_written_to_exactly_one_place(self):
+        # Everything else this script redirects is either console output, which
+        # never sees the passphrase, or the empty breadcrumb it leaves for the
+        # wizard. Any other write carrying a variable is a second copy, and the
+        # whole argument for keeping one rests on there being exactly one.
+        carrying = [
+            line.strip()
+            for line in ENCRYPT_HOOK.read_text().splitlines()
+            if ">" in line
+            and not line.lstrip().startswith("#")
+            and not line.lstrip().startswith(": >")
+            and "2>" not in line
+            and ">&" not in line
+            and "$CONSOLE" not in line
+        ]
+        assert len(carrying) == 1, f"expected one write, found {carrying}"
+        assert "/run/portlin/luks-pass" in carrying[0]
+
+    def test_nothing_it_writes_lands_on_the_stick(self):
+        code = [
+            line for line in ENCRYPT_HOOK.read_text().splitlines()
+            if ">" in line and not line.lstrip().startswith("#")
+        ]
+        for line in code:
+            for durable in ("/var/", "/etc/", "/root/", "/tmp/"):
+                assert durable not in line, f"the stash must not touch {durable}"
+
+    def test_the_stash_is_unreadable_to_anyone_but_root(self):
+        assert "umask 077" in ENCRYPT_HOOK.read_text()
 
 
 class TestNothingCanPageTheStashToDisk:

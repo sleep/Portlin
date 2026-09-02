@@ -184,8 +184,19 @@ def log(message: str) -> None:
 
 
 def run(argv: list[str], *, check: bool = True, stdin: str | None = None) -> subprocess.CompletedProcess:
+    """Run a command, with the console kept out of its reach.
+
+    stdin is a pipe even when there is nothing to feed in, because the wizard's
+    unit gives it tty1 with StandardInput=tty-force and a child that inherits
+    that has a controlling terminal to prompt on. cryptsetup is the one that
+    does: given a terminal it opens /dev/tty and asks for the passphrase itself,
+    over the top of whatever dialog is on screen, and waits. With a pipe it
+    fails with "Nothing to read on input" instead, which lets the caller decide
+    what to ask and how -- the assumption every fallback in _resize_mapping is
+    built on.
+    """
     log(f"run: {' '.join(argv)}")
-    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True)
+    proc = subprocess.run(argv, input=stdin or "", capture_output=True, text=True)
     if proc.stderr.strip():
         log(f"  stderr: {proc.stderr.strip()}")
     if check and proc.returncode != 0:

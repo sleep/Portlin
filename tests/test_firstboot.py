@@ -8,7 +8,9 @@ the directives the design depends on.
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -36,6 +38,22 @@ def module_constant(path: Path, name: str) -> str:
         ):
             return ast.literal_eval(node.value)
     raise AssertionError(f"{path.name} has no module-level {name}")
+
+
+def load_function(path: Path, name: str, namespace: dict) -> object:
+    """Lift one function out of a script that cannot be imported.
+
+    Same obstacle as module_constant: no .py suffix, and a module body that
+    expects an installed stick. Compiling a single definition on its own gets a
+    test the real function rather than a restatement of it, which is what a
+    claim about how it behaves at a terminal has to be made against.
+    """
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            module = ast.Module(body=[node], type_ignores=[])
+            exec(compile(module, str(path), "exec"), namespace)
+            return namespace[name]
+    raise AssertionError(f"{path.name} has no top-level {name}()")
 
 
 class TestWizardScript:
@@ -501,6 +519,48 @@ class TestEncryptOnFirstBoot:
             )
 
 
+class TestNothingTheWizardRunsCanTakeTheConsole:
+    """The wizard's children must never be able to prompt for themselves.
+
+    systemd hands this wizard tty1 with StandardInput=tty-force, so a child that
+    inherits stdin has a controlling terminal and can open /dev/tty and write
+    straight over the whiptail dialogs. cryptsetup does exactly that: given a
+    terminal it asks "Enter passphrase for /dev/sda4:" and waits, which on an
+    encrypted stick means the keyring probe in _resize_mapping never returns to
+    let the stashed passphrase be tried at all.
+    """
+
+    def test_a_child_command_gets_no_terminal_on_stdin(self):
+        namespace = {"subprocess": subprocess, "log": lambda message: None}
+        run = load_function(WIZARD, "run", namespace)
+
+        primary, secondary = os.openpty()
+        saved = os.dup(0)
+        try:
+            os.dup2(secondary, 0)
+            assert os.isatty(0), "this test only means something on a terminal"
+            result = run(
+                ["sh", "-c", "test -t 0 && echo terminal || echo none"], check=False
+            )
+        finally:
+            os.dup2(saved, 0)
+            os.close(saved)
+            os.close(secondary)
+            os.close(primary)
+
+        assert result.stdout.strip() == "none", (
+            "a command the wizard runs inherited the terminal and can prompt on it"
+        )
+
+    def test_the_keyring_probe_still_reports_failure_rather_than_hanging(self):
+        # The fallbacks below it in _resize_mapping only run if the probe
+        # returns, so it is given no way to wait for a human.
+        namespace = {"subprocess": subprocess, "log": lambda message: None}
+        run = load_function(WIZARD, "run", namespace)
+        result = run(["sh", "-c", "read line || exit 3"], check=False)
+        assert result.returncode == 3
+
+
 class TestWizardConsumesTheStash:
     """How the wizard spends the passphrase the keyscript left in /run."""
 
@@ -603,6 +663,53 @@ class TestStashKeyscript:
         # askpass is what cryptroot itself calls, so it is the one prompt that
         # cooperates with plymouth and the initramfs console.
         assert "/lib/cryptsetup/askpass" in self.STASH.read_text()
+
+
+class TestTheEncryptHookStashesWhatItAsked:
+    """The boot that creates the container is the one boot the keyscript misses.
+
+    crypttab is written by the finaliser, in userspace, minutes after this hook
+    unlocks the drive -- so on the boot someone chooses encryption, this script
+    is the only thing that ever sees the passphrase in the clear. It is also the
+    boot on which the wizard always expands the stick, and growing the mapping
+    needs a key. Without a stash from here the wizard asks for a passphrase
+    typed a minute earlier at the same keyboard.
+    """
+
+    LOCAL_TOP = RESOURCES / "portlin-encrypt.local-top"
+    STASH = "/run/portlin/luks-pass"
+
+    def test_it_stashes_where_the_wizard_looks(self):
+        assert self.STASH in self.LOCAL_TOP.read_text()
+        assert f'STASH = Path("{self.STASH}")' in WIZARD.read_text()
+
+    def test_a_drive_it_encrypts_hands_the_passphrase_on(self):
+        assert 'stash_passphrase "$pass1"' in self.LOCAL_TOP.read_text()
+
+    def test_a_drive_it_recovers_hands_the_passphrase_on(self):
+        # An unfinished setup runs the wizard again, expansion and all, so this
+        # path needs the stash for exactly the same reason.
+        assert 'stash_passphrase "$recover"' in self.LOCAL_TOP.read_text()
+
+    def test_nothing_is_stashed_before_the_container_is_open(self):
+        # A passphrase stashed ahead of the unlock would survive a failed one
+        # and describe a container this boot is not using.
+        body = self.LOCAL_TOP.read_text()
+        for call in ('stash_passphrase "$recover"', 'stash_passphrase "$pass1"'):
+            opened = body.rindex("cryptsetup open --key-file -", 0, body.index(call))
+            assert opened > 0, f"{call} does not follow an unlock"
+
+    def test_a_failed_stash_cannot_fail_the_boot(self):
+        # Same bargain the keyscript strikes: the stash saves the wizard one
+        # prompt, and nothing about it is worth refusing to boot the machine.
+        body = self.LOCAL_TOP.read_text()
+        stash = body[body.index("stash_passphrase()"):body.index("# Resolve the root device")]
+        assert "|| true" in stash
+
+    def test_the_stash_is_unreadable_to_anyone_but_root(self):
+        body = self.LOCAL_TOP.read_text()
+        stash = body[body.index("stash_passphrase()"):body.index("# Resolve the root device")]
+        assert "umask 077" in stash
 
 
 class TestSystemdUnit:

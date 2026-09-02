@@ -231,8 +231,12 @@ terminal. Every one had already reached a USB stick, because the only test cover
 fifteen-minute emulated boot.
 
 That last one is now fixed rather than merely survived: the volume key is unreachable once the
-initramfs has exited, so a crypttab keyscript keeps the boot passphrase in `/run` for the wizard to
-finish the expansion with, and deletes it on first use.
+initramfs has exited, so whatever saw the passphrase there leaves it in `/run` for the wizard to
+finish the expansion with, and the wizard deletes it on first use. On an ordinary boot that is a
+crypttab keyscript; on the boot that creates the container it is the encryption hook itself, which
+runs before any crypttab exists to name a keyscript. The wizard also gives every command it runs a
+pipe on stdin rather than the tty1 it was handed, so cryptsetup cannot take the console and ask for
+the passphrase over the top of the dialogs.
 
 `verify-image.sh` is the one to run after any change to the write path: it loop-mounts a finished
 image and checks the things that only show up as "this machine won't boot it" - the UEFI fallback

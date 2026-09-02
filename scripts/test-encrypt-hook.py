@@ -181,14 +181,30 @@ def main() -> int:
             if reopened.returncode != 0:
                 failures.append(f"cannot reopen on a later boot: {reopened.stderr}")
 
+        # The passphrase has to survive into userspace. On this boot the
+        # crypttab keyscript cannot stash it -- there is no crypttab yet -- and
+        # without a stash the first-boot wizard asks for it again, minutes after
+        # it was typed here, to grow the mapping into the rest of the drive.
+        stash = Path("/run/portlin/luks-pass")
+        if not stash.exists():
+            failures.append("the hook left no passphrase for the wizard")
+        else:
+            if stash.read_bytes() != PASSPHRASE.encode():
+                failures.append("the stash is not the passphrase that was typed")
+            mode = stash.stat().st_mode & 0o777
+            if mode != 0o600:
+                failures.append(f"the stash is readable beyond root (mode {mode:04o})")
+
         print()
         if failures:
             for failure in failures:
                 print(f"FAIL: {failure}")
             return 1
-        print("PASS: encrypted in place, opens, mounts clean, data intact")
+        print("PASS: encrypted in place, opens, mounts clean, data intact,"
+              " passphrase handed to the wizard")
         return 0
     finally:
+        Path("/run/portlin/luks-pass").unlink(missing_ok=True)
         run(["umount", "/mnt/seed"])
         run(["cryptsetup", "close", "portlin_root"])
         run(["umount", "/proc/cmdline"])
