@@ -13,6 +13,11 @@
 # fine.
 
 title-text: ""
+# desktop-image paints the menu, and GRUB_BACKGROUND paints the terminal screen
+# that replaces it once an entry is chosen. Both name the same file so the boot
+# log lands on the same ground the menu stood on. desktop-color stays as the
+# fallback: GRUB drops to it silently if the png ever fails to decode.
+desktop-image: "background.png"
 desktop-color: "#12161C"
 terminal-font: "GNU Unifont Regular 16"
 

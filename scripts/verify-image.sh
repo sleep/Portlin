@@ -193,6 +193,10 @@ if [[ -f "$MNT/boot/grub/grub.cfg" ]]; then
         && pass "the mark is installed for the boot menu" \
         || fail "/$THEME_DIR/logo.png is missing or is not a PNG"
 
+    head -c 8 "$MNT/$THEME_DIR/background.png" 2>/dev/null | grep -qa PNG \
+        && pass "the boot background is installed" \
+        || fail "/$THEME_DIR/background.png is missing or is not a PNG"
+
     # grub-mkconfig emits a loadfont for every .pf2 in the theme's own
     # directory and looks nowhere else. A font kept somewhere tidier is never
     # loaded, and the menu entries then draw as nothing on a screen that
@@ -216,6 +220,24 @@ if [[ -f "$MNT/boot/grub/grub.cfg" ]]; then
     grep -q '^insmod png' "$MNT/boot/grub/grub.cfg" \
         && pass "grub.cfg loads the png reader for the mark" \
         || fail "grub.cfg has no insmod png (the mark cannot be decoded)"
+
+    # 05_debian_theme resolves a background on every grub-mkconfig and always
+    # resolves one. Its chain ends at desktop-base, so an unset GRUB_BACKGROUND
+    # is not a bare screen -- it is Debian's wallpaper behind portlin's boot
+    # log, on the terminal screen the menu is replaced by. The theme cannot
+    # prevent that, and no other assertion here notices it.
+    grep -q 'background_image .*themes/portlin/background.png' \
+        "$MNT/boot/grub/grub.cfg" \
+        && pass "grub.cfg draws the boot log on portlin's background" \
+        || fail "grub.cfg names no portlin background (desktop-base won instead)"
+
+    # The counterpart, and the only evidence Debian's render is off the stick
+    # rather than merely unreferenced. 05_debian_theme copies a background that
+    # lives on another filesystem into /boot/grub, and deletes that copy only
+    # once the background it resolves is one it can read in place.
+    test -e "$MNT/boot/grub/.background_cache.png" \
+        && fail "/boot/grub/.background_cache.png remains (desktop-base's render is still on the stick)" \
+        || pass "no cached background from desktop-base is left on /boot"
 fi
 
 echo

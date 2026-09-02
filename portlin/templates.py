@@ -27,6 +27,12 @@ STASH_KEYSCRIPT = "/lib/cryptsetup/scripts/portlin-stash-passphrase"
 # moment the menu is drawn.
 GRUB_THEME_DIR = "/boot/grub/themes/portlin"
 GRUB_THEME = f"{GRUB_THEME_DIR}/theme.txt"
+# The ground the boot screen is drawn on. Beside the theme rather than under
+# /usr/share/images for the same reason as the theme itself, and with one extra
+# consequence: Debian's 05_debian_theme copies the background into /boot/grub
+# whenever it lives on a different filesystem, so a path already on /boot is
+# read in place and the stale copy is deleted instead of accumulating.
+GRUB_BACKGROUND = f"{GRUB_THEME_DIR}/background.png"
 
 
 def render_fstab(*, root_uuid: str, boot_uuid: str, esp_uuid: str) -> str:
@@ -112,6 +118,14 @@ def render_default_grub(*, offer_encryption: bool = False) -> str:
             # theme GRUB silently falls back out of.
             "GRUB_GFXMODE=auto",
             f'GRUB_THEME="{GRUB_THEME}"',
+            # A theme paints the menu; it does not paint the screen GRUB
+            # switches to when it leaves the menu to report what it is booting.
+            # That screen is the terminal's, and its background is whatever
+            # 05_debian_theme resolved. Unset, that script walks its precedence
+            # chain past this file, past /boot/grub, and lands on desktop-base,
+            # putting Debian's wallpaper behind portlin's boot log. Naming a
+            # file here short-circuits the chain at its first branch.
+            f'GRUB_BACKGROUND="{GRUB_BACKGROUND}"',
             "",
         ]
     )

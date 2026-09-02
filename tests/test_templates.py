@@ -110,6 +110,30 @@ class TestDefaultGrub:
         # unreadable at exactly the moment it is needed.
         assert templates.GRUB_THEME.startswith("/boot/")
 
+    def test_the_boot_background_is_claimed_rather_than_left_to_debian(self):
+        # The regression this exists for. Debian's 05_debian_theme runs on every
+        # grub-mkconfig and resolves a background from a fixed precedence chain:
+        # GRUB_BACKGROUND, then any image in /boot/grub, then desktop-base's
+        # wallpaper. Leaving this unset does not mean "no background" -- it means
+        # the last branch wins and Debian's wallpaper ends up behind portlin's
+        # boot log. GRUB_THEME does not suppress that, because a theme paints the
+        # menu and this paints the terminal the menu is replaced by.
+        assert (
+            f'GRUB_BACKGROUND="{templates.GRUB_BACKGROUND}"'
+            in templates.render_default_grub()
+        )
+
+    def test_the_boot_background_is_claimed_on_encrypted_sticks_too(self):
+        rendered = templates.render_default_grub(offer_encryption=True)
+        assert f'GRUB_BACKGROUND="{templates.GRUB_BACKGROUND}"' in rendered
+
+    def test_the_background_lives_beside_the_theme_on_boot(self):
+        # Two reasons it cannot live under /usr. It is read before the LUKS
+        # container is open, and 05_debian_theme copies a background that sits
+        # on another filesystem into /boot/grub rather than reading it in place,
+        # which would leave a second stale copy on the stick.
+        assert templates.GRUB_BACKGROUND.startswith(templates.GRUB_THEME_DIR + "/")
+
     def test_a_graphics_mode_is_requested_because_a_theme_needs_one(self):
         # gfxmenu draws nothing in text mode, and a theme with no usable mode
         # drops GRUB back to the plain menu without saying why.

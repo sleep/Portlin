@@ -215,6 +215,19 @@ class TestBootTheme:
         # be a raster copy rather than the shared logo.svg.
         assert self.t.has("copy-file", "boot/grub/themes/portlin/logo.png")
 
+    def test_the_background_ships_beside_the_theme(self):
+        # theme.txt names it for the menu and GRUB_BACKGROUND names it for the
+        # terminal screen that replaces the menu. Both resolve inside the theme
+        # directory, so a background that never lands leaves the boot log on
+        # whatever 05_debian_theme picked instead.
+        assert self.t.has("copy-file", "boot/grub/themes/portlin/background.png")
+
+    def test_the_background_is_in_place_before_grub_reads_it(self):
+        assert self.t.before(
+            ("copy-file", "boot/grub/themes/portlin/background.png"),
+            ("grub-mkconfig",),
+        )
+
     def test_the_menu_font_is_taken_from_the_target(self):
         # Copied out of the stick's own grub-common rather than shipped, so the
         # font can never be a version the stick's GRUB cannot parse.

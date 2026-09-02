@@ -411,6 +411,13 @@ def _install_boot_theme(runner: Runner, mountpoint: Path) -> None:
     # GRUB has no SVG renderer, so the mark ships as the one raster copy in the
     # tree; logo.svg serves everywhere a real toolkit is doing the drawing.
     runner.copy_file(RESOURCES / "grub" / "logo.png", theme_dir / "logo.png")
+    # Named by theme.txt and by GRUB_BACKGROUND both, and it has to sit on /boot
+    # for the second of those: 05_debian_theme caches a background that lives on
+    # another filesystem into /boot/grub, and takes the direct path only when the
+    # file is already there.
+    runner.copy_file(
+        RESOURCES / "grub" / "background.png", theme_dir / "background.png"
+    )
     # Taken out of the stick's own grub-common rather than shipped with portlin,
     # so the font can never be a version this stick's GRUB cannot parse. Skipped
     # rather than fatal when it is absent: a missing font costs a themed menu,

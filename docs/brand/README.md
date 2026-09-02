@@ -42,6 +42,26 @@ target size comes out exact. Deriving sizes from a rounded `--force-device-scale
 instead is what produced the 2559x1440 and 5121x2880 wallpapers that `fb9cec5` had to
 replace.
 
+## The boot background
+
+`wallpaper.html` again, with `body.ground` switching off the grid, the partition map and
+the wordmark. Sharing the source is the point: the boot screen and the desktop are the
+same picture, so the ground cannot drift between them.
+
+Everything with an edge comes off, because GRUB resamples with nearest-neighbour onto
+whatever panel the stick is plugged into. That turns the 48px grid into moire and stipples
+the bars; a smooth gradient is the one thing that survives it, which is also why the render
+is 720p and left for GRUB to stretch. The mark is not in it either -- the boot theme draws
+its own, at a size it controls.
+
+It ships as `portlin/resources/grub/background.png` and is named twice, because the boot
+sequence has two surfaces. `desktop-image` in `theme.txt` paints the menu; `GRUB_BACKGROUND`
+in `/etc/default/grub` paints the terminal screen that replaces the menu once an entry is
+chosen, which is where the kernel and initramfs lines are printed. Setting only the theme
+leaves that second screen to Debian's `05_debian_theme`, whose fallback chain ends at
+desktop-base -- so the effect of leaving it unset is not a bare screen but Debian's
+wallpaper behind portlin's boot log.
+
 ## Where the mark ships
 
 | Surface | File | Mechanism |
@@ -61,6 +81,6 @@ invisible.
 ## Reproducing the shipped set
 
 Every wallpaper in `portlin/resources/wallpapers/`, and the boot menu's
-`portlin/resources/grub/logo.png`, is rendered by `render.sh` and reproduces byte for byte, so a change to the design can be checked by re-rendering and
+`portlin/resources/grub/logo.png` and `background.png`, is rendered by `render.sh` and reproduces byte for byte, so a change to the design can be checked by re-rendering and
 diffing. Output still goes to `out/brand/` rather than over the shipped set, so replacing a
 wallpaper stays a deliberate act: look at the new renders, then copy them across.

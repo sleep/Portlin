@@ -25,12 +25,22 @@ shot() {  # page scale WxH out
 # The lockup is one source with two colourways, picked by a class on <body>, so the
 # geometry cannot drift between the light and dark versions.
 { echo '<body class="light">'; cat lockup.html; } > .lockup-light.html
-trap 'rm -f .lockup-light.html' EXIT
+# Same trick for the boot background: one class turns the wallpaper into the
+# bare ground GRUB draws the menu and the boot log on.
+{ echo '<body class="ground">'; cat wallpaper.html; } > .wallpaper-ground.html
+trap 'rm -f .lockup-light.html .wallpaper-ground.html' EXIT
 
 shot logo.html         2 256,256 portlin-logo.png
 # 1x and opaque, unlike every other asset here: this one is decoded by GRUB's
 # png module at boot, and drawn at exactly this size by the boot theme.
 shot grub-logo.html    1 128,128 portlin-grub-logo.png
+# 1x and opaque, like the mark above and for the same reason: GRUB's own png
+# module decodes this one. Rendered at 720p rather than the 1080p every other
+# asset here uses, and then stretched by GRUB to whatever panel it finds: half
+# the bytes on /boot and half the decode before the menu draws, at no visible
+# cost, because nothing in this render has an edge for a nearest-neighbour
+# resampler to chew on.
+shot .wallpaper-ground.html 1 1280,720 portlin-grub-background.png
 shot lockup.html       2 524,172 portlin-lockup-dark.png
 shot .lockup-light.html 2 524,172 portlin-lockup-light.png
 

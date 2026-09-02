@@ -111,6 +111,19 @@
   }
   .tag { display: none; }
   body.cmd .tag { display: block; }
+
+  /* The boot background is this same wallpaper stripped back to its ground.
+     Sharing the source rather than authoring a second gradient is the point:
+     the boot screen and the desktop are the same picture, and cannot drift.
+
+     Everything with an edge comes off. GRUB scales a background with a
+     nearest-neighbour resampler onto whatever panel the stick is plugged into,
+     which turns the 1px grid into moire and stipples the bars; a smooth
+     gradient is the one thing that survives being resampled that way. The mark
+     goes too, because the boot theme draws its own at a size it controls. */
+  body.ground .grid,
+  body.ground .map,
+  body.ground .sig { display: none; }
 </style>
 
 <div id="stage">
