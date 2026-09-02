@@ -50,6 +50,41 @@ DESIRED_GROUPS = [
 # one up, and its absence is a meaningful answer rather than an error.
 GNOME_KEYRING_DAEMON = "/usr/bin/gnome-keyring-daemon"
 
+# The desktop themes portlin-desktop installs, in the order the picker offers
+# them. First is the default, and the theme files in the image name it; the
+# unit tests hold this list, portlin.packages.THEME_PACKAGES and those files in
+# agreement, because nothing here fails loudly when they drift.
+THEMES = [
+    ("Numix", "Dark, red accent"),
+    ("Greybird-dark", "Dark, blue accent"),
+    ("Blackbird", "Dark grey, no accent"),
+]
+
+# Every installed file that spells a theme name, with the pattern that finds it
+# and what to put back. Each file gets its own expression rather than one
+# shared one: the greeter's key is theme-name and GTK's is gtk-theme-name, so a
+# pattern loose enough for both would match the wrong half of the longer key,
+# and a file whose format changes underneath this should fail rather than be
+# quietly skipped.
+THEME_TARGETS = {
+    "/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": (
+        r'(<property name="ThemeName" type="string" value=")[^"]*"',
+        r'\g<1>{theme}"',
+    ),
+    "/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": (
+        r'(<property name="theme" type="string" value=")[^"]*"',
+        r'\g<1>{theme}"',
+    ),
+    "/etc/xdg/xdg-portlin/gtk-3.0/settings.ini": (
+        r"(?m)^(gtk-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    "/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": (
+        r"(?m)^(theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+}
+
 COMMON_LOCALES = [
     ("en_US.UTF-8", "English (United States)"),
     ("en_GB.UTF-8", "English (United Kingdom)"),
@@ -301,6 +336,26 @@ def step_hostname() -> str:
         message("Computer name", f"\n'{hostname}' is not a valid hostname.\n\n"
                                  "Use letters, digits and hyphens, starting and ending with a "
                                  "letter or digit.")
+
+
+def _desktop_installed() -> bool:
+    """Whether this stick has the desktop whose appearance there is to choose.
+
+    A --minimal stick installs portlin-runtime alone, so none of the files the
+    picker rewrites are there. Keyed on the files themselves rather than on a
+    dpkg query, because these are the only reason the question is being asked.
+    """
+    return all(Path(path).exists() for path in THEME_TARGETS)
+
+
+def step_theme() -> str:
+    return choose(
+        "Appearance",
+        "\nChoose the desktop theme.\n\n"
+        "This can be changed later in Settings, Appearance.",
+        THEMES,
+        height=14,
+    )
 
 
 def step_account() -> tuple[str, str, str]:
@@ -726,6 +781,25 @@ def apply_hostname(hostname: str) -> None:
     run(["hostnamectl", "set-hostname", hostname], check=False)
 
 
+def apply_theme(theme: str) -> None:
+    """Point every file that names a theme at the chosen one.
+
+    Rewriting three of the four is worse than rewriting none: the greeter or
+    the window borders keep the old name, and the desktop looks broken rather
+    than merely unchanged. So a file that does not come out naming the chosen
+    theme raises here, where the wizard can report it, rather than leaving a
+    half-applied appearance behind.
+    """
+    for path, (pattern, replacement) in THEME_TARGETS.items():
+        target = Path(path)
+        text = target.read_text()
+        rewritten = re.sub(pattern, replacement.format(theme=theme), text, count=1)
+        if theme not in rewritten:
+            raise RuntimeError(f"{path} does not name a theme in the expected form")
+        target.write_text(rewritten)
+    log(f"theme set to {theme}")
+
+
 def apply_account(username: str, full_name: str, password: str) -> None:
     existing = {g.gr_name for g in grp.getgrall()}
     groups = [g for g in DESIRED_GROUPS if g in existing]
@@ -844,6 +918,7 @@ def wizard() -> None:
 
     luks_device = _luks_device()
     autologin = step_autologin(username, encrypted=luks_device is not None)
+    theme = step_theme() if _desktop_installed() else ""
     expand = step_expand()
 
     if not confirm(
@@ -854,7 +929,8 @@ def wizard() -> None:
         f"Keyboard:  {layout}\n"
         f"Time zone: {timezone}\n"
         f"Autologin: {'yes' if autologin else 'no'}\n"
-        f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
+        + (f"Theme:     {theme}\n" if theme else "")
+        + f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
         "Apply these settings now?",
     ):
         raise Cancelled()
@@ -883,6 +959,8 @@ def wizard() -> None:
     apply_timezone(timezone)
     apply_hostname(hostname)
     apply_account(username, full_name, password)
+    if theme:
+        apply_theme(theme)
     apply_autologin(username, autologin)
     # Only together: a password login unlocks the keyring by itself, and without
     # LUKS a passwordless keyring trades away real protection for convenience.

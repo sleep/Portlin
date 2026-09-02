@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from portlin import package, packages
+
 RESOURCES = Path(__file__).parent.parent / "portlin" / "resources" / "firstboot"
 WIZARD = RESOURCES / "portlin-firstboot"
 UNIT = RESOURCES / "portlin-firstboot.service"
@@ -833,3 +835,66 @@ class TestCrypttabMarkerContract:
     def test_the_finaliser_writes_its_header_rather_than_a_literal(self):
         body = FINALISE.read_text()
         assert "CRYPTTAB_HEADER" in body[body.index("def finalise"):]
+
+
+class TestThemePicker:
+    """The wizard offers a theme, and the image ships the one it defaults to.
+
+    Three copies of the same fact have to agree: the package set that installs
+    the themes, the picker that offers them, and the config files the image
+    boots with. Nothing fails loudly when they drift -- the stick just offers a
+    theme it cannot apply, or applies one nobody chose -- so the agreement is
+    asserted here rather than discovered on a stranger's laptop.
+    """
+
+    THEME_RESOURCES = Path(__file__).parent.parent / "portlin" / "resources" / "runtime" / "theme"
+    NAMES_A_THEME = (
+        "xsettings.xml",
+        "xfwm4.xml",
+        "gtk-3.0-settings.ini",
+        "50-portlin.conf",
+    )
+
+    def test_it_offers_every_theme_the_image_installs(self):
+        offered = {name for name, _ in module_constant(WIZARD, "THEMES")}
+        assert offered == set(packages.THEME_PACKAGES)
+
+    def test_it_offers_the_shipped_default_first(self):
+        # whiptail preselects the first row, so the order is the default.
+        assert module_constant(WIZARD, "THEMES")[0][0] == packages.DEFAULT_THEME
+
+    @pytest.mark.parametrize("filename", NAMES_A_THEME)
+    def test_the_shipped_files_all_name_the_default(self, filename):
+        body = (self.THEME_RESOURCES / filename).read_text()
+        assert packages.DEFAULT_THEME in body
+
+    def test_it_rewrites_every_shipped_file_that_names_a_theme(self):
+        # A theme applied to three of the four files is worse than none: the
+        # greeter or the window borders keep the old one and the desktop looks
+        # broken rather than unchanged. Both sides are derived rather than
+        # listed, so a fifth file that starts naming a theme fails this until
+        # the wizard learns to rewrite it too.
+        shipped = {
+            f"/{destination}"
+            for destination, source in package.THEME_FILES.items()
+            if packages.DEFAULT_THEME in (self.THEME_RESOURCES / source).read_text()
+        }
+        assert set(module_constant(WIZARD, "THEME_TARGETS")) == shipped
+
+    def test_the_wizard_asks_and_applies(self):
+        source = WIZARD.read_text()
+        wizard = source[source.index("def wizard("):source.index("def main(")]
+        assert "step_theme()" in wizard
+        assert "apply_theme(" in wizard
+
+    def test_it_skips_the_picker_on_a_stick_with_no_desktop(self):
+        # --minimal installs no portlin-desktop, so not one of these files
+        # exists. Offering a theme there chooses an appearance for a desktop
+        # that was deliberately left out.
+        source = WIZARD.read_text()
+        body = source[source.index("def wizard("):source.index("def main(")]
+        assert "_desktop_installed()" in body
+
+    def test_the_summary_shows_the_chosen_theme(self):
+        source = WIZARD.read_text()
+        assert "Theme:" in source

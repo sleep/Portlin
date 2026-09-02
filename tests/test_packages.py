@@ -94,10 +94,19 @@ class TestPortabilityRequirements:
 
 
 class TestDesktopTheme:
-    def test_ships_a_theme_with_both_gtk_and_window_manager_variants(self):
+    def test_ships_every_theme_the_wizard_offers(self):
         # Xfce's built-in themes have no dark variant for xfwm4, so relying on
-        # GTK's built-in Adwaita-dark alone leaves the title bars light.
-        assert "greybird-gtk-theme" in packages.resolve()
+        # GTK's built-in Adwaita-dark alone leaves the title bars light. Every
+        # theme in the picker has to be installed before the picker runs:
+        # first boot happens on a stick with no network.
+        resolved = packages.resolve()
+        for theme, name in packages.THEME_PACKAGES.items():
+            assert name in resolved, theme
 
-    def test_the_theme_is_desktop_only(self):
-        assert "greybird-gtk-theme" not in packages.resolve(packages.MINIMAL_GROUPS)
+    def test_the_default_is_one_of_them(self):
+        assert packages.DEFAULT_THEME in packages.THEME_PACKAGES
+
+    def test_the_themes_are_desktop_only(self):
+        resolved = packages.resolve(packages.MINIMAL_GROUPS)
+        for name in packages.THEME_PACKAGES.values():
+            assert name not in resolved, name

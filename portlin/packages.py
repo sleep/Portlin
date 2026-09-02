@@ -94,6 +94,30 @@ NETWORK = [
     "ca-certificates",
 ]
 
+# Every theme the first-boot wizard can offer, by the name Xfce knows it as.
+# GTK3 has Adwaita-dark built in and would cost nothing, but it has no xfwm4
+# counterpart, so the window decorations stay light around dark windows. What
+# qualifies a theme for this list is carrying gtk-2.0, gtk-3.0 and xfwm4
+# variants under one name, which is what makes a desktop dark all the way to
+# the title bar.
+#
+# All of them are installed, not just the default: first boot runs on a stick
+# with no network, so a theme the wizard offers but the image never installed
+# is a menu entry that produces an unstyled desktop.
+THEME_PACKAGES = {
+    # Numix is the only theme in the archive that is dark, accents in red and
+    # ships xfwm4. It has no separate dark directory: the dark face comes from
+    # gtk-application-prefer-dark-theme, which the shipped GTK settings set, so
+    # GTK3 goes dark and the handful of remaining GTK2 applications do not.
+    "Numix": "numix-gtk-theme",
+    "Greybird-dark": "greybird-gtk-theme",
+    "Blackbird": "blackbird-gtk-theme",
+}
+
+# Which of them the image boots with. The wizard offers this one first, and
+# every shipped theme file names it; tests hold those three in agreement.
+DEFAULT_THEME = "Numix"
+
 # xserver-xorg-video-all and -input-all are the portability equivalent of
 # MODULES=most: install every driver rather than the one the build host uses.
 DESKTOP = [
@@ -113,12 +137,7 @@ DESKTOP = [
     "thunar-archive-plugin",
     "xarchiver",
     "desktop-base",
-    # The dark theme. GTK3 has Adwaita-dark built in and would cost nothing, but
-    # it has no xfwm4 counterpart, so the window decorations stay light around
-    # dark windows. Greybird-dark carries gtk-2.0, gtk-3.0 and xfwm4 variants
-    # under one name, which is what makes the desktop dark all the way to the
-    # title bar.
-    "greybird-gtk-theme",
+    *THEME_PACKAGES.values(),
     "xdg-utils",
     # For portlin's own About dialog rather than for Xfce. They belong here
     # rather than only in portlin-desktop's Depends because write installs that
