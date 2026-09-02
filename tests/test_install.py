@@ -231,6 +231,22 @@ class TestEncryptedWrite:
         # support to include. Written afterwards, the stick cannot open itself.
         assert self.t.before(("write-file", "etc/crypttab"), ("update-initramfs",))
 
+    def test_ships_the_stash_keyscript(self):
+        assert self.t.has("write-file", "lib/cryptsetup/scripts/portlin-stash-passphrase")
+
+    def test_the_keyscript_is_executable(self):
+        # cryptroot exec()s it. Shipped 0644 it is not a keyscript, it is an
+        # unbootable stick that stops at the passphrase prompt.
+        assert self.t.has("lib/cryptsetup/scripts/portlin-stash-passphrase", "mode=755")
+
+    def test_the_keyscript_lands_before_the_initramfs_is_built(self):
+        # The cryptsetup hook copy_execs whatever keyscript= names in crypttab.
+        # Missing at that moment, it never reaches the initramfs at all.
+        assert self.t.before(
+            ("write-file", "lib/cryptsetup/scripts/portlin-stash-passphrase"),
+            ("update-initramfs",),
+        )
+
     def test_closes_the_mapping_after_every_unmount(self):
         assert self.t.before(("umount",), ("cryptsetup close",))
 

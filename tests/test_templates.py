@@ -61,6 +61,30 @@ class TestCrypttab:
     def test_discard_can_be_enabled(self):
         assert "luks,discard" in templates.render_crypttab(luks_uuid="x", discard=True)
 
+    def test_the_passphrase_stash_is_off_by_default(self):
+        # A stick past first boot has no use for the stash, and the keyscript is
+        # what puts the passphrase in /run at all. Absent by default means a
+        # settled stick caches nothing.
+        assert "keyscript" not in templates.render_crypttab(luks_uuid="x")
+
+    def test_the_written_crypttab_enables_the_stash(self):
+        # The wiring install.py depends on: a first boot with no keyscript in
+        # crypttab is a first boot that asks for the passphrase twice.
+        import inspect
+
+        from portlin import install
+
+        source = inspect.getsource(install)
+        call = source[source.index("render_crypttab("):]
+        assert "stash_passphrase=True" in call[: call.index(")")]
+
+    def test_the_stash_keyscript_can_be_enabled(self):
+        # The initramfs cryptroot script pipes this keyscript's stdout into
+        # cryptsetup, and its hook copy_execs whatever keyscript= names, so the
+        # option is both how the stash runs and how it reaches the initramfs.
+        rendered = templates.render_crypttab(luks_uuid="x", stash_passphrase=True)
+        assert "keyscript=/lib/cryptsetup/scripts/portlin-stash-passphrase" in rendered
+
 
 class TestDefaultGrub:
     def test_os_prober_is_disabled(self):

@@ -40,10 +40,10 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The six that exercise what a unit test structurally cannot see: the shipped
+# The seven that exercise what a unit test structurally cannot see: the shipped
 # scripts and commands against real block devices, portlin's own packages
 # against a real dpkg, and the caffeine applet against a real X server. Each
-# one caught a bug the unit tests could not. Of the six, test-expand.py runs
+# one caught a bug the unit tests could not. Of the seven, test-expand.py runs
 # four times: the tier rule keeps the wizard's
 # apply_expand and the packaged portlin-expand as two separate implementations
 # that can drift, so both need real-device coverage, encrypted and not.
@@ -57,6 +57,7 @@ harness:
 	  python3 -u scripts/test-caffeine.py && \
 	  python3 -u scripts/test-package-conflicts.py && \
 	  python3 -u scripts/test-encrypt-hook.py && \
+	  python3 -u scripts/test-stash-passphrase.py && \
 	  python3 -u scripts/test-expand.py && \
 	  python3 -u scripts/test-expand.py --encrypt && \
 	  python3 -u scripts/test-expand.py --packaged && \

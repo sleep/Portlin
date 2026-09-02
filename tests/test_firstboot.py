@@ -501,6 +501,110 @@ class TestEncryptOnFirstBoot:
             )
 
 
+class TestWizardConsumesTheStash:
+    """How the wizard spends the passphrase the keyscript left in /run."""
+
+    def test_the_stash_is_tried_before_the_user_is_asked(self):
+        # The whole point: the passphrase was typed minutes ago at boot, so
+        # asking again for the same drive is a prompt nobody should have to see.
+        source = WIZARD.read_text()
+        body = source[source.index("def _resize_mapping"):source.index("def finalise_encryption")]
+        assert body.index("STASH") < body.index("ask_password")
+
+    def test_the_stash_is_deleted_the_moment_it_is_used(self):
+        # It is the plaintext passphrase. Its life should be the expansion and
+        # not one second of the desktop session that follows.
+        source = WIZARD.read_text()
+        body = source[source.index("def _resize_mapping"):source.index("def finalise_encryption")]
+        assert "unlink" in body
+
+    def test_a_rejected_stash_still_falls_back_to_asking(self):
+        # A stale stash -- the passphrase was changed, or the file was truncated
+        # -- must degrade into the old prompt rather than failing the expansion.
+        source = WIZARD.read_text()
+        body = source[source.index("def _resize_mapping"):source.index("def finalise_encryption")]
+        assert body.index("ask_password") > body.index("STASH")
+        assert "for _ in range(3)" in body
+
+    def test_the_keyscript_is_dropped_once_setup_is_done(self):
+        # Left in place, every future boot would stash the passphrase in /run
+        # with no wizard coming to delete it.
+        source = WIZARD.read_text()
+        assert "def drop_passphrase_stash" in source
+
+    def test_the_keyscript_is_dropped_before_the_initramfs_is_rebuilt(self):
+        # crypttab is copied into the initramfs at build time, so dropping the
+        # option after the rebuild would leave the old initramfs still using it.
+        source = WIZARD.read_text()
+        body = source[source.index("def wizard()"):source.index("def main()")]
+        assert body.index("drop_passphrase_stash(") < body.index("refresh_initramfs_for_keymap(")
+
+
+class TestStashKeyscript:
+    """The crypttab keyscript that carries the boot passphrase to the wizard.
+
+    The volume key cannot be recovered after boot: cryptsetup hands it to the
+    kernel as a logon key, whose payload userspace is never allowed to read
+    back, and the keyring holding it belongs to an initramfs process that is
+    gone by the time the wizard runs. Keeping the passphrase at unlock time is
+    the only way the expansion can resize the mapping without asking again.
+    """
+
+    STASH = RESOURCES / "portlin-stash-passphrase"
+
+    def test_it_exists(self):
+        assert self.STASH.exists()
+
+    def test_it_runs_under_the_initramfs_shell(self):
+        # There is no bash and no python in the initramfs; busybox sh is all
+        # there is, and a bash shebang here is an unbootable encrypted stick.
+        assert self.STASH.read_text().startswith("#!/bin/sh")
+
+    def test_the_passphrase_is_the_only_thing_on_stdout(self):
+        # cryptroot runs this as `run_keyscript | unlock_mapping`, so stdout is
+        # the key material itself. A stray echo becomes part of the passphrase
+        # and the stick stops unlocking.
+        body = self.STASH.read_text()
+        printers = [
+            line.strip()
+            for line in body.splitlines()
+            if re.match(r"\s*(echo|printf)\b", line) and ">&2" not in line
+        ]
+        assert len(printers) == 1, f"exactly one thing may reach stdout, found {printers}"
+        assert "$pass" in printers[0] or "$PASS" in printers[0]
+
+    def test_the_stash_never_leaves_tmpfs(self):
+        # /run is tmpfs and is moved onto the real root at pivot, so the
+        # passphrase reaches the wizard without ever being written to the stick.
+        body = self.STASH.read_text()
+        assert "/run/portlin" in body
+        for durable in ("/var/", "/etc/", "/tmp/", "/root/"):
+            assert durable not in body, f"the stash must not touch {durable}"
+
+    def test_the_stash_is_unreadable_to_anyone_but_root(self):
+        assert "umask 077" in self.STASH.read_text()
+
+    def test_a_failed_stash_still_unlocks_the_disk(self):
+        # The stash is an optimisation; the unlock is the whole system booting.
+        # If /run is full or missing, this must still print the passphrase.
+        body = self.STASH.read_text()
+        directives = [
+            line.strip() for line in body.splitlines() if not line.lstrip().startswith("#")
+        ]
+        assert not any(
+            line.startswith("set -e") for line in directives
+        ), "set -e would abort the unlock on a stash failure"
+        assert "|| true" in body, "a failed stash must not be able to fail the unlock"
+        # And the passphrase still reaches stdout after the stash is attempted,
+        # which is the part the machine actually needs to boot.
+        assert body.index("|| true") < body.rindex("printf")
+
+    def test_it_prompts_with_the_same_tool_debian_uses(self):
+        # askpass is what cryptroot itself calls, so it is the one prompt that
+        # cooperates with plymouth and the initramfs console.
+        assert "/lib/cryptsetup/askpass" in self.STASH.read_text()
+
+
 class TestSystemdUnit:
     @pytest.fixture
     def unit(self) -> str:

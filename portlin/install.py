@@ -356,7 +356,20 @@ def _write_target_config(
         # unpacking and before the chroot for exactly that reason.
         runner.write_file(
             mountpoint / "etc/crypttab",
-            templates.render_crypttab(luks_uuid=luks_uuid, discard=cfg.discard),
+            templates.render_crypttab(
+                luks_uuid=luks_uuid, discard=cfg.discard, stash_passphrase=True
+            ),
+        )
+        # The keyscript crypttab just named. It has to exist before
+        # update-initramfs, whose cryptsetup hook copy_execs whatever path it
+        # finds there; missing at that moment it never reaches the initramfs,
+        # and the stick stops at an unlock prompt it cannot answer.
+        from .rootfs import RESOURCES
+
+        runner.write_file(
+            mountpoint / templates.STASH_KEYSCRIPT.lstrip("/"),
+            (RESOURCES / "firstboot" / "portlin-stash-passphrase").read_text(),
+            mode=0o755,
         )
     # Rewritten here rather than trusted from the tarball so that a stick built
     # from an older rootfs still gets current boot settings. An unencrypted stick

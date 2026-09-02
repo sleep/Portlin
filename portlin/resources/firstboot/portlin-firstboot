@@ -28,6 +28,10 @@ from pathlib import Path
 
 SENTINEL = Path("/var/lib/portlin/firstboot-pending")
 CRYPTTAB = Path("/etc/crypttab")
+# Where the crypttab keyscript leaves the boot passphrase, and the crypttab
+# option that puts it there. Both are removed once setup is finished.
+STASH = Path("/run/portlin/luks-pass")
+STASH_KEYSCRIPT_OPTION = "keyscript=/lib/cryptsetup/scripts/portlin-stash-passphrase"
 # The comment portlin-finalise-encryption puts at the top of the crypttab it
 # writes. Kept as a substring of that header rather than the whole line, so
 # the two files agree on the claim being made and not on its punctuation.
@@ -670,20 +674,44 @@ def apply_expand() -> None:
 def _resize_mapping(name: str) -> None:
     """Grow the LUKS mapping into the enlarged partition.
 
-    Rebuilding a dm-crypt mapping needs the volume key. cryptsetup normally
-    takes it from the kernel keyring, but when it is not there it quietly falls
-    back to prompting for the passphrase -- and a prompt with no terminal
-    answers itself with "Nothing to read on input", killing the expansion.
+    Rebuilding a dm-crypt mapping needs the volume key, and after boot that key
+    is unreachable. cryptsetup hands it to the kernel as a "logon" key, whose
+    payload userspace is never permitted to read back, and the keyring holding
+    it belonged to the initramfs process that unlocked the disk, which is gone.
+    The dm table shows only a dangling reference. cryptsetup then quietly falls
+    back to prompting -- and a prompt with no terminal answers itself with
+    "Nothing to read on input", killing the expansion.
 
-    So: try the keyring, and ask only if that fails. The passphrase was typed a
-    few minutes ago at boot, so asking is a small imposition compared with
-    silently not expanding.
+    So, in order: try the keyring anyway, in case a future cryptsetup can still
+    find it; spend the passphrase the boot keyscript stashed in /run; and only
+    ask if both fail, which happens on a stick whose crypttab predates the
+    keyscript or whose passphrase has since changed.
     """
     result = run(["cryptsetup", "resize", name], check=False)
     if result.returncode == 0:
         return
 
     log(f"cryptsetup resize needed a passphrase: {result.stderr.strip()}")
+
+    # Read it, spend it, delete it. This is the last thing on the stick that
+    # needs the passphrase in the clear, so it should not outlive this call.
+    if STASH.exists():
+        try:
+            stashed = STASH.read_text()
+        except OSError as exc:
+            log(f"could not read the stashed passphrase: {exc}")
+            stashed = ""
+        STASH.unlink(missing_ok=True)
+        if stashed:
+            retry = run(
+                ["cryptsetup", "resize", "--key-file", "-", name],
+                check=False,
+                stdin=stashed,
+            )
+            if retry.returncode == 0:
+                return
+            log("the stashed passphrase was refused; falling back to asking")
+
     for _ in range(3):
         passphrase = ask_password(
             "Disk encryption",
@@ -891,6 +919,24 @@ def apply_keyring_autounlock(username: str) -> bool:
     return True
 
 
+def drop_passphrase_stash() -> None:
+    """Take the keyscript back out of crypttab now that setup is over.
+
+    The keyscript exists to hand this wizard the passphrase typed at boot. Left
+    in place it would go on writing that passphrase into /run on every future
+    boot, with no wizard coming along to spend and delete it. The initramfs
+    carries its own copy of crypttab, so this has to happen before the rebuild
+    below rather than after it.
+    """
+    if CRYPTTAB.exists():
+        current = CRYPTTAB.read_text()
+        if STASH_KEYSCRIPT_OPTION in current:
+            CRYPTTAB.write_text(current.replace(f",{STASH_KEYSCRIPT_OPTION}", ""))
+    # Also covers the stick whose owner declined the expansion, where nothing
+    # else would ever have consumed the file.
+    STASH.unlink(missing_ok=True)
+
+
 def refresh_initramfs_for_keymap(encrypted: bool) -> None:
     """Rebuild the initramfs so the LUKS prompt uses the chosen keyboard layout.
 
@@ -966,6 +1012,7 @@ def wizard() -> None:
     # LUKS a passwordless keyring trades away real protection for convenience.
     if autologin and luks_device:
         apply_keyring_autounlock(username)
+    drop_passphrase_stash()
     refresh_initramfs_for_keymap(luks_device is not None)
 
     if luks_device:

@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+#
+# crypttab keyscript: unlock root the usual way, and leave the passphrase where
+# the first-boot wizard can find it.
+#
+# The wizard grows the LUKS mapping into the rest of the drive, and rebuilding a
+# dm-crypt mapping needs the volume key. That key cannot be recovered after boot:
+# cryptsetup hands it to the kernel as a "logon" key, whose payload userspace is
+# never permitted to read back, and the keyring holding it belongs to the
+# initramfs process that unlocked the disk, which is gone once init takes over.
+# The dm table shows only a dangling reference to it. So the passphrase has to be
+# kept here, at the one moment it exists in the clear, or the wizard has to ask
+# for it a second time a few minutes after boot.
+#
+# It goes to /run, which is tmpfs and is moved onto the real root at pivot, so it
+# reaches the wizard without ever being written to the stick. The wizard deletes
+# it the moment it is used, and drops keyscript= from crypttab when setup
+# finishes, so a settled stick neither stashes nor holds anything.
+#
+# cryptroot runs this as `run_keyscript | unlock_mapping`, which makes stdout the
+# key material itself. Nothing but the passphrase may be printed; everything else
+# goes to stderr.
+
+STASH_DIR=/run/portlin
+STASH="$STASH_DIR/luks-pass"
+
+# Deliberately no `set -e`. Every failure below is a failure to make the wizard's
+# life easier, and none of them is worth refusing to boot the machine over.
+
+pass=$(/lib/cryptsetup/askpass "Unlock $CRYPTTAB_NAME (passphrase): ")
+
+# Best effort, and silent: a full or missing /run costs the wizard one extra
+# prompt later, which is not worth a message on a console that is showing a
+# passphrase prompt. The umask covers the directory and the file in one go and
+# leaves no moment where either exists at the default mode; mkdir -m would not,
+# since with -p it applies to the deepest directory only and says nothing about
+# the file. Root-only is as private as this can be, and root already holds the
+# volume key the passphrase protects.
+(
+    umask 077
+    mkdir -p "$STASH_DIR" && printf '%s' "$pass" > "$STASH"
+) 2>/dev/null || true
+
+printf '%s' "$pass"
