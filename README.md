@@ -69,11 +69,33 @@ GPT, four partitions:
 The image ships at 8 GB no matter how big the stick is, so one image fits every drive and the flash
 is fast. On first boot it offers to expand into the rest.
 
-The Xfce desktop is dark out of the box: Greybird-dark across GTK, window decorations, the LightDM
-greeter and the terminal. The defaults live in `/etc/xdg/xdg-portlin`, which the session adds to
-`XDG_CONFIG_DIRS`, so Settings > Appearance still changes them and the change sticks. They sit in
-a directory of their own because dpkg lets only one installed package own a path, and Xfce's own
-packages already own the canonical `/etc/xdg` locations.
+The Xfce desktop is dark out of the box: Numix across GTK, window decorations, the LightDM greeter
+and the terminal, with Papirus-Dark icons over it. First boot offers three widget themes and five
+icon sets, all of them installed in the image, because first boot has no network. The defaults live
+in `/etc/xdg/xdg-portlin`, which the session adds to `XDG_CONFIG_DIRS`, so Settings > Appearance
+still changes them and the change sticks -- including a change made by the wizard, since everything
+that names a theme is a conffile. They sit in a directory of their own because dpkg lets only one
+installed package own a path, and Xfce's own packages already own the canonical `/etc/xdg`
+locations.
+
+One panel, along the top, with a searchable applications menu under the portlin mark. At the right
+end sits a readout of what the machine is doing:
+
+```
+cpu 14%  mem 3.1G/15.5G  gpu 22%  disk 6.1G/6.5G of 119.2G  ip 192.168.1.42  bat 87%
+```
+
+It is one program rather than a row of plugins, so it has one font and one spacing rule, and so it
+can report things no stock plugin does. `disk` is the stick's own story: two capacities mean the
+image has not been expanded into the drive yet, and the tooltip says so and names `portlin-expand`.
+`luks` appears in the disk field on an encrypted stick, in crimson, which is the only crimson on
+the desktop. Clicking anything in the line opens About Portlin, which names the machine the stick
+is plugged into today: model, CPU, memory, graphics and whether it booted UEFI or BIOS.
+
+The readout would rather say nothing than guess. `cpu --%` is the first couple of seconds of a
+session, before there are two samples to compare; a machine with no battery has no `bat` field
+rather than an empty one. Intel graphics expose a clock and no utilisation counter, so on those
+machines the field reads `gpu 350MHz` and the tooltip says in words that it is a frequency.
 
 A coffee cup sits in the panel: click it and the machine stops sleeping, blanking and dimming until
 you click it again, or for a span you pick from `Activate for`. It holds a logind lock over

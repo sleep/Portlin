@@ -84,7 +84,7 @@ their tier before they are written.
 | | Frozen | Updatable |
 |---|---|---|
 | Written by | `write`, once | `portlin-runtime` and `portlin-desktop`, by apt |
-| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, wallpaper, branding, the software catalog and the Software app, the `portlin-*` commands |
+| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, icon theme, panel layout, wallpaper, branding, the software catalog and the Software app, the `portlin-*` commands |
 | Failure mode | a stick that will not boot or will not unlock | a desktop that looks wrong, or a command that refuses to run |
 
 **The test.** If a broken version of a file can stop a stick booting or
@@ -129,6 +129,7 @@ Each module has one job and a testable surface.
 | `install.py` | Orchestrates `write`: partition, format, unpack, configure, GRUB |
 | `packages.py` | The package set, grouped and overridable |
 | `resources/runtime/catalog.py` | Pure: the software catalog both shipped programs read |
+| `resources/runtime/hostinfo.py` | Pure parsers plus thin readers: what machine the stick is plugged into, and what it is doing |
 | `package.py` | Pure: the three runtime packages as a path-to-content mapping |
 | `progress.py` | Pure: command output -> progress events, stage weights, bars and ETAs |
 | `cli.py` | Argument parsing, confirmation prompts, wiring |
