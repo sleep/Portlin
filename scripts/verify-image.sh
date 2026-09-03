@@ -460,13 +460,16 @@ if test -x "$MNT/usr/bin/startxfce4"; then
     # runs with no network, so a name it offers but the image never installed
     # is a menu entry that cannot be honoured.
     for THEME in Papirus-Dark Papirus elementary-xfce Numix-Circle Adwaita; do
-        # A deprecated alias -- elementary-xfce-dark is one upstream -- has an
-        # index.theme with no Directories in it, so it exists and contains
-        # nothing. Selecting it is indistinguishable from selecting a set that
-        # is missing entirely.
-        grep -q "^Directories=" "$MNT/usr/share/icons/$THEME/index.theme" 2>/dev/null \
-            && pass "the $THEME icon set is installed and carries icons" \
-            || fail "$THEME has no Directories (the picker offers an empty set)"
+        # Counted rather than merely present. An icon theme can be a deprecated
+        # alias -- elementary-xfce-dark is one, and says so in its own Comment
+        # -- which ships an index.theme, a Directories line and no icon
+        # directories at all, inheriting a real set for everything. That is
+        # indistinguishable from a real theme by any check of the index alone,
+        # and offering one in the picker would be a choice that changes nothing.
+        ICON_DIRS="$(find "$MNT/usr/share/icons/$THEME" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+        test "$ICON_DIRS" -gt 0 \
+            && pass "the $THEME icon set carries icons of its own" \
+            || fail "$THEME has no icon directories (the picker offers an alias or an empty set)"
     done
 
     GREETER_ICONS="$(sed -n 's/^icon-theme-name=//p' \

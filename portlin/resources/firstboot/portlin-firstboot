@@ -102,10 +102,13 @@ THEME_TARGETS = {
 #
 # Papirus-Dark first because it is the only set in the archive carrying icons
 # for the software the Software app installs, and because it is drawn
-# light-on-dark for a dark panel. elementary-xfce rather than
-# elementary-xfce-dark: upstream made the -dark name a deprecated alias with no
-# Directories of its own, so choosing it would select a theme with no icons in
-# it at all.
+# light-on-dark for a dark panel.
+#
+# elementary-xfce rather than the elementary-xfce-dark that a dark desktop
+# invites picking: that name is a deprecated alias, and says so in its own
+# Comment. It ships three files and no icon directories, inheriting
+# elementary-xfce for everything, so offering it would add a level of
+# indirection and change nothing anyone could see.
 ICON_THEMES = [
     ("Papirus-Dark", "Full colour, best app coverage"),
     ("elementary-xfce", "Soft and quiet, Xfce's own"),
