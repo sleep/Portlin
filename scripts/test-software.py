@@ -361,9 +361,12 @@ def check_the_window(catalog) -> None:
         else:
             bad(f"searching for torrent left {found} rows")
 
-        window.search.set_text("")
-        window._on_search(window.search)
+        # Clicking a page clears the search, so the list has to come back.
         select_category(window, catalog, DRIVERS_CATEGORY)
+        if window.search.get_text() == "":
+            ok("picking a page clears the search")
+        else:
+            bad("picking a page left the previous search in the entry")
         first = first_row_name(window)
         if first and "NVIDIA" in first:
             ok("the drivers page draws the suggestion for this machine first")
@@ -373,6 +376,18 @@ def check_the_window(catalog) -> None:
             bad("the drivers page does not name the hardware the scan found")
         else:
             ok("the drivers page names the hardware the scan found")
+
+        # The log pane has to follow its own output: a pane showing the first
+        # screen of a ten-minute apt run reads as a program that has stopped.
+        for number in range(200):
+            window._append(f"line {number}")
+        buffer = window.log.get_buffer()
+        visible = window.log.get_visible_rect()
+        end_y = window.log.get_iter_location(buffer.get_end_iter()).y
+        if end_y <= visible.y + visible.height + 40:
+            ok("the log pane follows its own output")
+        else:
+            bad(f"the log pane stayed at {visible.y} while output reached {end_y}")
         window.destroy()
     finally:
         server.terminate()
