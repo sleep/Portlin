@@ -36,9 +36,13 @@ from pathlib import Path
 RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
 STATS = RUNTIME / "portlin-stats"
 
-TXT = re.compile(r"^<txt>(.*)</txt>$", re.S)
-TOOL = re.compile(r"^<tool>(.*)</tool>$", re.S)
-CLICK = re.compile(r"^<txtclick>(.*)</txtclick>$", re.S)
+# Matched across the whole output rather than line by line. The tooltip is
+# deliberately several lines -- it carries the machine description -- and genmon
+# scans its child's entire stdout for these tags rather than reading it a line
+# at a time. A line-oriented check here would fail on correct output.
+TXT = re.compile(r"<txt>(.*?)</txt>", re.S)
+TOOL = re.compile(r"<tool>(.*?)</tool>", re.S)
+CLICK = re.compile(r"<txtclick>(.*?)</txtclick>", re.S)
 
 failures = 0
 
@@ -82,19 +86,20 @@ def main() -> int:
         code, first = run(runtime_dir)
         check(code == 0, "the first run exits cleanly")
 
-        lines = first.splitlines()
-        check(len(lines) == 3, f"prints exactly the three genmon tags (got {len(lines)})")
-        if len(lines) != 3:
+        text = TXT.search(first)
+        tooltip = TOOL.search(first)
+        click = CLICK.search(first)
+        check(text is not None, "the output carries a <txt> element")
+        check(tooltip is not None, "the output carries a <tool> element")
+        check(click is not None, "the output carries a <txtclick> element")
+        if not (text and tooltip and click):
+            print(f"  output was:\n{first}")
             return 1
 
-        text = TXT.match(lines[0])
-        tooltip = TOOL.match(lines[1])
-        click = CLICK.match(lines[2])
-        check(text is not None, "the first line is a <txt> element")
-        check(tooltip is not None, "the second line is a <tool> element")
-        check(click is not None, "the third line is a <txtclick> element")
-        if not (text and tooltip and click):
-            return 1
+        # The panel line specifically has to be one line: genmon draws it into a
+        # fixed-height panel, and a second line is silently cut off.
+        check("\n" not in text.group(1).strip(),
+              "the panel line is a single line")
 
         # The fields that cannot be unknown on a real Linux kernel. cpu is not
         # among them: the first run of a session has nothing to compare against.
@@ -119,7 +124,7 @@ def main() -> int:
 
         code, second = run(runtime_dir)
         check(code == 0, "the second run exits cleanly")
-        line = TXT.match(second.splitlines()[0])
+        line = TXT.search(second)
         check(line is not None, "the second run prints a <txt> element")
         if line:
             cpu = line.group(1).split("cpu")[1].split("mem")[0]
