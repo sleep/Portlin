@@ -439,36 +439,41 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "systemd-inhibit is installed for the caffeine applet" \
         || fail "systemd-inhibit is missing (nothing takes the logind lock)"
 
-    # The applications menu button. Debian's panel layout declares the plugin
-    # with no button-icon, so it falls back to the icon name compiled into it
-    # and portlin's icon theme answers to that name. Every step here fails
-    # invisibly: the button simply keeps Xfce's own icon.
-    ICON_THEME_DIR="usr/share/icons/Portlin"
+    # The icon set. Resolved out of the shipped config rather than repeated
+    # here, so the name the session asks for and the directory that has to
+    # exist can never disagree: naming a set the image did not install does not
+    # fall back to the stock icons, it leaves the desktop with a wallpaper and
+    # blank space, and nothing reports it.
+    XSETTINGS="$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+    ICON_THEME="$(sed -n 's/.*IconThemeName" type="string" value="\([^"]*\)".*/\1/p' \
+        "$XSETTINGS")"
 
-    test -f "$MNT/$ICON_THEME_DIR/index.theme" \
-        && pass "the portlin icon theme is installed" \
-        || fail "no /$ICON_THEME_DIR/index.theme (the icon theme does not exist)"
+    test -n "$ICON_THEME" \
+        && pass "the session asks for an icon theme by name" \
+        || fail "xsettings names no icon theme (nothing ever selects one)"
 
-    # It provides one icon. Without an Inherits line, selecting it does not
-    # fall back to the stock icons -- it takes every other icon off the
-    # desktop, which is a far louder failure than the one it was meant to fix.
-    grep -q "^Inherits=" "$MNT/$ICON_THEME_DIR/index.theme" \
-        && pass "the icon theme inherits a stock set" \
-        || fail "Portlin/index.theme inherits nothing (the desktop loses every other icon)"
+    test -f "$MNT/usr/share/icons/$ICON_THEME/index.theme" \
+        && pass "the icon theme the session asks for is installed" \
+        || fail "$ICON_THEME is not installed (the desktop comes up with no icons)"
 
-    test -d "$MNT/usr/share/icons/Adwaita" \
-        && pass "the inherited icon theme is installed" \
-        || fail "Adwaita is missing (the portlin theme inherits from nothing)"
+    # Every set the first-boot picker offers, not only the default. First boot
+    # runs with no network, so a name it offers but the image never installed
+    # is a menu entry that cannot be honoured.
+    for THEME in Papirus-Dark Papirus elementary-xfce Numix-Circle Adwaita; do
+        # A deprecated alias -- elementary-xfce-dark is one upstream -- has an
+        # index.theme with no Directories in it, so it exists and contains
+        # nothing. Selecting it is indistinguishable from selecting a set that
+        # is missing entirely.
+        grep -q "^Directories=" "$MNT/usr/share/icons/$THEME/index.theme" 2>/dev/null \
+            && pass "the $THEME icon set is installed and carries icons" \
+            || fail "$THEME has no Directories (the picker offers an empty set)"
+    done
 
-    grep -q 'IconThemeName" type="string" value="Portlin"' \
-        "$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" \
-        && pass "the session asks for the portlin icon theme" \
-        || fail "xsettings names no icon theme (nothing ever selects it)"
-
-    grep -q "^icon-theme-name=Portlin" \
-        "$MNT/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf" \
-        && pass "the greeter asks for the portlin icon theme" \
-        || fail "the greeter names no icon theme (login runs on the stock set)"
+    GREETER_ICONS="$(sed -n 's/^icon-theme-name=//p' \
+        "$MNT/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf")"
+    test "$GREETER_ICONS" = "$ICON_THEME" \
+        && pass "the greeter asks for the same icon theme as the session" \
+        || fail "the greeter asks for '$GREETER_ICONS' and the session for '$ICON_THEME'"
 
     # The greeter reads a literal path: it runs before any session, so there is
     # no XDG_CONFIG_DIRS and no xfconf to indirect through. A path to a render

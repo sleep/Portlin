@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import __version__
+from . import packages
 
 RESOURCES = Path(__file__).parent / "resources"
 
@@ -99,18 +100,6 @@ CAFFEINE_ICONS = {
     for state in ("on", "off")
 }
 
-# The icon theme portlin ships. It carried exactly one icon until the panel
-# layout landed: the applications menu took its button icon from a name
-# compiled into the plugin, and answering to that name from a theme portlin
-# owns was the only way to reach it. whiskermenu takes its icon from an
-# ordinary panel property instead, so nothing asks for that name any more and
-# the theme is now an index with no icons under it, inheriting the stock set
-# and changing nothing. Retiring it is its own change: IconThemeName is spelled
-# in four shipped files and folding that into a panel rework makes one commit
-# nobody can bisect.
-ICON_THEME = "Portlin"
-ICON_THEME_DIR = f"usr/share/icons/{ICON_THEME}"
-
 # portlin's own icon, by the name desktop entries and the panel both ask for.
 # In hicolor because that is the icon spec's terminal fallback: every theme
 # ends there, so an entry saying Icon=portlin resolves under whichever icon
@@ -131,12 +120,6 @@ MARK_ICONS = {
     HICOLOR_APP_ICON: "logo.svg",
 }
 
-# The icon theme's index. Not in THEME_FILES because that dict is what lands
-# under /etc, which is what the conffiles member is derived from; this one
-# lives under /usr/share and is an ordinary package file.
-ICON_THEME_FILES = {
-    f"{ICON_THEME_DIR}/index.theme": "icon-theme-index.theme",
-}
 
 # dpkg lets exactly one installed package own a path, so portlin's system
 # defaults cannot live at the canonical /etc/xdg locations: xfce4-settings
@@ -407,11 +390,13 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     "librsvg2-common",
                     "x11-xserver-utils",
                     "systemd",
-                    # The icon theme portlin's own one-icon theme inherits.
-                    # Without it, naming Portlin in xsettings does not fall
-                    # back to the stock icons -- it leaves the desktop with
-                    # the menu button and nothing else.
-                    "adwaita-icon-theme",
+                    # Every icon theme the first-boot picker can offer. Not
+                    # derivable from the file list: the names live inside a
+                    # config file this package ships, and a name nothing
+                    # installed leaves a desktop with blank space where every
+                    # icon was. First boot has no network, so it cannot be
+                    # fetched then either.
+                    *dict.fromkeys(packages.ICON_THEME_PACKAGES.values()),
                     # The two panel plugins the shipped layout names. Not
                     # derivable from the file list: they are named inside a
                     # data file this package ships, which is the same reason
@@ -431,7 +416,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                 recommends=["mate-polkit"],
             ),
         }
-        for destination, source in {**THEME_FILES, **ICON_THEME_FILES}.items():
+        for destination, source in THEME_FILES.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
         files[PANEL_DEFAULTS_FILE] = files[PANEL_DEFAULTS_FILE].replace(
             PANEL_VERSION_PLACEHOLDER, __version__

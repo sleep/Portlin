@@ -304,26 +304,6 @@ def test_desktop_puts_its_overlay_on_the_session_config_search_path():
     assert "dbus-update-activation-environment" in snippet
 
 
-def test_desktop_ships_the_portlin_icon_theme():
-    files = package.text_files("portlin-desktop")
-    assert f"{package.ICON_THEME_DIR}/index.theme" in files
-
-
-def test_the_icon_theme_inherits_the_stock_set_rather_than_replacing_it():
-    # It provides one icon. Everything else -- every application, every mime
-    # type, every stock arrow -- has to come from the theme it inherits, or
-    # naming this one in xsettings strips the icons off the whole desktop.
-    index = package.text_files("portlin-desktop")[
-        f"{package.ICON_THEME_DIR}/index.theme"
-    ]
-    inherits = [line for line in index.splitlines() if line.startswith("Inherits=")]
-    assert inherits, index
-    assert "Adwaita" in inherits[0]
-    # Last, and always present: hicolor is where portlin's own icon lands, and
-    # the spec makes it the fallback every theme ends at.
-    assert inherits[0].strip().endswith("hicolor")
-
-
 def test_the_mark_is_installed_under_its_own_name_in_hicolor():
     # Icon=portlin in a desktop entry resolves here. hicolor rather than the
     # portlin theme because this one has to be found whichever icon theme is
@@ -343,20 +323,20 @@ def test_the_about_entry_asks_for_the_icon_by_name():
     assert f"Icon={package.APP_ICON}\n" in entry
 
 
-def test_every_surface_that_names_a_theme_asks_for_the_portlin_icons():
+def test_every_surface_that_names_a_theme_asks_for_the_default_icons():
     # The four files that spell a theme name each need the icon theme too, and
     # the greeter is one of them: it runs before any session exists, so it
     # reads its own directory rather than the XDG overlay.
     files = package.text_files("portlin-desktop")
     overlay = f"{package.XDG_OVERLAY}"
-    assert f'"IconThemeName" type="string" value="{package.ICON_THEME}"' in files[
+    assert f'"IconThemeName" type="string" value="{packages.DEFAULT_ICON_THEME}"' in files[
         f"{overlay}/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
     ]
     for relative in ("gtk-3.0/settings.ini", "gtk-4.0/settings.ini"):
-        assert f"gtk-icon-theme-name={package.ICON_THEME}" in files[
+        assert f"gtk-icon-theme-name={packages.DEFAULT_ICON_THEME}" in files[
             f"{overlay}/{relative}"
         ], relative
-    assert f"icon-theme-name={package.ICON_THEME}" in files[
+    assert f"icon-theme-name={packages.DEFAULT_ICON_THEME}" in files[
         "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf"
     ]
 
@@ -658,29 +638,35 @@ def test_desktop_depends_on_what_the_caffeine_applet_needs():
         assert dependency in depends
 
 
-def test_desktop_depends_on_the_icon_theme_its_own_theme_inherits():
-    # The Portlin icon theme carries one icon and inherits the rest. Naming it
-    # in xsettings makes it the theme for the entire desktop, so if the theme
-    # it inherits from is not installed the result is not "the stock icons" --
-    # it is one menu button and blank space where every other icon was. Not
-    # derivable from the file list: the dependency is a line inside a data
-    # file this package ships.
+def test_desktop_depends_on_every_icon_theme_the_wizard_can_offer():
+    # Naming an icon theme in xsettings makes it the theme for the whole
+    # desktop, so a name the image never installed is not "the stock icons" --
+    # it is a wallpaper and blank space. First boot has no network, so it
+    # cannot be fetched then either. Not derivable from the file list: the
+    # names live inside a config file this package ships.
     control = package.text_files("portlin-desktop")["DEBIAN/control"]
     depends = next(
         line.split(":", 1)[1] for line in control.splitlines() if line.startswith("Depends:")
     )
-    index = package.text_files("portlin-desktop")[
-        f"{package.ICON_THEME_DIR}/index.theme"
-    ]
-    inherits = next(
-        line.removeprefix("Inherits=") for line in index.splitlines()
-        if line.startswith("Inherits=")
+    for theme, deb in packages.ICON_THEME_PACKAGES.items():
+        assert deb in depends, theme
+
+
+def test_no_icon_theme_package_name_is_spelled_from_its_theme_name():
+    # The guard on the convention this replaced, which derived the package name
+    # by lowercasing the theme name and appending "-icon-theme". That yields
+    # papirus-dark-icon-theme, which does not exist: papirus-icon-theme
+    # installs five theme names and numix-icon-theme-circle installs two. The
+    # mapping has to be declared, and this fails if anyone ever decides it
+    # looks redundant and derives it again.
+    assert any(
+        f"{theme.lower()}-icon-theme" != deb
+        for theme, deb in packages.ICON_THEME_PACKAGES.items()
     )
-    # hicolor is the spec's terminal fallback and comes from hicolor-icon-theme,
-    # which every GTK stack already pulls; the themes named ahead of it are the
-    # ones that have to be asked for.
-    for theme in [name for name in inherits.split(",") if name != "hicolor"]:
-        assert f"{theme.lower()}-icon-theme" in depends, theme
+
+
+def test_the_default_icon_theme_is_one_the_wizard_offers():
+    assert packages.DEFAULT_ICON_THEME in packages.ICON_THEME_PACKAGES
 
 
 def test_a_minimal_stick_never_pulls_gtk_for_the_about_dialog():

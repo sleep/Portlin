@@ -24,6 +24,22 @@ FINALISE = RESOURCES / "portlin-finalise-encryption"
 FINALISE_UNIT = RESOURCES / "portlin-finalise-encryption.service"
 
 
+def _count(body: str, theme: str) -> int:
+    """How many times a file names exactly this theme, not one starting with it.
+
+    "Numix" is the default widget theme and also a prefix of "Numix-Circle" and
+    "Numix-Light", which are icon themes. A plain substring count says a file
+    gained a mention of the widget theme when all it gained was an icon theme
+    whose name happens to start with the same six letters -- and the failure
+    that produces is about the wrong file entirely.
+    """
+    return len(re.findall(rf"{re.escape(theme)}(?![\w-])", body))
+
+
+def _names(body: str, theme: str) -> bool:
+    return _count(body, theme) > 0
+
+
 def module_constant(path: Path, name: str) -> str:
     """The value of a module-level string constant, without importing the file.
 
@@ -1088,18 +1104,20 @@ class TestThemePicker:
         shipped = {
             f"/{destination}"
             for destination, source in package.THEME_FILES.items()
-            if packages.DEFAULT_THEME in (self.THEME_RESOURCES / source).read_text()
+            if _names(
+                (self.THEME_RESOURCES / source).read_text(), packages.DEFAULT_THEME
+            )
         }
         assert set(module_constant(WIZARD, "THEME_TARGETS")) == shipped
 
     def test_applying_a_theme_leaves_the_icon_theme_alone(self):
-        # The picker changes the widget theme. These files now carry a second
-        # theme key beside it -- the icon theme -- and in two of them the
+        # The picker changes the widget theme. Three of these files carry a
+        # second theme key beside it -- the icon theme -- and in two of them the
         # widget key is a literal substring of the icon one: theme-name= sits
         # inside icon-theme-name=, ThemeName inside IconThemeName. What keeps
-        # them apart is the anchoring in the wizard's own patterns, so a
-        # pattern that loses its anchor or is aimed at the wrong key takes the
-        # mark off the menu button and reports nothing.
+        # them apart is the anchoring in the wizard's own patterns, so a pattern
+        # that loses its anchor or is aimed at the wrong key silently rewrites
+        # the icon theme instead and takes every icon off the desktop.
         #
         # Run against the real patterns and the real shipped files, because
         # the hazard is precisely that the two drift apart.
@@ -1115,8 +1133,8 @@ class TestThemePicker:
                 pattern, replacement.format(theme=chosen), body, count=1
             )
             assert chosen in rewritten, destination
-            assert rewritten.count(package.ICON_THEME) == body.count(
-                package.ICON_THEME
+            assert _count(rewritten, packages.DEFAULT_ICON_THEME) == _count(
+                body, packages.DEFAULT_ICON_THEME
             ), destination
 
     def test_the_wizard_asks_and_applies(self):
@@ -1136,6 +1154,116 @@ class TestThemePicker:
     def test_the_summary_shows_the_chosen_theme(self):
         source = WIZARD.read_text()
         assert "Theme:" in source
+
+
+class TestIconThemePicker:
+    """The same three-way agreement as the widget theme, one file wider.
+
+    The icon set is chosen the same way and for the same reason, but it has an
+    extra failure mode: gtk-4.0/settings.ini names an icon theme and no widget
+    theme, so the two target sets are genuinely different and neither can be
+    derived from the other. Both are therefore derived from the shipped files
+    here, so a file that starts or stops naming one fails this rather than
+    being quietly skipped by a hand-maintained list.
+    """
+
+    THEME_RESOURCES = Path(__file__).parent.parent / "portlin" / "resources" / "runtime" / "theme"
+
+    def test_it_offers_every_icon_theme_the_image_installs(self):
+        offered = {name for name, _ in module_constant(WIZARD, "ICON_THEMES")}
+        assert offered == set(packages.ICON_THEME_PACKAGES)
+
+    def test_it_offers_the_shipped_default_first(self):
+        # whiptail preselects the first row, so the order is the default.
+        offered = module_constant(WIZARD, "ICON_THEMES")
+        assert offered[0][0] == packages.DEFAULT_ICON_THEME
+
+    def test_it_rewrites_every_shipped_file_that_names_an_icon_theme(self):
+        # Both sides derived. gtk-4.0/settings.ini is the one this catches that
+        # a copy of the widget theme's list would miss.
+        shipped = {
+            f"/{destination}"
+            for destination, source in package.THEME_FILES.items()
+            if _names(
+                (self.THEME_RESOURCES / source).read_text(), packages.DEFAULT_ICON_THEME
+            )
+        }
+        assert set(module_constant(WIZARD, "ICON_THEME_TARGETS")) == shipped
+
+    def test_the_two_target_sets_are_not_the_same(self):
+        # If they ever became identical, merging them would look like an
+        # obvious cleanup, and the merge is what the substring collision
+        # between theme-name= and icon-theme-name= makes impossible.
+        assert module_constant(WIZARD, "THEME_TARGETS") != module_constant(
+            WIZARD, "ICON_THEME_TARGETS"
+        )
+
+    def test_applying_an_icon_theme_leaves_the_widget_theme_alone(self):
+        # The mirror of the widget theme's test, and the direction that is
+        # easier to get wrong: icon-theme-name= contains theme-name=, so a
+        # pattern anchored on the shorter key matches inside the longer one.
+        targets = module_constant(WIZARD, "ICON_THEME_TARGETS")
+        chosen = "Numix-Circle"
+        assert chosen in packages.ICON_THEME_PACKAGES
+        for destination, (pattern, replacement) in targets.items():
+            body = (
+                self.THEME_RESOURCES
+                / package.THEME_FILES[destination.lstrip("/")]
+            ).read_text()
+            rewritten = re.sub(pattern, replacement.format(theme=chosen), body, count=1)
+            assert chosen in rewritten, destination
+            assert _count(rewritten, packages.DEFAULT_THEME) == _count(
+                body, packages.DEFAULT_THEME
+            ), destination
+
+    def test_both_rewrites_compose_on_the_same_file(self):
+        # Three files are rewritten twice at first boot, once by each picker.
+        # Nothing else in the suite runs them in sequence, so nothing else would
+        # notice a pattern that is correctly anchored on a pristine file and
+        # matches the wrong key once the other picker has been through it.
+        widget = module_constant(WIZARD, "THEME_TARGETS")
+        icons = module_constant(WIZARD, "ICON_THEME_TARGETS")
+        theme, icon_theme = "Blackbird", "Numix-Circle"
+        for destination in set(widget) & set(icons):
+            body = (
+                self.THEME_RESOURCES
+                / package.THEME_FILES[destination.lstrip("/")]
+            ).read_text()
+            pattern, replacement = widget[destination]
+            body = re.sub(pattern, replacement.format(theme=theme), body, count=1)
+            pattern, replacement = icons[destination]
+            body = re.sub(pattern, replacement.format(theme=icon_theme), body, count=1)
+            assert theme in body, destination
+            assert icon_theme in body, destination
+            assert not _names(body, packages.DEFAULT_THEME), destination
+            assert not _names(body, packages.DEFAULT_ICON_THEME), destination
+
+    def test_it_refuses_a_set_the_image_did_not_install(self):
+        # First boot has no network. A name that is not on the disk cannot be
+        # fetched, and writing it produces a desktop with no icons at all --
+        # much worse than keeping the shipped default.
+        source = WIZARD.read_text()
+        start = source.index("def apply_icon_theme")
+        apply = source[start:source.index("\ndef ", start + 1)]
+        assert "index.theme" in apply
+        assert "is not installed" in apply
+        # Before the loop that writes, not after it: a check that ran last would
+        # leave three files rewritten and raise about the fourth.
+        assert apply.index("is not installed") < apply.index("write_text")
+
+    def test_the_wizard_asks_and_applies(self):
+        source = WIZARD.read_text()
+        wizard = source[source.index("def wizard("):source.index("def main(")]
+        assert "step_icon_theme()" in wizard
+        assert "apply_icon_theme(" in wizard
+
+    def test_it_skips_the_picker_on_a_stick_with_no_desktop(self):
+        source = WIZARD.read_text()
+        wizard = source[source.index("def wizard("):source.index("def main(")]
+        assert "step_icon_theme() if has_desktop" in wizard
+
+    def test_the_summary_shows_the_chosen_set(self):
+        assert "Icons:" in WIZARD.read_text()
 
 
 class TestSudoPasswordChoice:

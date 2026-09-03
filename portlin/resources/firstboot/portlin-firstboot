@@ -95,6 +95,53 @@ THEME_TARGETS = {
     ),
 }
 
+# The icon themes portlin-desktop installs, in the order the picker offers
+# them. First is the default, and the shipped files name it; the unit tests
+# hold this list, portlin.packages.ICON_THEME_PACKAGES and those files in
+# agreement, because nothing here fails loudly when they drift.
+#
+# Papirus-Dark first because it is the only set in the archive carrying icons
+# for the software the Software app installs, and because it is drawn
+# light-on-dark for a dark panel. elementary-xfce rather than
+# elementary-xfce-dark: upstream made the -dark name a deprecated alias with no
+# Directories of its own, so choosing it would select a theme with no icons in
+# it at all.
+ICON_THEMES = [
+    ("Papirus-Dark", "Full colour, best app coverage"),
+    ("elementary-xfce", "Soft and quiet, Xfce's own"),
+    ("Numix-Circle", "Vivid circles"),
+    ("Papirus", "Full colour, light panel icons"),
+    ("Adwaita", "GNOME stock"),
+]
+
+# Kept apart from THEME_TARGETS rather than merged into it, even though three
+# of these four files appear in both. In two of them the widget theme's key is
+# a literal substring of the icon theme's -- theme-name= sits inside
+# icon-theme-name=, ThemeName inside IconThemeName -- so each needs its own
+# anchored expression, and one dict could only hold one pattern per file.
+#
+# gtk-4.0/settings.ini appears here and not there, because it names an icon
+# theme and no widget theme. That asymmetry is the reason both target sets are
+# derived from the shipped files in the tests rather than typed out twice.
+ICON_THEME_TARGETS = {
+    "/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": (
+        r'(<property name="IconThemeName" type="string" value=")[^"]*"',
+        r'\g<1>{theme}"',
+    ),
+    "/etc/xdg/xdg-portlin/gtk-3.0/settings.ini": (
+        r"(?m)^(gtk-icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    "/etc/xdg/xdg-portlin/gtk-4.0/settings.ini": (
+        r"(?m)^(gtk-icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    "/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": (
+        r"(?m)^(icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+}
+
 COMMON_LOCALES = [
     ("en_US.UTF-8", "English (United States)"),
     ("en_GB.UTF-8", "English (United Kingdom)"),
@@ -366,7 +413,9 @@ def _desktop_installed() -> bool:
     picker rewrites are there. Keyed on the files themselves rather than on a
     dpkg query, because these are the only reason the question is being asked.
     """
-    return all(Path(path).exists() for path in THEME_TARGETS)
+    return all(
+        Path(path).exists() for path in {**THEME_TARGETS, **ICON_THEME_TARGETS}
+    )
 
 
 def step_theme() -> str:
@@ -376,6 +425,23 @@ def step_theme() -> str:
         "This can be changed later in Settings, Appearance.",
         THEMES,
         height=14,
+    )
+
+
+def step_icon_theme() -> str:
+    """A separate prompt from the widget theme, not a paired choice.
+
+    Three widget themes against five icon sets is fifteen rows on an 80x24
+    console, and curated pairings would teach a model the desktop does not
+    have: Settings, Appearance offers these as two independent dropdowns, and
+    the wizard should configure the thing the way the thing works.
+    """
+    return choose(
+        "Appearance",
+        "\nChoose the icon set.\n\n"
+        "This can be changed later in Settings, Appearance.",
+        ICON_THEMES,
+        height=16,
     )
 
 
@@ -864,6 +930,32 @@ def apply_theme(theme: str) -> None:
     log(f"theme set to {theme}")
 
 
+def apply_icon_theme(icon_theme: str) -> None:
+    """Point every file that names an icon theme at the chosen set.
+
+    Checks the set is on the disk before writing anything, which the widget
+    theme's equivalent does not need to. First boot runs with no network, so a
+    name the image never installed cannot be fetched later: naming it leaves a
+    desktop with a wallpaper and blank space where every icon was, and no
+    indication of why. Keeping the shipped default is a far better outcome than
+    that, so an unknown name stops here.
+
+    Then the same rule as apply_theme: rewriting three of the four is worse
+    than rewriting none, because the greeter or the applications menu keeps the
+    old set and the desktop looks broken rather than merely unchanged.
+    """
+    if not Path(f"/usr/share/icons/{icon_theme}/index.theme").exists():
+        raise RuntimeError(f"the icon theme {icon_theme} is not installed")
+    for path, (pattern, replacement) in ICON_THEME_TARGETS.items():
+        target = Path(path)
+        text = target.read_text()
+        rewritten = re.sub(pattern, replacement.format(theme=icon_theme), text, count=1)
+        if icon_theme not in rewritten:
+            raise RuntimeError(f"{path} does not name an icon theme in the expected form")
+        target.write_text(rewritten)
+    log(f"icon theme set to {icon_theme}")
+
+
 def apply_account(username: str, full_name: str, password: str) -> None:
     existing = {g.gr_name for g in grp.getgrall()}
     groups = [g for g in DESIRED_GROUPS if g in existing]
@@ -1032,7 +1124,9 @@ def wizard() -> None:
     sudo_password = step_sudo_password(
         username, encrypted=luks_device is not None, autologin=autologin
     )
-    theme = step_theme() if _desktop_installed() else ""
+    has_desktop = _desktop_installed()
+    theme = step_theme() if has_desktop else ""
+    icon_theme = step_icon_theme() if has_desktop else ""
     expand = step_expand()
 
     if not confirm(
@@ -1045,6 +1139,7 @@ def wizard() -> None:
         f"Autologin: {'yes' if autologin else 'no'}\n"
         f"Sudo:      {'asks for a password' if sudo_password else 'no password'}\n"
         + (f"Theme:     {theme}\n" if theme else "")
+        + (f"Icons:     {icon_theme}\n" if icon_theme else "")
         + f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
         "Apply these settings now?",
     ):
@@ -1082,6 +1177,8 @@ def wizard() -> None:
         )
     if theme:
         apply_theme(theme)
+    if icon_theme:
+        apply_icon_theme(icon_theme)
     apply_autologin(username, autologin)
     # Only together: a password login unlocks the keyring by itself, and without
     # LUKS a passwordless keyring trades away real protection for convenience.

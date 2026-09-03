@@ -121,6 +121,38 @@ THEME_PACKAGES = {
 # every shipped theme file names it; tests hold those three in agreement.
 DEFAULT_THEME = "Numix"
 
+# Every icon theme the first-boot wizard can offer, by the name that appears in
+# /usr/share/icons and in xsettings, mapped to the Debian package that installs
+# it. Declared rather than spelled: papirus-icon-theme installs five theme
+# names and numix-icon-theme-circle installs two, so no rule turning a theme
+# name into a package name is right for all of them. A test reads this mapping
+# rather than transforming a string, because the transform was the bug.
+#
+# All of them are installed, not just the default, for the same reason every
+# widget theme above is: first boot runs on a stick with no network, and an
+# icon theme the wizard offers but the image never installed is not a menu
+# entry that falls back to the stock set. It is a desktop with a wallpaper and
+# blank space where every icon was.
+ICON_THEME_PACKAGES = {
+    "Papirus-Dark": "papirus-icon-theme",
+    "elementary-xfce": "elementary-xfce-icon-theme",
+    "Numix-Circle": "numix-icon-theme-circle",
+    "Papirus": "papirus-icon-theme",
+    "Adwaita": "adwaita-icon-theme",
+}
+
+# Papirus-Dark, because the deciding criterion is coverage of the software the
+# Software app installs. It is the only set in the archive that carries icons
+# for Signal, Zed, Cursor, Mullvad and their generation, and it is drawn
+# light-on-dark, which is what a dark panel needs. Its palette also keeps red
+# for destructive actions, so the crimson accent stays the only crimson on the
+# desktop.
+#
+# Deliberately not a Numix icon theme despite the Numix widget theme: they are
+# different upstreams that share a word, and the icon one is effectively
+# frozen.
+DEFAULT_ICON_THEME = "Papirus-Dark"
+
 # xserver-xorg-video-all and -input-all are the portability equivalent of
 # MODULES=most: install every driver rather than the one the build host uses.
 DESKTOP = [
@@ -149,12 +181,16 @@ DESKTOP = [
     "xarchiver",
     "desktop-base",
     *THEME_PACKAGES.values(),
-    # Icons, as opposed to the widget themes above. portlin ships a one-icon
-    # theme that takes over the applications menu button and inherits this one
-    # for everything else, so it is a hard requirement rather than whatever
-    # GTK happened to drag in: an inherited theme that is not installed leaves
-    # the desktop with the menu button and blank space.
-    "adwaita-icon-theme",
+    # Icons, as opposed to the widget themes above. Every set the first-boot
+    # picker can offer, because first boot has no network and a name the image
+    # never installed cannot be fetched. adwaita-icon-theme is among them and
+    # also carries the gtk-update-icon-cache dependency that builds every other
+    # set's cache at install time, so none of this costs anything at first boot.
+    *dict.fromkeys(ICON_THEME_PACKAGES.values()),
+    # Adwaita 48 moved its full-colour legacy artwork out into this package and
+    # made it a Suggests, which the build does not install. Three megabytes to
+    # put back the icons that stock Adwaita is assumed to still have.
+    "adwaita-icon-theme-legacy",
     "xdg-utils",
     # For portlin's own About dialog rather than for Xfce. They belong here
     # rather than only in portlin-desktop's Depends because write installs that

@@ -3,7 +3,7 @@
 <channel name="xsettings" version="1.0">
   <property name="Net" type="empty">
     <property name="ThemeName" type="string" value="Numix"/>
-    <property name="IconThemeName" type="string" value="Portlin"/>
+    <property name="IconThemeName" type="string" value="Papirus-Dark"/>
   </property>
   <property name="Gtk" type="empty">
     <property name="ApplicationPreferDarkTheme" type="bool" value="true"/>
