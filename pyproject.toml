@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "portlin"
-version = "0.1.1"
+version = "0.1.2"
 description = "Portable, persistent Debian + Xfce on a USB stick, optionally LUKS encrypted"
 requires-python = ">=3.11"
 # PEP 639 license expressions need setuptools >= 77; this build pins 75.8.0.

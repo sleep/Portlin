@@ -137,10 +137,24 @@ XSESSION_SNIPPET = "etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs"
 XDG_DEFAULTS = {
     "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": "xsettings.xml",
     "xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": "xfwm4.xml",
+    "xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml": "xfce4-panel.xml",
     "gtk-3.0/settings.ini": "gtk-3.0-settings.ini",
     "gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
     "xfce4/terminal/terminalrc": "terminalrc",
 }
+
+# plugin-1 in Debian trixie's shipped /etc/xdg/xfce4/panel/default.xml is
+# applicationsmenu, the first of eighteen plugins across its two panels. The
+# panel's button-title lives at that plugin's numeric xfconf path with no
+# name-based alternative -- there is no icon-theme-style trick for text -- so
+# the label depends on Debian never renumbering that plugin. verify-image.sh
+# asserts the layout still agrees, so a renumbering fails the build instead of
+# silently labelling some other button "Portlin".
+PANEL_DEFAULTS_FILE = f"{XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
+
+# Substituted into PANEL_DEFAULTS_FILE after it is read, so the button label
+# can never drift from the version everything else on the stick reports.
+PANEL_VERSION_PLACEHOLDER = "@PORTLIN_VERSION@"
 
 # Every file portlin-desktop ships under /etc, by destination. The greeter
 # configuration stays outside the overlay because it is not an XDG path:
@@ -392,6 +406,9 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         }
         for destination, source in {**THEME_FILES, **ICON_THEME_FILES}.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
+        files[PANEL_DEFAULTS_FILE] = files[PANEL_DEFAULTS_FILE].replace(
+            PANEL_VERSION_PLACEHOLDER, __version__
+        )
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
         for source, destination in {

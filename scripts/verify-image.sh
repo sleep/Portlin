@@ -494,6 +494,38 @@ if test -x "$MNT/usr/bin/startxfce4"; then
             || fail "libapplicationsmenu asks for some other icon name now"
     fi
 
+    # The button's text label. There is no name-based indirection for text the
+    # way there is for the icon, so this is a direct xfconf property write
+    # keyed by plugin-1's numeric id -- the id Debian's own shipped
+    # /etc/xdg/xfce4/panel/default.xml assigns to applicationsmenu. The check
+    # right below this one is what notices if that ever stops being true.
+    PANEL_DEFAULTS="$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
+    PORTLIN_VERSION="$(sed -n 's/^PORTLIN_VERSION=//p' "$MNT/etc/portlin-release" 2>/dev/null)"
+
+    grep -q '"plugin-1" type="empty"' "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the panel label targets plugin-1" \
+        || fail "no plugin-1 override in $PANEL_DEFAULTS (the button keeps no label)"
+
+    grep -qF "\"button-title\" type=\"string\" value=\"Portlin ${PORTLIN_VERSION:-unknown}\"" \
+        "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the menu button is labelled with the installed version" \
+        || fail "the panel button-title does not match /etc/portlin-release"
+
+    grep -q '"show-button-title" type="bool" value="true"' "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the menu button is set to show its label" \
+        || fail "show-button-title is not enabled (the label would be invisible)"
+
+    # Debian's own layout, not portlin's overlay: this is the fact the label
+    # above depends on. If a future Debian renumbers its default panel, this
+    # is the check that fails instead of the stick quietly mislabelling
+    # whatever plugin-1 has become.
+    DEBIAN_PANEL_DEFAULT="$MNT/etc/xdg/xfce4/panel/default.xml"
+    if test -f "$DEBIAN_PANEL_DEFAULT"; then
+        grep -q '"plugin-1" type="string" value="applicationsmenu"' "$DEBIAN_PANEL_DEFAULT" \
+            && pass "Debian's panel layout still assigns plugin-1 to applicationsmenu" \
+            || fail "plugin-1 is no longer applicationsmenu in Debian's default panel layout"
+    fi
+
     # Icon=portlin in the About entry resolves here. In hicolor rather than in
     # the portlin theme, because every icon theme falls back to hicolor and
     # none falls back to Portlin.

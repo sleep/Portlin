@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-panel" version="1.0">
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="empty">
+      <property name="button-title" type="string" value="Portlin @PORTLIN_VERSION@"/>
+      <property name="show-button-title" type="bool" value="true"/>
+    </property>
+  </property>
+</channel>

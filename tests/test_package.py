@@ -119,8 +119,11 @@ def test_text_files_stamps_the_requested_version_onto_control(name):
 
 @pytest.mark.parametrize("name", package.PACKAGES)
 def test_requested_version_touches_only_the_control_file(name):
-    # Nothing else in a package's tree names a version, so a version string
-    # must never show up anywhere but DEBIAN/control.
+    # The requested version stamps a release's dpkg metadata and nothing else:
+    # a CI build passing version="2.5.1" here must not leak that string into
+    # any other file. The applications menu label is a separate concern -- it
+    # always carries __version__, the running source's own constant, never the
+    # version this call was asked to stamp onto control.
     files = package.text_files(name, version="2.5.1")
     for relative, content in files.items():
         if relative != "DEBIAN/control":
@@ -360,6 +363,19 @@ def test_every_surface_that_names_a_theme_asks_for_the_portlin_icons():
     assert f"icon-theme-name={package.ICON_THEME}" in files[
         "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf"
     ]
+
+
+def test_the_applications_menu_button_is_labelled_with_the_running_version():
+    # plugin-1 is applicationsmenu in Debian's shipped panel layout, and the
+    # label is templated from __version__ rather than typed out here, so a
+    # version bump can never leave the button naming an old release.
+    panel_defaults = package.text_files("portlin-desktop")[package.PANEL_DEFAULTS_FILE]
+    assert package.PANEL_VERSION_PLACEHOLDER not in panel_defaults
+    assert (
+        f'"button-title" type="string" value="Portlin {__version__}"' in panel_defaults
+    )
+    assert '"show-button-title" type="bool" value="true"' in panel_defaults
+    assert '"plugin-1" type="empty"' in panel_defaults
 
 
 def test_the_greeter_shows_the_portlin_wallpaper():
