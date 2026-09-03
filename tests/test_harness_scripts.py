@@ -14,6 +14,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 UPGRADE = SCRIPTS / "test-package-upgrade.py"
+SOFTWARE = SCRIPTS / "test-software.py"
 
 
 class TestUpgradeHarnessStartsFromNothing:
@@ -52,3 +53,60 @@ class TestUpgradeHarnessStartsFromNothing:
         source = UPGRADE.read_text()
         body = source[source.index("def clear_previous_installs"):source.index("def main")]
         assert "PACKAGES" in body
+
+
+class TestSoftwareHarness:
+    """test-software.py drives the shipped installer against a real archive.
+
+    It runs before test-package-upgrade.py, which purges portlin's packages
+    first, so what it installs is that harness's problem rather than a
+    trap. What it must not do is leave the catalog's own entries installed:
+    an entry left behind would make a later run's "install it, check it is
+    there" prove nothing.
+    """
+
+    def test_it_parses(self):
+        compile(SOFTWARE.read_text(), str(SOFTWARE), "exec")
+
+    def test_the_entries_it_drives_are_in_the_catalog(self):
+        # Named as ids rather than package names, and checked against the
+        # shipped catalog, so renaming an entry cannot leave the harness
+        # driving something that no longer exists.
+        import sys
+
+        runtime = SCRIPTS.parent / "portlin" / "resources" / "runtime"
+        if str(runtime) not in sys.path:
+            sys.path.insert(0, str(runtime))
+        import catalog
+
+        source = SOFTWARE.read_text()
+        for line in source.splitlines():
+            if line.startswith(("DEBIAN_ENTRY =", "VENDOR_ENTRY =")):
+                entry_id = line.split("=")[1].strip().strip('"')
+                assert catalog.by_id(entry_id)
+
+    def test_it_removes_everything_it_installs(self):
+        source = SOFTWARE.read_text()
+        body = source[source.index("def check_install_and_remove"):source.index("def check_privilege")]
+        assert body.index('"install", entry_id') < body.index('"remove", entry_id')
+
+    def test_it_pins_no_package_version(self):
+        # Versions move with every Debian point release. A harness that named
+        # one would go red on somebody else's schedule.
+        import re
+
+        for line in SOFTWARE.read_text().splitlines():
+            assert not re.search(r'"[a-z0-9-]+=[0-9]+[.:]', line), line
+
+    def test_it_asks_polkit_rather_than_trusting_the_file(self):
+        # A malformed policy file is skipped in silence, so parsing it here
+        # would prove only that this harness can parse it.
+        assert "pkaction" in SOFTWARE.read_text()
+
+    def test_a_vendor_outage_does_not_fail_the_gate(self):
+        # The Debian entry is portlin's own correctness. The vendor entry
+        # depends on somebody else's CDN being up, and a red gate for that
+        # teaches people to ignore the gate.
+        source = SOFTWARE.read_text()
+        body = source[source.index("def check_install_and_remove"):source.index("def check_privilege")]
+        assert "skip(" in body

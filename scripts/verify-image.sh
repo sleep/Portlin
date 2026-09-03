@@ -313,11 +313,30 @@ test -L "$MNT/etc/systemd/system/multi-user.target.wants/portlin-finalise-encryp
     && pass "the encryption finaliser is enabled" \
     || fail "the encryption finaliser is not enabled"
 
-for tool in portlin-info portlin-expand portlin-encrypt; do
+for tool in portlin-info portlin-expand portlin-encrypt portlin-install; do
     test -x "$MNT/usr/bin/$tool" \
         && pass "$tool is executable" \
         || fail "$tool is missing or not executable"
 done
+
+test -f "$MNT/usr/lib/portlin/catalog.py" \
+    && pass "the software catalog is installed" \
+    || fail "usr/lib/portlin/catalog.py is missing (portlin-install can list nothing)"
+
+test -f "$MNT/usr/share/polkit-1/actions/org.portlin.install.policy" \
+    && pass "the polkit action for portlin-install is installed" \
+    || fail "org.portlin.install.policy is missing (Software cannot elevate)"
+
+# The two the installer shells out to. Neither is in any file list, and
+# without them portlin-install starts, lists the catalog, and then fails at
+# the first thing anybody wanted it for.
+test -x "$MNT/usr/bin/lspci" \
+    && pass "lspci is installed for the driver scan" \
+    || fail "lspci is missing (the driver scan has nothing to read)"
+
+test -x "$MNT/usr/bin/curl" \
+    && pass "curl is installed for the installer's downloads" \
+    || fail "curl is missing (nothing the installer downloads can be fetched)"
 
 # portlin-desktop carries the theme and the wallpapers, and write installs it only
 # when the rootfs actually has a desktop. Probing the same way install.py does,
@@ -335,6 +354,33 @@ if test -x "$MNT/usr/bin/startxfce4"; then
     # Both halves, because either one alone is silent. The defaults are inert
     # unless the session searches that directory, and a stick whose desktop
     # merely looks wrong says nothing about which half went missing.
+    test -x "$MNT/usr/bin/portlin-software" \
+        && pass "portlin-software is executable" \
+        || fail "portlin-software is missing or not executable"
+
+    test -f "$MNT/usr/share/applications/portlin-software.desktop" \
+        && pass "Software is in the applications menu" \
+        || fail "portlin-software.desktop is missing (nothing opens the Software app)"
+
+    test -x "$MNT/usr/bin/pkexec" \
+        && pass "pkexec is installed for the Software app" \
+        || fail "pkexec is missing (Software cannot ask for a password)"
+
+    # pkexec needs an agent running in the session to draw the prompt, and its
+    # absence is silent: pkexec exits 127 and the app can only report that
+    # nobody answered.
+    AGENT_ENTRY="$MNT/etc/xdg/autostart/polkit-mate-authentication-agent-1.desktop"
+    if test -f "$AGENT_ENTRY"; then
+        pass "a polkit authentication agent starts with the session"
+        if grep -q '^OnlyShowIn=' "$AGENT_ENTRY"; then
+            grep -q '^OnlyShowIn=.*XFCE' "$AGENT_ENTRY" \
+                && pass "the agent shows in Xfce sessions" \
+                || fail "the agent's OnlyShowIn excludes XFCE (no prompt will appear)"
+        fi
+    else
+        fail "no polkit agent autostart entry (pkexec prompts have nowhere to appear)"
+    fi
+
     grep -q xdg-portlin \
         "$MNT/etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs" 2>/dev/null \
         && pass "the session puts portlin's xdg directory on XDG_CONFIG_DIRS" \
