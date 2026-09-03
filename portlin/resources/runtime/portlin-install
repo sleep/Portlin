@@ -515,7 +515,7 @@ def installed_packages(entry: Entry, record: dict | None) -> list[str]:
     return names
 
 
-def fallback_record(entry: Entry, dpkg: set[str], home: Path) -> dict | None:
+def fallback_record(entry: Entry, dpkg: set[str]) -> dict | None:
     """Stand in for a state record that was never written or has been lost.
 
     Narrowed to what is actually installed, so removing an entry whose
@@ -1123,7 +1123,7 @@ def cmd_remove(args, ctx: Context) -> int:
         return code
     record = read_record(ctx, entry)
     if record is None and entry.check.kind == "dpkg":
-        record = fallback_record(entry, dpkg_installed(), Path(ctx.home))
+        record = fallback_record(entry, dpkg_installed())
     steps = plan_remove(entry, ctx, record)
     result = run_plan(steps, dry_run=args.dry_run)
     if result.ok and not args.dry_run:

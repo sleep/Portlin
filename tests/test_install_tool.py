@@ -679,9 +679,7 @@ class TestRemovingWithoutARecord:
 
     def test_the_fallback_purges_the_driver_a_resolver_chose(self, tool, catalog, ctx):
         entry = catalog.by_id("nvidia-driver")
-        record = tool.fallback_record(
-            entry, {"nvidia-driver", "linux-headers-amd64"}, Path(ctx.home)
-        )
+        record = tool.fallback_record(entry, {"nvidia-driver", "linux-headers-amd64"})
         assert set(record["packages"]) == {"nvidia-driver", "linux-headers-amd64"}
         assert tool.apt_argv("purge", *record["packages"]) in argvs(
             tool.plan_remove(entry, ctx, record)
@@ -692,15 +690,15 @@ class TestRemovingWithoutARecord:
         # the one it did not pick fails the whole removal, because apt has
         # never heard of it unless non-free is still enabled.
         entry = catalog.by_id("nvidia-driver")
-        record = tool.fallback_record(entry, {"nvidia-driver"}, Path(ctx.home))
+        record = tool.fallback_record(entry, {"nvidia-driver"})
         assert "nvidia-tesla-535-driver" not in record["packages"]
 
     def test_nothing_installed_means_no_record_to_act_on(self, tool, catalog, ctx):
-        assert tool.fallback_record(catalog.by_id("vlc"), set(), Path(ctx.home)) is None
+        assert tool.fallback_record(catalog.by_id("vlc"), set()) is None
 
     def test_it_still_takes_the_repository_files_away(self, tool, catalog, ctx):
         entry = catalog.by_id("mullvad")
-        record = tool.fallback_record(entry, {"mullvad-vpn"}, Path(ctx.home))
+        record = tool.fallback_record(entry, {"mullvad-vpn"})
         assert entry.repo.keyring_path in record["paths"]
 
     def test_the_catalog_fallback_covers_both_name_sets(self, tool, catalog):
