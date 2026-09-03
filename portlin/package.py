@@ -391,6 +391,12 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     # back to the stock icons -- it leaves the desktop with
                     # the menu button and nothing else.
                     "adwaita-icon-theme",
+                    # The two panel plugins the shipped layout names. Not
+                    # derivable from the file list: they are named inside a
+                    # data file this package ships, which is the same reason
+                    # the icon theme above is here.
+                    "xfce4-genmon-plugin",
+                    "xfce4-whiskermenu-plugin",
                     # What the Software app becomes root through. It runs
                     # portlin-install and nothing else, so without pkexec the
                     # window opens, lists everything, and installs none of it.

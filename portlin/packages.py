@@ -136,6 +136,14 @@ DESKTOP = [
     "xfce4-terminal",
     "xfce4-power-manager",
     "xfce4-screenshooter",
+    # The two plugins portlin's own panel layout names. Both arrive as Depends
+    # of xfce4-goodies today, but a line in someone else's package is not a
+    # promise, and this file exists precisely so the contents are not a
+    # metapackage's expansion. A layout that names a plugin the image did not
+    # install is not a panel missing one item: it is a hole with nothing on
+    # screen to say why.
+    "xfce4-genmon-plugin",
+    "xfce4-whiskermenu-plugin",
     "thunar",
     "thunar-archive-plugin",
     "xarchiver",
