@@ -19,29 +19,25 @@ from pathlib import Path
 sys.path.insert(0, "/usr/lib/portlin")
 
 from devices import (  # noqa: E402
+    backing_disk,
     backing_partition,
     command_output,
+    disk_tail_bytes,
     root_source,
-    sysfs_sectors,
+    unclaimed_bytes,
 )
 
 RELEASE = Path("/etc/portlin-release")
 OS_RELEASE = Path("/etc/os-release")
 
-# ext4 metadata is not a fixed quantity, so a fixed constant is wrong at one end
-# of the range or the other. statvfs already excludes the superblock, group
-# descriptors, bitmaps, inode tables and journal, and the measured gap between a
-# partition and the statvfs size of the filesystem filling it is a flat ~2.1%:
-# 674 MB on a 31 GB partition, 1311 MB on a 62.9 GB one. The slack therefore
-# scales, with a floor that covers an encrypted root's 16 MiB LUKS header on a
-# partition small enough for the fraction to fall below it.
-INSIDE_SLACK_FRACTION = 0.03
-INSIDE_SLACK_FLOOR_BYTES = 64 * 1024**2
-
-# Below this the report says nothing. Expansion is worth mentioning in whole
-# gigabytes; anything smaller is measurement noise rather than space a user
-# could usefully claim.
-REPORT_FLOOR_BYTES = 1024**3
+# The one wording for unclaimed space. A constant rather than a literal in the
+# print below because the panel readout quotes this exact sentence in its
+# tooltip: two places telling a user to run portlin-expand in two different
+# forms of words is how one of them ends up saying something no longer true.
+UNCLAIMED_ADVICE = (
+    "There is {gb:.1f} GB of unused space on this drive. "
+    "Run portlin-expand to claim it."
+)
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -70,69 +66,12 @@ def _debian_description() -> str:
     return _parse_env_file(OS_RELEASE).get("PRETTY_NAME", "unknown")
 
 
-def _backing_disk(partition: str) -> str:
-    """The whole disk behind ``partition``.
-
-    -d (no-deps) matters here: without it, lsblk lists the whole subtree
-    rooted at the partition, and on the ordinary case this runs against --
-    a live, mounted, encrypted stick, where an open LUKS mapping sits on top
-    of the very partition being asked about -- that is two rows instead of
-    one, and PKNAME comes back as two lines glued together by a newline.
-    """
-    return command_output(["lsblk", "-dno", "PKNAME", f"/dev/{partition}"]) or partition
-
-
-def _disk_tail_bytes(disk: str, partition: str) -> int:
-    """Unallocated bytes on the drive after the root partition.
-
-    The term that matters most, and the one this report exists for: a stick
-    written by putting the fixed-size image onto a larger drive has all of its
-    unclaimed space here, outside the partition entirely, where a comparison
-    between the filesystem and its own partition cannot see it.
-    """
-    disk_sectors = sysfs_sectors(disk, "size")
-    end = sysfs_sectors(partition, "start") + sysfs_sectors(partition, "size")
-    if not disk_sectors or end <= 0:
-        return 0
-    # The GPT backup header and its partition array occupy the last 33 sectors.
-    return max(0, (disk_sectors - end - 34) * 512)
-
-
-def _unused_inside_partition(filesystem_bytes: int, partition_bytes: int) -> int:
-    """Bytes inside the partition the filesystem has not claimed.
-
-    The second of the two gaps, and not the same as the first. An expansion
-    interrupted after growpart leaves a full-size partition holding the original
-    filesystem, so a check that only looked at the drive tail would find nothing
-    to do and never mention it again.
-    """
-    if partition_bytes <= 0:
-        return 0
-    slack = max(INSIDE_SLACK_FLOOR_BYTES, int(partition_bytes * INSIDE_SLACK_FRACTION))
-    return max(0, partition_bytes - filesystem_bytes - slack)
-
-
-def _unclaimed_bytes(
-    filesystem_bytes: int, partition_bytes: int, tail_bytes: int
-) -> int:
-    """Space this stick could still claim, across both gaps.
-
-    Reporting either gap alone gets it wrong in opposite directions. Comparing
-    the filesystem against the whole disk counts the fixed partitions ahead of
-    root and nags on every stick forever; comparing it against only its own
-    partition goes silent on the ordinary case of an unexpanded image sitting on
-    a much larger drive.
-    """
-    total = tail_bytes + _unused_inside_partition(filesystem_bytes, partition_bytes)
-    return total if total >= REPORT_FLOOR_BYTES else 0
-
-
 def main() -> int:
     release = _release()
     source = root_source()
     encrypted = source.startswith("/dev/mapper/")
     partition = backing_partition(source)
-    disk = _backing_disk(partition) if partition else ""
+    disk = backing_disk(partition) if partition else ""
 
     used = shutil.disk_usage("/")
     filesystem_gb = used.total / 1_000_000_000
@@ -150,14 +89,11 @@ def main() -> int:
     if drive_gb:
         print(f"capacity     {drive_gb:.1f} GB")
     if partition_bytes:
-        tail_bytes = _disk_tail_bytes(disk, partition) if disk else 0
-        unclaimed = _unclaimed_bytes(used.total, partition_bytes, tail_bytes)
+        tail_bytes = disk_tail_bytes(disk, partition) if disk else 0
+        unclaimed = unclaimed_bytes(used.total, partition_bytes, tail_bytes)
         if unclaimed:
             print()
-            print(
-                f"There is {unclaimed / 1_000_000_000:.1f} GB of unused space on "
-                "this drive. Run portlin-expand to claim it."
-            )
+            print(UNCLAIMED_ADVICE.format(gb=unclaimed / 1_000_000_000))
     print(f"booted on    {command_output(['uname', '-n'])}, {command_output(['uname', '-r'])}")
     return 0
 

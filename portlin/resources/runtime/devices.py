@@ -10,6 +10,21 @@ import os
 import subprocess
 from pathlib import Path
 
+# ext4 metadata is not a fixed quantity, so a fixed constant is wrong at one end
+# of the range or the other. statvfs already excludes the superblock, group
+# descriptors, bitmaps, inode tables and journal, and the measured gap between a
+# partition and the statvfs size of the filesystem filling it is a flat ~2.1%:
+# 674 MB on a 31 GB partition, 1311 MB on a 62.9 GB one. The slack therefore
+# scales, with a floor that covers an encrypted root's 16 MiB LUKS header on a
+# partition small enough for the fraction to fall below it.
+INSIDE_SLACK_FRACTION = 0.03
+INSIDE_SLACK_FLOOR_BYTES = 64 * 1024**2
+
+# Below this, nothing reports unclaimed space. Expansion is worth mentioning in
+# whole gigabytes; anything smaller is measurement noise rather than space a
+# user could usefully claim.
+REPORT_FLOOR_BYTES = 1024**3
+
 
 def command_output(argv: list[str]) -> str:
     """Run a command and return its stripped stdout, or "" if it is missing.
@@ -84,3 +99,60 @@ def sysfs_sectors(name: str, field: str) -> int:
         return int((Path("/sys/class/block") / name / field).read_text().strip())
     except (OSError, ValueError):
         return 0
+
+
+def backing_disk(partition: str) -> str:
+    """The whole disk behind ``partition``.
+
+    -d (no-deps) matters here: without it, lsblk lists the whole subtree
+    rooted at the partition, and on the ordinary case this runs against --
+    a live, mounted, encrypted stick, where an open LUKS mapping sits on top
+    of the very partition being asked about -- that is two rows instead of
+    one, and PKNAME comes back as two lines glued together by a newline.
+    """
+    return command_output(["lsblk", "-dno", "PKNAME", f"/dev/{partition}"]) or partition
+
+
+def disk_tail_bytes(disk: str, partition: str) -> int:
+    """Unallocated bytes on the drive after the root partition.
+
+    The term that matters most, and the one the unclaimed-space report exists
+    for: a stick written by putting the fixed-size image onto a larger drive has
+    all of its unclaimed space here, outside the partition entirely, where a
+    comparison between the filesystem and its own partition cannot see it.
+    """
+    disk_sectors = sysfs_sectors(disk, "size")
+    end = sysfs_sectors(partition, "start") + sysfs_sectors(partition, "size")
+    if not disk_sectors or end <= 0:
+        return 0
+    # The GPT backup header and its partition array occupy the last 33 sectors.
+    return max(0, (disk_sectors - end - 34) * 512)
+
+
+def unused_inside_partition(filesystem_bytes: int, partition_bytes: int) -> int:
+    """Bytes inside the partition the filesystem has not claimed.
+
+    The second of the two gaps, and not the same as the first. An expansion
+    interrupted after growpart leaves a full-size partition holding the original
+    filesystem, so a check that only looked at the drive tail would find nothing
+    to do and never mention it again.
+    """
+    if partition_bytes <= 0:
+        return 0
+    slack = max(INSIDE_SLACK_FLOOR_BYTES, int(partition_bytes * INSIDE_SLACK_FRACTION))
+    return max(0, partition_bytes - filesystem_bytes - slack)
+
+
+def unclaimed_bytes(
+    filesystem_bytes: int, partition_bytes: int, tail_bytes: int
+) -> int:
+    """Space this stick could still claim, across both gaps.
+
+    Reporting either gap alone gets it wrong in opposite directions. Comparing
+    the filesystem against the whole disk counts the fixed partitions ahead of
+    root and nags on every stick forever; comparing it against only its own
+    partition goes silent on the ordinary case of an unexpanded image sitting on
+    a much larger drive.
+    """
+    total = tail_bytes + unused_inside_partition(filesystem_bytes, partition_bytes)
+    return total if total >= REPORT_FLOOR_BYTES else 0

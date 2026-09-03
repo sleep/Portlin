@@ -225,11 +225,17 @@ def test_pkname_lookups_exclude_holder_devices():
     # mounted, encrypted stick. That returns two rows glued into one string
     # instead of one, and the harness caught this reaching a real growpart
     # call with an empty partition number.
+    #
+    # portlin-info's own copy has since moved into the shared device module, so
+    # the flag is asserted where the lookup now lives. The negative half still
+    # sweeps every tool: the way this regresses is someone writing a fresh
+    # lookup in a tool rather than editing the shared one.
     files = package.text_files("portlin-runtime")
-    for tool in ("usr/bin/portlin-info", "usr/bin/portlin-expand"):
-        source = files[tool]
-        assert '"lsblk", "-no", "PKNAME"' not in source
-        assert '"lsblk", "-dno", "PKNAME"' in source
+    for tool in ("usr/bin/portlin-info", "usr/bin/portlin-expand",
+                 "usr/lib/portlin/devices.py"):
+        assert '"lsblk", "-no", "PKNAME"' not in files[tool]
+    for source in ("usr/bin/portlin-expand", "usr/lib/portlin/devices.py"):
+        assert '"lsblk", "-dno", "PKNAME"' in files[source]
 
 
 def test_tools_use_the_shared_device_module_not_a_hand_copy():
