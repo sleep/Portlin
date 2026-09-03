@@ -324,12 +324,18 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.machine.set_line_wrap(True)
         self.machine.set_margin_start(12)
         self.machine.set_margin_end(12)
-        self.machine.set_margin_top(12)
+        self.machine.set_margin_top(8)
+        self.machine.set_margin_bottom(8)
         self.machine_frame = Gtk.Frame(label="This machine")
         self.machine_frame.set_margin_start(12)
         self.machine_frame.set_margin_end(12)
         self.machine_frame.set_margin_top(12)
         self.machine_frame.add(self.machine)
+        # The frame is hidden on every page but Drivers, and show_all must
+        # not bring it back. Its contents are shown with show_all on the
+        # frame itself when the page opens: no_show_all stops show_all
+        # descending into it, so a child shown only by the window's show_all
+        # would never appear at all.
         self.machine_frame.set_no_show_all(True)
         right.pack_start(self.machine_frame, False, False, 0)
 
@@ -423,12 +429,18 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.rows.clear()
 
         showing_drivers = self.category == DRIVERS and not self.query.strip()
-        self.machine_frame.set_visible(showing_drivers)
         if showing_drivers:
             self.machine.set_text(
                 "Looking at this machine..." if self.scan_pending
                 else describe_machine(self.scan)
             )
+            # show() on each, not show_all(): no_show_all makes show_all a
+            # no-op on this widget and everything under it, which is what
+            # keeps the frame off every other page.
+            self.machine.show()
+            self.machine_frame.show()
+        else:
+            self.machine_frame.hide()
 
         entries = visible_entries(self.query, self.category)
         reasons = {}

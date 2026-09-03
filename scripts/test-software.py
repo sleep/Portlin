@@ -550,6 +550,8 @@ def check_the_window(catalog) -> None:
     try:
         sys.path.insert(0, "/usr/lib/portlin")
         software = load(Path(WINDOW), "portlin_software")
+        from gi.repository import Gtk
+
         check_it_reads_a_real_job(software)
         scan = {
             "gpus": [{"slot": "01:00.0", "vendor": "nvidia",
@@ -590,10 +592,25 @@ def check_the_window(catalog) -> None:
             ok("the drivers page draws the suggestion for this machine first")
         else:
             bad(f"the drivers page led with {first!r} rather than the suggestion")
+        # Both halves: the text has to be right and the widget has to be on
+        # screen. A label that is set but never shown reads as an empty box,
+        # and only a real render says which of the two happened.
+        while Gtk.events_pending():
+            Gtk.main_iteration()
         if "GP108M" not in window.machine.get_text():
             bad("the drivers page does not name the hardware the scan found")
+        elif not window.machine.get_mapped():
+            bad("the drivers page describes the machine into a label nobody can see")
         else:
-            ok("the drivers page names the hardware the scan found")
+            ok("the drivers page shows the hardware the scan found")
+
+        select_category(window, catalog, catalog.CATEGORIES[0])
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+        if window.machine_frame.get_visible():
+            bad("the machine description stayed on a page that is not Drivers")
+        else:
+            ok("the machine description belongs to the drivers page alone")
 
         # The log pane has to follow its own output: a pane showing the first
         # screen of a ten-minute apt run reads as a program that has stopped.
