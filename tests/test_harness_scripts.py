@@ -15,6 +15,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 UPGRADE = SCRIPTS / "test-package-upgrade.py"
 SOFTWARE = SCRIPTS / "test-software.py"
+STASH = SCRIPTS / "test-stash-passphrase.py"
 
 
 class TestUpgradeHarnessStartsFromNothing:
@@ -110,3 +111,18 @@ class TestSoftwareHarness:
         source = SOFTWARE.read_text()
         body = source[source.index("def check_install_and_remove"):source.index("def check_privilege")]
         assert "skip(" in body
+
+
+class TestStashHarnessOwnsNothingItDidNotMake:
+    """/run/portlin is shared, and test-encrypt-hook.py runs first.
+
+    That harness leaves a `just-encrypted` breadcrumb in the same directory
+    this one has to replace with a plain file, so a cleanup that assumed an
+    empty directory failed on the harness before it rather than on anything
+    it was testing.
+    """
+
+    def test_it_clears_the_directory_rather_than_assuming_it_is_empty(self):
+        source = STASH.read_text()
+        assert "rmtree" in source
+        assert ".parent.rmdir()" not in source

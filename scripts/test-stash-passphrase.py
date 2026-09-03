@@ -21,6 +21,7 @@ container on any other host; see the harness target in the Makefile.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -216,9 +217,12 @@ def main() -> int:
         # and root writes into a 0500 directory regardless. Putting a plain file
         # where the directory belongs is a refusal even root cannot talk past.
         run(["cryptsetup", "close", NAME])
-        STASH.unlink(missing_ok=True)
-        if STASH.parent.is_dir():
-            STASH.parent.rmdir()
+        # Everything in the directory, not just the stash: /run/portlin is
+        # shared with the initramfs scripts, and test-encrypt-hook.py runs
+        # first in the same container and leaves its own breadcrumb there. A
+        # harness that assumed it owned the directory would fail on whatever
+        # ran before it rather than on what it is testing.
+        shutil.rmtree(STASH.parent, ignore_errors=True)
         STASH.parent.write_text("not a directory\n")
         try:
             degraded = unlock_through_keyscript(loop)

@@ -29,6 +29,7 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 import gi
 
@@ -42,9 +43,7 @@ from catalog import (  # noqa: E402
     CATEGORIES,
     ENTRIES,
     Entry,
-    by_category,
     by_id,
-    expand_home,
     installed,
     is_privileged,
     parse_dpkg_status,
@@ -261,6 +260,10 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.query = ""
         self.job: Job | None = None
         self.busy_id: str | None = None
+        # Whether the running job went through pkexec, which decides how its
+        # exit status is read: 126 and 127 mean one thing from pkexec and
+        # something else entirely from a vendor's installer script.
+        self.privileged_job = True
         self.rows: dict[str, dict] = {}
 
         self._build()
@@ -397,8 +400,6 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         widgets["button"].set_sensitive(sensitive)
 
     def is_installed(self, entry: Entry) -> bool:
-        from pathlib import Path
-
         return installed(entry, self.dpkg, Path(self.home))
 
     def _populate(self) -> None:
@@ -548,7 +549,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
             self.status.set_text("Done.")
             self.progress.set_fraction(1.0)
         else:
-            message = explain_exit(code, privileged=getattr(self, "privileged_job", True))
+            message = explain_exit(code, privileged=self.privileged_job)
             self.status.set_text(message)
             self._append(message)
         self.busy_id = None
