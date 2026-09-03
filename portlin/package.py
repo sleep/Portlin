@@ -38,7 +38,7 @@ TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install"]
 # a copy of. catalog.py is here rather than inside portlin-install because
 # portlin-software reads it too, and a copy in each would be the copy that
 # drifts.
-SHARED_MODULES = ["devices.py", "catalog.py"]
+SHARED_MODULES = ["devices.py", "catalog.py", "hostinfo.py"]
 
 # The polkit action the Software app elevates through. It ships in
 # portlin-runtime, beside the program its exec.path annotation names, so the

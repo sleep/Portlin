@@ -26,6 +26,7 @@ from devices import (  # noqa: E402
     root_source,
     unclaimed_bytes,
 )
+from hostinfo import format_bytes, read_gpu, read_host  # noqa: E402
 
 RELEASE = Path("/etc/portlin-release")
 OS_RELEASE = Path("/etc/os-release")
@@ -95,6 +96,24 @@ def main() -> int:
             print()
             print(UNCLAIMED_ADVICE.format(gb=unclaimed / 1_000_000_000))
     print(f"booted on    {command_output(['uname', '-n'])}, {command_output(['uname', '-r'])}")
+
+    # What the stick is plugged into, as opposed to what the stick is. Printed
+    # last because it is the half that changes between one boot and the next,
+    # and About Portlin shows this whole report, so the dialog gains the machine
+    # description without a line of code of its own.
+    host = read_host()
+    gpu = read_gpu()
+    print()
+    if host.model:
+        print(f"model        {host.model}")
+    if host.cpu:
+        threads = f", {host.threads} threads" if host.threads else ""
+        print(f"cpu          {host.cpu}{threads}")
+    if host.memory_bytes:
+        print(f"memory       {format_bytes(host.memory_bytes)}")
+    if gpu is not None:
+        print(f"graphics     {gpu.detail}")
+    print(f"firmware     {host.firmware}")
     return 0
 
 
