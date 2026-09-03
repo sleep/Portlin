@@ -794,4 +794,7 @@ class TestUpgradeAsksBeforeRemovingAnything:
         monkeypatch.setattr(tool, "run_plan", record)
         args = tool.build_parser().parse_args(["upgrade"])
         assert args.func(args, ctx) == tool.EXIT_OK
-        assert plans[-1] == argvs(tool.plan_upgrade(ctx))
+        # The simulation already refreshed the lists; doing it again is a
+        # second wait for an answer already given.
+        assert plans[-1] == argvs(tool.plan_upgrade(ctx, refresh=False))
+        assert plans[-1].count(tool.apt_argv("update")) == 0

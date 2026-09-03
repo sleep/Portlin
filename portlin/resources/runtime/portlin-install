@@ -566,9 +566,16 @@ def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
     raise ValueError(f"{entry.id}: nothing to plan for kind {entry.kind!r}")
 
 
-def plan_upgrade(ctx: Context) -> list[Step]:
+def plan_upgrade(ctx: Context, *, refresh: bool = True) -> list[Step]:
+    """Upgrade everything. ``refresh`` is off when the lists were just read.
+
+    The simulation that decides whether anything would be removed has to
+    refresh first to be worth anything, and refreshing twice in one command
+    is a second wait for the same answer.
+    """
     return [
-        Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV),
+        *([Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV)]
+          if refresh else []),
         Step("Upgrading everything", argv=apt_argv("full-upgrade"), env=APT_ENV),
         Step("Removing what nothing needs any more",
              argv=apt_argv("autoremove", "--purge"), env=APT_ENV),
@@ -1188,6 +1195,7 @@ def cmd_upgrade(args, ctx: Context) -> int:
         print("upgrade needs root: run it from Software, or with sudo.", file=sys.stderr)
         return EXIT_PRIVILEGE
 
+    refreshed = False
     if not args.allow_removals and not args.dry_run:
         # Asked before anything is changed, because a full upgrade may remove
         # packages to resolve a transition and this runs from a button rather
@@ -1198,6 +1206,7 @@ def cmd_upgrade(args, ctx: Context) -> int:
         if not simulated.ok:
             emit("result", "failed", "upgrade", simulated.failure)
             return EXIT_FAILED
+        refreshed = True
         removals = parse_removals(simulated.captured)
         if removals:
             for name in removals:
@@ -1210,7 +1219,7 @@ def cmd_upgrade(args, ctx: Context) -> int:
             )
             return EXIT_NEEDS_REMOVALS
 
-    steps = plan_upgrade(ctx)
+    steps = plan_upgrade(ctx, refresh=not refreshed)
     result = run_plan(steps, dry_run=args.dry_run)
     if not result.ok:
         emit("result", "failed", "upgrade", result.failure)
