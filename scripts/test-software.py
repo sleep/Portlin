@@ -297,6 +297,57 @@ def check_the_other_install_kinds() -> None:
         ok("a tarball removes its directory and its menu entry")
 
 
+def check_the_user_script_path() -> None:
+    """Run a vendor-style installer as an ordinary user, end to end.
+
+    The real ones are Zed and Kimi Code, which download a hundred megabytes
+    from somebody's CDN into a home directory. This is the same path with a
+    stand-in script: run as the invoking user rather than root, into that
+    user's home, recording what it did where that user can write.
+    """
+    run(["useradd", "-m", "scripted"])
+    script = Path("/tmp/harness-install.sh")
+    script.write_text("#!/bin/sh\nmkdir -p \"$HOME/.harness-app/bin\"\n"
+                      "printf '%s' run-me > \"$HOME/.harness-app/bin/app\"\n")
+    script.chmod(0o755)
+
+    driver = Path("/tmp/harness-user-script.py")
+    driver.write_text(
+        "import sys\n"
+        "sys.path.insert(0, '/usr/lib/portlin')\n"
+        "import importlib.machinery, importlib.util\n"
+        "loader = importlib.machinery.SourceFileLoader('portlin_install', '/usr/bin/portlin-install')\n"
+        "spec = importlib.util.spec_from_file_location(loader.name, '/usr/bin/portlin-install', loader=loader)\n"
+        "installer = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[loader.name] = installer\n"
+        "spec.loader.exec_module(installer)\n"
+        "import catalog\n"
+        "entry = catalog.Entry(id='harness-script', name='Harness script',\n"
+        "    summary='A stand-in for a vendor installer', category='Development',\n"
+        "    kind='user-script', url='file:///tmp/harness-install.sh',\n"
+        "    check=catalog.path('~/.harness-app/bin/app'),\n"
+        "    remove_paths=('~/.harness-app',),\n"
+        "    warning='stand-in', homepage='https://example.invalid/')\n"
+        "ctx = installer.load_context()\n"
+        "assert not ctx.root, 'this must not run as root'\n"
+        "result = installer.run_plan(installer.plan_install(entry, ctx))\n"
+        "assert result.ok, result.failure\n"
+        "installer.write_record(ctx, entry, installer.record_for(entry, ctx, []))\n"
+        "import pathlib\n"
+        "assert pathlib.Path(installer.record_path(ctx, entry)).exists(), 'no record written'\n"
+        "print('INSTALLED', installer.installed(entry, set(), pathlib.Path(ctx.home)))\n"
+        "installer.run_plan(installer.plan_remove(entry, ctx, installer.read_record(ctx, entry)))\n"
+        "print('AFTER', installer.installed(entry, set(), pathlib.Path(ctx.home)))\n"
+    )
+    result = run(["su", "-s", "/bin/sh", "scripted", "-c", f"python3 {driver}"])
+    if "INSTALLED True" in result.stdout and "AFTER False" in result.stdout:
+        ok("a vendor installer runs as the user, into their home, and comes back out")
+    else:
+        bad(f"the user-script path failed:\n{result.stdout}\n{result.stderr}")
+    if Path("/home/scripted/.harness-app").exists():
+        bad("the user-script path left files in the home directory")
+
+
 def check_privilege_refusals() -> None:
     """Both refusals, against a real unprivileged account."""
     run(["useradd", "-m", "probe"])
@@ -575,6 +626,7 @@ def main() -> int:
         ),
     )
     check_the_other_install_kinds()
+    check_the_user_script_path()
     check_privilege_refusals()
     check_upgrade_asks_before_removing()
     check_the_scan()
