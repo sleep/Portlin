@@ -707,3 +707,30 @@ class TestRemovingWithoutARecord:
         names = tool.installed_packages(catalog.by_id("nvidia-driver"), None)
         assert "linux-headers-amd64" in names
         assert "nvidia-driver" in names
+
+
+class TestWhatShowPrints:
+    def test_a_long_warning_is_wrapped_for_a_terminal(self, tool, catalog, ctx, capsys):
+        args = tool.build_parser().parse_args(["show", "nvidia-driver"])
+        args.func(args, ctx)
+        printed = capsys.readouterr().out
+        assert all(len(line) <= 80 for line in printed.splitlines()[1:]), printed
+        assert "Ctrl+Alt+F2" in printed
+
+    def test_it_says_the_driver_is_chosen_at_install_time(self, tool, ctx, capsys):
+        # The catalog lists only the headers for this entry, so printing the
+        # package list alone would say the driver is a package it is not.
+        args = tool.build_parser().parse_args(["show", "nvidia-driver"])
+        args.func(args, ctx)
+        assert "chosen by nvidia-detect" in capsys.readouterr().out
+
+    def test_an_entry_that_needs_no_root_says_so(self, tool, ctx, capsys):
+        args = tool.build_parser().parse_args(["show", "zed"])
+        args.func(args, ctx)
+        assert "no root needed" in capsys.readouterr().out
+
+    def test_show_json_is_machine_readable(self, tool, ctx, capsys):
+        args = tool.build_parser().parse_args(["show", "vlc", "--json"])
+        assert args.func(args, ctx) == tool.EXIT_OK
+        state = json.loads(capsys.readouterr().out)
+        assert state["id"] == "vlc" and state["privileged"] is True

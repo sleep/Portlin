@@ -46,6 +46,7 @@ import selectors
 import shutil
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
@@ -1006,6 +1007,23 @@ def cmd_list(args, ctx: Context) -> int:
     return EXIT_OK
 
 
+FIELD_WIDTH = 11
+TERMINAL_WIDTH = 78
+
+
+def field(label: str, value: str) -> None:
+    """One labelled line, wrapped under its own label.
+
+    The warnings are the longest and most important text this prints, and a
+    four-hundred-character line in a terminal is a paragraph nobody reads.
+    """
+    indent = " " * (FIELD_WIDTH + 2)
+    lines = textwrap.wrap(value, width=TERMINAL_WIDTH - len(indent)) or [""]
+    print(f"  {label + ':':<{FIELD_WIDTH}}{lines[0]}")
+    for line in lines[1:]:
+        print(f"{indent}{line}")
+
+
 def cmd_show(args, ctx: Context) -> int:
     entry = by_id(args.id)
     state = entry_state(entry, ctx, dpkg_installed())
@@ -1013,21 +1031,26 @@ def cmd_show(args, ctx: Context) -> int:
         print(json.dumps(state, indent=2))
         return EXIT_OK
     print(f"{entry.name} ({entry.id}): {entry.summary}")
-    print(f"  kind:      {entry.kind}" + ("" if is_privileged(entry) else " (no root needed)"))
-    print(f"  installed: {'yes' if state['installed'] else 'no'}")
+    field("kind", entry.kind + ("" if is_privileged(entry) else " (no root needed)"))
+    field("installed", "yes" if state["installed"] else "no")
+    if entry.resolver:
+        # Saying only what the catalog lists would be misleading here: the
+        # driver itself is whatever the resolver names for the card in this
+        # machine, and the catalog cannot know that in advance.
+        field("driver", f"chosen by {entry.resolver} when this is installed")
     if entry.packages:
-        print(f"  packages:  {' '.join(entry.packages)}")
+        field("packages", " ".join(entry.packages))
     if entry.repo:
-        print(f"  repo:      {entry.repo.sources_line or entry.repo.sources_url}")
+        field("repo", entry.repo.sources_line or entry.repo.sources_url)
     if entry.url:
-        print(f"  url:       {entry.url}")
+        field("url", entry.url)
     if entry.needs_components:
-        print(f"  needs:     {' '.join(entry.needs_components)} component")
+        field("needs", f"{' '.join(entry.needs_components)} component")
     if entry.warning:
-        print(f"  warning:   {entry.warning}")
+        field("warning", entry.warning)
     if entry.notes:
-        print(f"  notes:     {entry.notes}")
-    print(f"  homepage:  {entry.homepage}")
+        field("notes", entry.notes)
+    field("homepage", entry.homepage)
     return EXIT_OK
 
 
