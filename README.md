@@ -110,7 +110,10 @@ portlin-install upgrade              # what Update everything runs
 ```
 
 **Update everything** in the window's header is that last one: `apt full-upgrade` with its
-output in the log pane, for the system and everything installed from here alike.
+output in the log pane, for the system and everything installed from here alike. A full upgrade
+is occasionally allowed to remove a package to resolve a transition, so it asks apt what it
+would do first and stops with the list in front of you rather than removing anything from a
+button press.
 
 Entries that need Debian's `non-free` component get it through a drop-in under
 `/etc/apt/sources.list.d/`, so sticks written before that component was enabled by default are

@@ -734,3 +734,64 @@ class TestWhatShowPrints:
         assert args.func(args, ctx) == tool.EXIT_OK
         state = json.loads(capsys.readouterr().out)
         assert state["id"] == "vlc" and state["privileged"] is True
+
+
+class TestUpgradeAsksBeforeRemovingAnything:
+    """A full upgrade may remove packages to resolve a transition, and this
+    one runs from a button rather than from a command somebody typed."""
+
+    def test_the_simulation_changes_nothing(self, tool, ctx):
+        argvs_run = argvs(tool.plan_upgrade_simulation(ctx))
+        assert tool.apt_argv("--simulate", "full-upgrade") in argvs_run
+        assert tool.apt_argv("full-upgrade") not in argvs_run
+
+    def test_it_reads_removals_out_of_apts_own_simulation(self, tool):
+        text = (
+            "Inst libfoo1 [1.0] (1.1 Debian:13/stable [amd64])\n"
+            "Remv oldpackage [2.3-1]\n"
+            "Remv another [1.0-2]\n"
+            "Conf libfoo1 (1.1 Debian:13/stable [amd64])\n"
+        )
+        assert tool.parse_removals(text) == ["oldpackage", "another"]
+
+    def test_an_upgrade_that_removes_nothing_reads_as_nothing(self, tool):
+        assert tool.parse_removals("Inst libfoo1 [1.0]\nConf libfoo1\n") == []
+
+    def test_it_refuses_with_its_own_status_and_names_them(
+        self, tool, ctx, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            tool, "run_plan",
+            lambda steps, **kwargs: tool.PlanResult(True, captured="Remv oldpackage [1]"),
+        )
+        args = tool.build_parser().parse_args(["upgrade"])
+        assert args.func(args, ctx) == tool.EXIT_NEEDS_REMOVALS
+        printed = capsys.readouterr().out
+        assert "::warn would remove oldpackage" in printed
+        assert "--allow-removals" in printed
+
+    def test_the_flag_goes_straight_through_without_simulating(
+        self, tool, ctx, monkeypatch
+    ):
+        seen = []
+
+        def record(steps, **kwargs):
+            seen.append(argvs(steps))
+            return tool.PlanResult(True)
+
+        monkeypatch.setattr(tool, "run_plan", record)
+        args = tool.build_parser().parse_args(["upgrade", "--allow-removals"])
+        assert args.func(args, ctx) == tool.EXIT_OK
+        assert seen == [argvs(tool.plan_upgrade(ctx))]
+
+    def test_an_upgrade_with_nothing_to_remove_just_runs(self, tool, ctx, monkeypatch):
+        plans = []
+
+        def record(steps, **kwargs):
+            plans.append(argvs(steps))
+            return tool.PlanResult(True, captured="Inst libfoo1 [1.0]")
+
+        monkeypatch.setattr(tool, "run_plan", record)
+        args = tool.build_parser().parse_args(["upgrade"])
+        assert args.func(args, ctx) == tool.EXIT_OK
+        assert plans[-1] == argvs(tool.plan_upgrade(ctx))

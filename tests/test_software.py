@@ -284,3 +284,26 @@ class TestMenuEntry:
         keywords = self._entry()["Keywords"].lower()
         for word in ("software", "install", "drivers"):
             assert word in keywords
+
+
+class TestUpdatingEverything:
+    def test_it_does_not_allow_removals_until_they_are_agreed(self, software):
+        assert software.upgrade_argv(passwordless_sudo=False) == [
+            "pkexec", "/usr/bin/portlin-install", "upgrade"
+        ]
+
+    def test_agreeing_passes_the_flag_the_installer_wants(self, software):
+        assert software.upgrade_argv(
+            passwordless_sudo=False, allow_removals=True
+        )[-1] == "--allow-removals"
+
+    def test_a_refused_upgrade_is_explained_rather_than_shown_as_a_number(self, software):
+        message = software.explain_exit(software.EXIT_NEEDS_REMOVALS, privileged=True)
+        assert "remove packages" in message
+        assert "Nothing was changed" in message
+
+    def test_the_installer_and_the_window_agree_on_that_status(self, software):
+        # Two files, one number. If they drifted, the window would report a
+        # refusal to remove things as an unexplained failure.
+        installer = (RUNTIME / "portlin-install").read_text()
+        assert f"EXIT_NEEDS_REMOVALS = {software.EXIT_NEEDS_REMOVALS}" in installer

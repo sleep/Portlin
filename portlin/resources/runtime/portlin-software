@@ -58,6 +58,7 @@ DRIVERS = "Drivers"
 # Exit codes portlin-install and pkexec use, by what they mean here.
 EXIT_OK = 0
 EXIT_PRIVILEGE = 3
+EXIT_NEEDS_REMOVALS = 5
 PKEXEC_REFUSED = 126
 PKEXEC_NO_AGENT = 127
 
@@ -83,8 +84,11 @@ def launch_argv(entry: Entry, action: str, *, passwordless_sudo: bool) -> list[s
     return [INSTALLER, action, entry.id]
 
 
-def upgrade_argv(*, passwordless_sudo: bool) -> list[str]:
-    return [*elevation_argv(passwordless_sudo), INSTALLER, "upgrade"]
+def upgrade_argv(*, passwordless_sudo: bool, allow_removals: bool = False) -> list[str]:
+    argv = [*elevation_argv(passwordless_sudo), INSTALLER, "upgrade"]
+    if allow_removals:
+        argv.append("--allow-removals")
+    return argv
 
 
 def parse_event(line: str) -> tuple[str, str] | None:
@@ -113,6 +117,8 @@ def explain_exit(code: int, *, privileged: bool) -> str:
         )
     if code == EXIT_PRIVILEGE:
         return "That was run with the wrong privileges. Nothing was changed."
+    if code == EXIT_NEEDS_REMOVALS:
+        return "This upgrade would remove packages. Nothing was changed."
     return f"It did not finish (exit status {code}). The log says where it stopped."
 
 
@@ -260,6 +266,9 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.query = ""
         self.job: Job | None = None
         self.busy_id: str | None = None
+        # What the running upgrade said it would have to remove, collected
+        # from its warnings so the question can be put with the list in it.
+        self.removals: list[str] = []
         # Whether the running job went through pkexec, which decides how its
         # exit status is read: 126 and 127 mean one thing from pkexec and
         # something else entirely from a vendor's installer script.
@@ -506,10 +515,35 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         return answer == Gtk.ResponseType.ACCEPT
 
-    def _start_upgrade(self) -> None:
+    def _confirm_removals(self, removals: list[str]) -> bool:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="This update has to remove some software",
+        )
+        dialog.format_secondary_text(
+            "Updating everything means removing:\n\n"
+            + "\n".join(f"    {name}" for name in removals)
+            + "\n\nNothing has been changed yet."
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Remove and update", Gtk.ResponseType.ACCEPT)
+        answer = dialog.run()
+        dialog.destroy()
+        return answer == Gtk.ResponseType.ACCEPT
+
+    def _start_upgrade(self, *, allow_removals: bool = False) -> None:
         if self.job is not None:
             return
-        self._start(upgrade_argv(passwordless_sudo=self.passwordless_sudo), entry=None)
+        self.removals = []
+        self._start(
+            upgrade_argv(
+                passwordless_sudo=self.passwordless_sudo, allow_removals=allow_removals
+            ),
+            entry=None,
+        )
 
     def _start(self, argv, *, entry: Entry | None) -> None:
         self.busy_id = entry.id if entry else None
@@ -554,6 +588,8 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         elif kind == "warn":
             self._append(rest)
             self.status.set_text(rest)
+            if rest.startswith("would remove "):
+                self.removals.append(rest.removeprefix("would remove "))
         elif kind == "reboot":
             self._append("Reboot before relying on this driver.")
         elif kind == "result":
@@ -572,6 +608,12 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.busy_id = None
         self._set_busy(False)
         self._populate()
+        if code == EXIT_NEEDS_REMOVALS and self.removals:
+            # apt would rather remove something than leave the system half
+            # upgraded, and it is sometimes right. Whoever is holding the
+            # stick decides, with the list in front of them.
+            if self._confirm_removals(self.removals):
+                self._start_upgrade(allow_removals=True)
 
 
 def main() -> int:

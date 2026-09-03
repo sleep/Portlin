@@ -313,6 +313,35 @@ def check_privilege_refusals() -> None:
         bad(f"installing zed as root exited {result.returncode}, wanted 3")
 
 
+def check_upgrade_asks_before_removing() -> None:
+    """A full upgrade that has to remove something must stop and say so.
+
+    Driven against real apt rather than a parsed string, because what is
+    being tested is that apt's simulation output is read correctly, and only
+    apt writes it. tmux stands in for the thing that would be removed: apt
+    is asked to remove it, and the refusal has to name it.
+    """
+    if run([INSTALLER, "install", DEBIAN_ENTRY]).returncode != 0:
+        skip("could not install the stand-in package for the upgrade check")
+        return
+    simulated = run(["apt-get", "--simulate", "purge", "-y", DEBIAN_ENTRY])
+    installer = sys.modules.get("portlin_install") or load(Path(INSTALLER), "portlin_install")
+    removals = installer.parse_removals(simulated.stdout)
+    if DEBIAN_ENTRY in removals:
+        ok("apt's own simulation output is read for what it would remove")
+    else:
+        bad(f"could not read a removal out of apt's simulation: {simulated.stdout[:300]}")
+    run([INSTALLER, "remove", DEBIAN_ENTRY])
+
+    result = run([INSTALLER, "upgrade"])
+    if result.returncode in (0, 5):
+        ok(f"upgrade ran to a definite answer (status {result.returncode})")
+        if result.returncode == 5 and "::warn would remove" not in result.stdout:
+            bad("upgrade refused without naming what it would remove")
+    else:
+        bad(f"upgrade exited {result.returncode}:\n{result.stdout[-400:]}")
+
+
 def check_the_scan() -> None:
     result = run([INSTALLER, "scan", "--json"])
     if result.returncode != 0:
@@ -547,6 +576,7 @@ def main() -> int:
     )
     check_the_other_install_kinds()
     check_privilege_refusals()
+    check_upgrade_asks_before_removing()
     check_the_scan()
     check_polkit_reads_the_action()
     check_the_window(catalog)

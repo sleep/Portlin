@@ -73,6 +73,7 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_PRIVILEGE = 3
+EXIT_NEEDS_REMOVALS = 5
 
 SOURCES_LIST = Path("/etc/apt/sources.list")
 COMPONENT_SOURCES = "/etc/apt/sources.list.d/portlin-components.sources"
@@ -572,6 +573,34 @@ def plan_upgrade(ctx: Context) -> list[Step]:
         Step("Removing what nothing needs any more",
              argv=apt_argv("autoremove", "--purge"), env=APT_ENV),
     ]
+
+
+def plan_upgrade_simulation(ctx: Context) -> list[Step]:
+    """Ask apt what a full upgrade would do, without doing any of it."""
+    return [
+        Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV),
+        Step("Checking what the upgrade would change",
+             argv=apt_argv("--simulate", "full-upgrade"), env=APT_ENV, capture=True),
+    ]
+
+
+def parse_removals(text: str) -> list[str]:
+    """The packages apt says a full upgrade would take away.
+
+    A full upgrade is the right thing to run and occasionally the wrong thing
+    to run unwatched: it is allowed to remove packages to resolve a
+    transition, and this one is a button rather than a command somebody
+    typed. Read from apt's own simulation rather than guessed, because only
+    apt knows what its resolver decided.
+    """
+    removed = []
+    for line in text.splitlines():
+        # `apt-get --simulate` prints one line per action: Remv <name> [ver].
+        if line.startswith("Remv "):
+            name = line.split()[1]
+            if name not in removed:
+                removed.append(name)
+    return removed
 
 
 def needs_reboot(steps) -> bool:
@@ -1158,6 +1187,29 @@ def cmd_upgrade(args, ctx: Context) -> int:
     if not ctx.root:
         print("upgrade needs root: run it from Software, or with sudo.", file=sys.stderr)
         return EXIT_PRIVILEGE
+
+    if not args.allow_removals and not args.dry_run:
+        # Asked before anything is changed, because a full upgrade may remove
+        # packages to resolve a transition and this runs from a button rather
+        # than from a command somebody typed. Whoever is holding the stick
+        # decides, either by answering the app's dialog or by passing the
+        # flag here.
+        simulated = run_plan(plan_upgrade_simulation(ctx))
+        if not simulated.ok:
+            emit("result", "failed", "upgrade", simulated.failure)
+            return EXIT_FAILED
+        removals = parse_removals(simulated.captured)
+        if removals:
+            for name in removals:
+                emit("warn", f"would remove {name}")
+            emit(
+                "result",
+                "failed",
+                "upgrade",
+                "this upgrade would remove packages; rerun with --allow-removals",
+            )
+            return EXIT_NEEDS_REMOVALS
+
     steps = plan_upgrade(ctx)
     result = run_plan(steps, dry_run=args.dry_run)
     if not result.ok:
@@ -1240,6 +1292,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade = commands.add_parser("upgrade", help="upgrade every installed package")
     upgrade.add_argument("--dry-run", action="store_true")
+    upgrade.add_argument(
+        "--allow-removals",
+        action="store_true",
+        help="go ahead even if the upgrade has to remove packages",
+    )
     upgrade.set_defaults(func=cmd_upgrade)
 
     scan = commands.add_parser("scan", help="which drivers fit this machine")
