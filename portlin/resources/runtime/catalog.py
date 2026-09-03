@@ -215,7 +215,10 @@ ENTRIES: tuple[Entry, ...] = (
         icon="browser/icons/mozicon128.png",
         check=path("/opt/palemoon/palemoon"),
         homepage="https://www.palemoon.org/",
-        notes="Pale Moon publishes no Debian package, so it is unpacked under /opt and updates itself.",
+        notes=(
+            "Pale Moon publishes no Debian package, so it is unpacked under /opt and updates "
+            "itself."
+        ),
     ),
     # -- Communication -----------------------------------------------------
     Entry(
@@ -258,7 +261,10 @@ ENTRIES: tuple[Entry, ...] = (
         launcher="Telegram",
         check=path("/opt/telegram/Telegram"),
         homepage="https://desktop.telegram.org/",
-        notes="Debian ships no Telegram Desktop package, so this is Telegram's own build under /opt. It updates itself.",
+        notes=(
+            "Debian ships no Telegram Desktop package, so this is Telegram's own build under "
+            "/opt. It updates itself."
+        ),
     ),
     Entry(
         id="thunderbird",
@@ -432,7 +438,10 @@ ENTRIES: tuple[Entry, ...] = (
         add_groups=("wireshark",),
         check=dpkg("wireshark"),
         homepage="https://www.wireshark.org/",
-        notes="Your account is added to the wireshark group so capture works without root. Log out and in for that to take effect.",
+        notes=(
+            "Your account is added to the wireshark group so capture works without root. Log "
+            "out and in for that to take effect."
+        ),
     ),
     # -- Development -------------------------------------------------------
     Entry(
@@ -479,7 +488,10 @@ ENTRIES: tuple[Entry, ...] = (
         url="https://api2.cursor.sh/updates/download/golden/linux-x64-deb/cursor/latest",
         check=dpkg("cursor"),
         homepage="https://cursor.com/",
-        notes="The same download Cursor's own updater uses, so this is always the current release.",
+        notes=(
+            "The same download Cursor's own updater uses, so this is always the current "
+            "release."
+        ),
     ),
     Entry(
         id="docker",
@@ -491,7 +503,10 @@ ENTRIES: tuple[Entry, ...] = (
         add_groups=("docker",),
         check=dpkg("docker.io"),
         homepage="https://www.docker.com/",
-        notes="Your account is added to the docker group. Log out and in for that to take effect.",
+        notes=(
+            "Your account is added to the docker group. Log out and in for that to take "
+            "effect."
+        ),
     ),
     Entry(
         id="build-tools",
@@ -541,12 +556,17 @@ ENTRIES: tuple[Entry, ...] = (
         ),
         check=dpkg("claude-code"),
         homepage="https://code.claude.com/docs/en/setup",
-        notes="The repository signing key has fingerprint 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE. Run claude in a terminal to sign in.",
+        notes=(
+            "The repository signing key has fingerprint "
+            "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE. Run claude in a terminal to sign in."
+        ),
     ),
     Entry(
         id="kimi-code",
         name="Kimi Code",
-        summary="Moonshot's coding agent for the terminal, installed under your home directory",
+        summary=(
+            "Moonshot's coding agent for the terminal, installed under your home directory"
+        ),
         category="AI tools",
         kind="user-script",
         url="https://code.kimi.com/kimi-code/install.sh",
@@ -554,7 +574,10 @@ ENTRIES: tuple[Entry, ...] = (
         remove_paths=("~/.kimi-code",),
         warning=VENDOR_SCRIPT_WARNING,
         homepage="https://www.kimi.com/code/",
-        notes="The installer adds ~/.kimi-code/bin to PATH in ~/.profile. Removing Kimi Code leaves that line behind; delete it by hand if you want it gone.",
+        notes=(
+            "The installer adds ~/.kimi-code/bin to PATH in ~/.profile. Removing Kimi Code "
+            "leaves that line behind; delete it by hand if you want it gone."
+        ),
     ),
     # -- Remote access -----------------------------------------------------
     Entry(
