@@ -327,12 +327,57 @@ def first_row_name(window) -> str:
     return text.get_children()[0].get_text()
 
 
+def check_it_reads_a_real_job(software) -> None:
+    """Run a real portlin-install through the window's own reader.
+
+    Job is the one part of the window that talks to a process, and what it
+    depends on -- a GLib watch over a pipe, lines arriving as events rather
+    than in one lump at the end -- either works at runtime or does not. The
+    window built in the next check never starts one, so without this the
+    class ships never having read a single line.
+    """
+    from gi.repository import GLib
+
+    events: list[tuple[str, str]] = []
+    output: list[str] = []
+    finished: list[int] = []
+    loop = GLib.MainLoop()
+
+    def done(code: int) -> None:
+        finished.append(code)
+        loop.quit()
+
+    software.Job(
+        [INSTALLER, "install", "--dry-run", "mullvad"],
+        on_event=lambda kind, rest: events.append((kind, rest)),
+        on_output=output.append,
+        on_done=done,
+    )
+    GLib.timeout_add_seconds(60, lambda: (loop.quit(), False)[1])
+    loop.run()
+
+    if finished == [0]:
+        ok("the window ran a real portlin-install to completion")
+    else:
+        bad(f"the window's job reader ended with {finished}, wanted [0]")
+    kinds = [kind for kind, _ in events]
+    if "step" in kinds and "result" in kinds:
+        ok("the window read the steps and the result out of it")
+    else:
+        bad(f"the window read no steps or result from a real run: {kinds[:8]}")
+    if any("would run: curl" in line for line in output):
+        ok("ordinary tool output reached the log rather than the event handler")
+    else:
+        bad("the plan's own output never reached the log")
+
+
 def check_the_window(catalog) -> None:
     """Build the real window against a real X server and search it."""
     server = start_xvfb()
     try:
         sys.path.insert(0, "/usr/lib/portlin")
         software = load(Path(WINDOW), "portlin_software")
+        check_it_reads_a_real_job(software)
         scan = {
             "gpus": [{"slot": "01:00.0", "vendor": "nvidia",
                       "name": "NVIDIA Corporation GP108M", "id": "10de:1d10"}],
