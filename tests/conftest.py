@@ -1,8 +1,44 @@
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
 import pytest
 
 from portlin.runner import Runner
+
+RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
+
+
+def load_tool(name: str):
+    """Import a shipped runtime tool or module as a real module, without running main().
+
+    The tools insert /usr/lib/portlin, their location on an installed stick,
+    at the front of sys.path before importing the shared modules. Putting the
+    real runtime directory on sys.path first means that import still
+    resolves here: a nonexistent sys.path entry is silently skipped, and
+    Python keeps searching the entries after it.
+
+    Every load gets a fresh module, because tests monkeypatch what they load
+    and a module cached from a previous test would carry those patches over.
+    """
+    if str(RUNTIME) not in sys.path:
+        sys.path.insert(0, str(RUNTIME))
+    path = RUNTIME / name
+    # The tools ship with no .py extension, so spec_from_file_location cannot
+    # infer a loader from the suffix; it has to be given one directly.
+    module_name = name.replace("-", "_").removesuffix(".py")
+    loader = importlib.machinery.SourceFileLoader(module_name, str(path))
+    spec = importlib.util.spec_from_file_location(module_name, path, loader=loader)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before executing, because dataclasses resolve the string
+    # annotations that `from __future__ import annotations` produces by
+    # looking the module up in sys.modules, and fail when it is not there.
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture

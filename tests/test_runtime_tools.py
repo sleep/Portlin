@@ -12,36 +12,18 @@ the pure arithmetic and parsing functions directly, with no root and no Linux.
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
 
+from conftest import load_tool
+
 RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install"]
 
 
 def _load_tool(name: str):
-    """Import a runtime tool as a real module, without running its main().
-
-    The tool inserts /usr/lib/portlin -- its location on an installed stick,
-    which does not exist here -- at the front of sys.path before importing
-    devices. Putting the real runtime directory on sys.path first means that
-    import still resolves: a nonexistent sys.path entry is silently skipped,
-    and Python keeps searching the entries after it.
-    """
-    if str(RUNTIME) not in sys.path:
-        sys.path.insert(0, str(RUNTIME))
-    path = RUNTIME / name
-    # These tools ship with no .py extension, so spec_from_file_location
-    # cannot infer a loader from the suffix; it has to be given one directly.
-    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
-    spec = importlib.util.spec_from_file_location(loader.name, path, loader=loader)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_tool(name)
 
 
 class TestToolsAreValidPython:

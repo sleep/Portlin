@@ -1,0 +1,1217 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Install, remove and look up software from the portlin catalog.
+
+This is the one program on the stick that installs things as root. The
+Software app in the menu never touches apt: it runs this, through pkexec for
+the catalog kinds that need root and directly for the ones that must not be
+root, and reads the lines this prints. That keeps the surface that can be
+asked to act as root a single command with a fixed set of verbs, rather
+than a window.
+
+The privilege rule cuts both ways. Kinds that write under /usr, /etc or /opt
+refuse to run without root; kinds that run a vendor's installer into a home
+directory refuse to run as root, because `sudo portlin-install install zed`
+would otherwise scatter root-owned files through someone's home.
+
+What it prints is meant for two readers at once. Lines beginning with `::`
+are for the app: a step that began, a percentage, a warning, a request to
+reboot, and the result. Everything else is apt, curl and dpkg talking, passed
+through unchanged so a person in a terminal sees what they would have seen
+running the commands by hand.
+
+    ::step <text>            a phase began
+    ::progress <0-100>       how far through the current step apt is
+    ::warn <text>            worth showing, not fatal
+    ::reboot                 a kernel module was built; reboot before relying on it
+    ::result ok|failed <id> [text]
+
+Every install is planned first, as a list of steps, and only then run. The
+planners are pure functions of the catalog entry and a description of the
+system, which is what lets the exact commands for every entry be asserted by
+unit tests on a machine with no apt at all.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import re
+import selectors
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Callable, Mapping
+from urllib.request import Request, urlopen
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from catalog import (  # noqa: E402
+    ENTRIES,
+    USER_KINDS,
+    Entry,
+    by_category,
+    by_id,
+    expand_home,
+    installed,
+    is_privileged,
+    parse_dpkg_status,
+    search,
+    to_dict,
+    validate,
+)
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+EXIT_PRIVILEGE = 3
+
+SOURCES_LIST = Path("/etc/apt/sources.list")
+COMPONENT_SOURCES = "/etc/apt/sources.list.d/portlin-components.sources"
+OS_RELEASE = Path("/etc/os-release")
+ROOT_DOWNLOADS = "/var/cache/portlin/downloads"
+ROOT_STATE = "/var/lib/portlin/software"
+FALLBACK_MIRROR = "http://deb.debian.org/debian"
+FALLBACK_SECURITY = "http://security.debian.org/debian-security"
+GITHUB_API = "https://api.github.com/repos/{repo}/releases/latest"
+USER_AGENT = "portlin-install"
+
+# Never a prompt, never a conffile question, and a wait rather than a failure
+# when apt's daily timer or another window holds the lock: a prompt here has
+# no terminal to appear on, and a failure five seconds in looks like a bug.
+APT_BASE = (
+    "apt-get",
+    "-y",
+    "-q",
+    "-o", "Dpkg::Options::=--force-confdef",
+    "-o", "Dpkg::Options::=--force-confold",
+    "-o", "DPkg::Lock::Timeout=300",
+)
+APT_ENV = (("DEBIAN_FRONTEND", "noninteractive"),)
+
+# The kernel-module builders. Anything installing one has to have the
+# headers for the running kernel, and needs a reboot before the module is
+# loaded.
+DKMS_MARKERS = ("-dkms", "linux-headers-amd64", "nvidia-detect")
+
+# What apt prints while it waits for the lock. Turned into a step so the app
+# can say why nothing is happening.
+LOCK_WAIT = "Waiting for cache lock"
+
+
+# -- descriptions of what the tools do -----------------------------------
+
+
+@dataclass(frozen=True)
+class Step:
+    """One thing to do. Exactly one of the actions is expected to be set.
+
+    ``text`` is what the app shows while it runs. ``capture`` keeps the
+    command's output for the caller as well as printing it, which is how
+    nvidia-detect's answer gets back to the planner.
+    """
+
+    text: str
+    argv: tuple[str, ...] | None = None
+    write: tuple[str, str] | None = None
+    mkdir: str | None = None
+    remove: tuple[str, ...] = ()
+    check_file: str | None = None
+    env: tuple[tuple[str, str], ...] = ()
+    warn: str | None = None
+    capture: bool = False
+
+
+@dataclass(frozen=True)
+class Context:
+    """What the planners need to know about the system they plan for."""
+
+    root: bool
+    codename: str
+    # Every (uri, suite, components) line apt reads from sources.list.
+    sources: tuple[tuple[str, str, tuple[str, ...]], ...]
+    # Union of the components those lines and the portlin drop-in enable.
+    components: tuple[str, ...]
+    # What the drop-in already carries, so a second component is added to it
+    # rather than replacing the first.
+    dropin_components: tuple[str, ...]
+    user: str | None
+    home: str
+    kernel: str
+    download_dir: str
+    state_dir: str
+    kernel_headers_available: bool = True
+
+
+@dataclass(frozen=True)
+class PlanResult:
+    ok: bool
+    captured: str = ""
+    failure: str = ""
+
+
+def format_event(kind: str, *parts: str) -> str:
+    return " ".join(("::" + kind, *parts)).rstrip()
+
+
+def emit(kind: str, *parts: str, out=None) -> None:
+    out = out or sys.stdout
+    print(format_event(kind, *parts), file=out, flush=True)
+
+
+def apt_argv(*args: str) -> tuple[str, ...]:
+    return (*APT_BASE, *args)
+
+
+def curl_argv(url: str, dest: str) -> tuple[str, ...]:
+    # -f: an HTTP error is a failure, not an HTML page saved as a .deb.
+    # -L: vendors redirect to a CDN. --retry: a stick on cafe wifi.
+    return ("curl", "-fsSL", "--retry", "3", "-o", dest, url)
+
+
+def invoking_user(
+    environ: Mapping[str, str], getpwuid: Callable = pwd.getpwuid
+) -> tuple[str, str] | None:
+    """The account that asked for this, as (name, home), when running as root.
+
+    pkexec records it as PKEXEC_UID and sudo as SUDO_UID. Neither set means
+    root ran it directly, and there is nobody to add to a group or whose
+    home to look in.
+    """
+    for variable in ("PKEXEC_UID", "SUDO_UID"):
+        value = environ.get(variable)
+        if not value:
+            continue
+        try:
+            record = getpwuid(int(value))
+        except (ValueError, KeyError):
+            continue
+        return record.pw_name, record.pw_dir
+    return None
+
+
+def parse_sources_list(text: str) -> list[tuple[str, str, tuple[str, ...]]]:
+    """The (uri, suite, components) of every deb line in a one-line sources.list."""
+    found = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line.startswith("deb "):
+            continue
+        tokens = line.split()[1:]
+        # Options in brackets come before the URI and may contain spaces.
+        if tokens and tokens[0].startswith("["):
+            while tokens and not tokens[0].endswith("]"):
+                tokens.pop(0)
+            if tokens:
+                tokens.pop(0)
+        if len(tokens) < 3:
+            continue
+        found.append((tokens[0], tokens[1], tuple(tokens[2:])))
+    return found
+
+
+def parse_deb822_components(text: str) -> tuple[str, ...]:
+    """The components named in a deb822 sources file, in order, deduplicated."""
+    found: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("Components:"):
+            for component in line.split(":", 1)[1].split():
+                if component not in found:
+                    found.append(component)
+    return tuple(found)
+
+
+def missing_components(needed, enabled) -> tuple[str, ...]:
+    return tuple(component for component in needed if component not in enabled)
+
+
+def render_component_sources(sources, components) -> str:
+    """A deb822 drop-in enabling ``components`` for every suite apt already reads.
+
+    One stanza per URI, with all of that mirror's suites on one line, which
+    is the shape apt's own documentation writes. No Signed-By: these are the
+    Debian archive's own suites, whose keys are already trusted.
+    """
+    by_uri: dict[str, list[str]] = {}
+    for uri, suite, _ in sources:
+        suites = by_uri.setdefault(uri, [])
+        if suite not in suites:
+            suites.append(suite)
+    stanzas = [
+        "\n".join(
+            [
+                "Types: deb",
+                f"URIs: {uri}",
+                f"Suites: {' '.join(suites)}",
+                f"Components: {' '.join(components)}",
+            ]
+        )
+        for uri, suites in by_uri.items()
+    ]
+    header = (
+        "# Written by portlin-install. Adds archive components the stick was built\n"
+        "# without. Delete this file to take them away again.\n"
+    )
+    return header + "\n\n".join(stanzas) + "\n"
+
+
+def headers_package(kernel: str) -> str:
+    return f"linux-headers-{kernel}"
+
+
+def builds_a_module(packages) -> bool:
+    return any(
+        name.endswith("-dkms") or name in DKMS_MARKERS for name in packages
+    )
+
+
+def substitute(url: str, ctx: Context) -> str:
+    return url.replace("{codename}", ctx.codename)
+
+
+# -- planners ---------------------------------------------------------------
+
+
+def plan_components(entry: Entry, ctx: Context) -> list[Step]:
+    missing = missing_components(entry.needs_components, ctx.components)
+    if not missing:
+        return []
+    components = tuple(ctx.dropin_components) + missing
+    return [
+        Step(
+            f"Enabling the {', '.join(missing)} archive component",
+            write=(COMPONENT_SOURCES, render_component_sources(ctx.sources, components)),
+        ),
+        Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV),
+    ]
+
+
+def _apt_install(text: str, packages) -> Step:
+    return Step(text, argv=apt_argv("install", *packages), env=APT_ENV)
+
+
+def _plan_groups(entry: Entry, ctx: Context) -> list[Step]:
+    steps = []
+    for group in entry.add_groups:
+        if ctx.user:
+            steps.append(
+                Step(
+                    f"Adding {ctx.user} to the {group} group",
+                    argv=("usermod", "-aG", group, ctx.user),
+                )
+            )
+        else:
+            steps.append(
+                Step(
+                    f"Not adding anyone to the {group} group",
+                    warn=(
+                        f"No account to add to the {group} group: run "
+                        f"`sudo usermod -aG {group} <you>` yourself."
+                    ),
+                )
+            )
+    return steps
+
+
+def _plan_after(entry: Entry, ctx: Context) -> list[Step]:
+    steps = [
+        Step(f"Running {argv[0]} to finish setting up {entry.name}", argv=argv)
+        for argv in entry.post_install
+    ]
+    return steps + _plan_groups(entry, ctx)
+
+
+def _with_headers(packages, ctx: Context) -> tuple[list[str], list[Step]]:
+    """The packages plus the headers a kernel module needs, and a warning if
+    the archive no longer carries headers for the running kernel."""
+    packages = list(packages)
+    if not builds_a_module(packages):
+        return packages, []
+    wanted = headers_package(ctx.kernel)
+    if ctx.kernel_headers_available:
+        if wanted not in packages:
+            packages.append(wanted)
+        return packages, []
+    return packages, [
+        Step(
+            "Checking for kernel headers",
+            warn=(
+                f"The archive has no {wanted}: the running kernel is older than "
+                "the newest one installed. The module will be built for the newest "
+                "kernel. Reboot into it, then install this again if it did not load."
+            ),
+        )
+    ]
+
+
+def plan_apt(entry: Entry, ctx: Context, resolved_packages=None) -> list[Step]:
+    steps = plan_components(entry, ctx)
+    if entry.resolver == "nvidia-detect" and resolved_packages is None:
+        # Two phases: the detector has to be installed and asked before the
+        # driver it names can be planned. main() runs this plan, reads the
+        # captured answer, and plans again with resolved_packages.
+        return steps + [
+            _apt_install("Installing nvidia-detect", ("nvidia-detect",)),
+            Step("Asking nvidia-detect which driver fits this card",
+                 argv=("nvidia-detect",), capture=True),
+        ]
+    if entry.debconf:
+        preseed = f"{ctx.download_dir}/{entry.id}.debconf"
+        steps += [
+            Step(f"Answering {entry.name}'s setup questions in advance",
+                 mkdir=ctx.download_dir,
+                 write=(preseed, "\n".join(entry.debconf) + "\n")),
+            Step("Recording those answers", argv=("debconf-set-selections", preseed),
+                 remove=(preseed,)),
+        ]
+    packages = list(resolved_packages or ()) + list(entry.packages)
+    packages, warnings = _with_headers(packages, ctx)
+    steps += warnings
+    steps.append(_apt_install(f"Installing {entry.name}", packages))
+    return steps + _plan_after(entry, ctx)
+
+
+def plan_apt_repo(entry: Entry, ctx: Context) -> list[Step]:
+    repo = entry.repo
+    steps = plan_components(entry, ctx)
+    steps += [
+        Step(f"Fetching {entry.name}'s signing key",
+             mkdir=str(Path(repo.keyring_path).parent),
+             argv=curl_argv(substitute(repo.key_url, ctx), repo.keyring_path),
+             check_file=repo.keyring_path),
+    ]
+    if repo.sources_line:
+        steps.append(
+            Step(f"Adding {entry.name}'s apt repository",
+                 write=(repo.sources_path, substitute(repo.sources_line, ctx) + "\n"))
+        )
+    else:
+        steps.append(
+            Step(f"Adding {entry.name}'s apt repository",
+                 argv=curl_argv(substitute(repo.sources_url, ctx), repo.sources_path),
+                 check_file=repo.sources_path)
+        )
+    steps += [
+        Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV),
+        _apt_install(f"Installing {entry.name}", entry.packages),
+    ]
+    return steps + _plan_after(entry, ctx)
+
+
+def plan_deb(entry: Entry, ctx: Context, url: str) -> list[Step]:
+    deb = f"{ctx.download_dir}/{entry.id}.deb"
+    return [
+        Step(f"Downloading {entry.name}", mkdir=ctx.download_dir,
+             argv=curl_argv(url, deb), check_file=deb),
+        # apt rather than dpkg -i, so the .deb's dependencies are fetched
+        # instead of leaving a half-configured package behind.
+        Step(f"Installing {entry.name}", argv=apt_argv("install", deb), env=APT_ENV,
+             remove=(deb,)),
+    ] + _plan_after(entry, ctx)
+
+
+def render_desktop_entry(entry: Entry) -> str:
+    icon = f"{entry.opt_dir}/{entry.icon}" if entry.icon else "application-x-executable"
+    return "\n".join(
+        [
+            "[Desktop Entry]",
+            "Version=1.0",
+            "Type=Application",
+            f"Name={entry.name}",
+            f"Comment={entry.summary}",
+            f"Exec={entry.opt_dir}/{entry.launcher} %u",
+            f"Icon={icon}",
+            "Terminal=false",
+            "StartupNotify=true",
+            f"Categories={desktop_categories(entry)}",
+            "# Written by portlin-install; removed with the program.",
+            "",
+        ]
+    )
+
+
+def desktop_categories(entry: Entry) -> str:
+    return {
+        "Browsers": "Network;WebBrowser;",
+        "Communication": "Network;InstantMessaging;",
+        "Development": "Development;",
+    }.get(entry.category, "Utility;")
+
+
+def tarball_desktop_path(entry: Entry) -> str:
+    return f"/usr/share/applications/portlin-{entry.id}.desktop"
+
+
+def plan_tarball(entry: Entry, ctx: Context) -> list[Step]:
+    archive = f"{ctx.download_dir}/{entry.id}.tar.xz"
+    return [
+        Step(f"Downloading {entry.name}", mkdir=ctx.download_dir,
+             argv=curl_argv(entry.url, archive), check_file=archive),
+        # Listed before it is unpacked: a truncated download fails here,
+        # with nothing under /opt to clean up.
+        Step("Checking the download", argv=("tar", "-tJf", archive)),
+        Step(f"Unpacking {entry.name} into {entry.opt_dir}", mkdir=entry.opt_dir,
+             argv=("tar", "-xJf", archive, "-C", entry.opt_dir, "--strip-components=1"),
+             remove=(archive,)),
+        Step("Adding it to the applications menu",
+             write=(tarball_desktop_path(entry), render_desktop_entry(entry))),
+    ] + _plan_after(entry, ctx)
+
+
+def plan_user_script(entry: Entry, ctx: Context) -> list[Step]:
+    script = f"{ctx.download_dir}/{entry.id}-install.sh"
+    return [
+        Step(f"Downloading {entry.name}'s installer", mkdir=ctx.download_dir,
+             argv=curl_argv(entry.url, script), check_file=script),
+        # A file, run by bash, rather than a pipe: a download cut off halfway
+        # then fails to parse instead of executing half a script. bash rather
+        # than sh because vendors write these against bash.
+        Step(f"Running {entry.name}'s installer", argv=("bash", script), remove=(script,)),
+    ] + _plan_after(entry, ctx)
+
+
+def plan_install(
+    entry: Entry, ctx: Context, *, resolved_packages=None, asset_url: str | None = None
+) -> list[Step]:
+    if entry.kind == "apt":
+        return plan_apt(entry, ctx, resolved_packages)
+    if entry.kind == "apt-repo":
+        return plan_apt_repo(entry, ctx)
+    if entry.kind == "deb-url":
+        return plan_deb(entry, ctx, entry.url)
+    if entry.kind == "github-deb":
+        return plan_deb(entry, ctx, asset_url or "<latest release asset>")
+    if entry.kind == "tarball-opt":
+        return plan_tarball(entry, ctx)
+    if entry.kind == "user-script":
+        return plan_user_script(entry, ctx)
+    raise ValueError(f"{entry.id}: nothing to plan for kind {entry.kind!r}")
+
+
+def installed_packages(entry: Entry, record: dict | None) -> list[str]:
+    """What to purge: what the record says was installed, else the catalog."""
+    if record and record.get("packages"):
+        return list(record["packages"])
+    if entry.packages:
+        return list(entry.packages)
+    if entry.check.kind == "dpkg":
+        return list(entry.check.values)
+    return []
+
+
+def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
+    if entry.kind in ("apt", "apt-repo", "deb-url", "github-deb"):
+        packages = installed_packages(entry, record)
+        paths: list[str] = list(record.get("paths", [])) if record else []
+        if entry.repo and not paths:
+            paths = [entry.repo.sources_path, entry.repo.keyring_path]
+        steps = [
+            Step(f"Removing {entry.name}", argv=apt_argv("purge", *packages), env=APT_ENV),
+            Step("Removing what nothing else needs any more",
+                 argv=apt_argv("autoremove", "--purge"), env=APT_ENV),
+        ]
+        if paths:
+            steps.append(Step(f"Removing {entry.name}'s apt repository", remove=tuple(paths)))
+        return steps
+    if entry.kind == "tarball-opt":
+        paths = record.get("paths") if record else None
+        return [
+            Step(f"Removing {entry.name}",
+                 remove=tuple(paths or (entry.opt_dir, tarball_desktop_path(entry)))),
+        ]
+    if entry.kind == "user-script":
+        paths = tuple(str(expand_home(p, Path(ctx.home))) for p in entry.remove_paths)
+        if not paths:
+            return [
+                Step(f"Cannot remove {entry.name} automatically",
+                     warn=f"{entry.name}'s installer does not say where it put things; "
+                          "see its documentation to remove it."),
+            ]
+        return [Step(f"Removing {entry.name} from your home directory", remove=paths)]
+    raise ValueError(f"{entry.id}: nothing to plan for kind {entry.kind!r}")
+
+
+def plan_upgrade(ctx: Context) -> list[Step]:
+    return [
+        Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV),
+        Step("Upgrading everything", argv=apt_argv("full-upgrade"), env=APT_ENV),
+        Step("Removing what nothing needs any more",
+             argv=apt_argv("autoremove", "--purge"), env=APT_ENV),
+    ]
+
+
+def needs_reboot(steps) -> bool:
+    return any(step.argv and builds_a_module(step.argv) for step in steps)
+
+
+def record_for(entry: Entry, ctx: Context, steps, resolved_packages=None) -> dict:
+    """What an install leaves behind, so remove can take exactly that away."""
+    packages = list(resolved_packages or ()) + list(entry.packages)
+    if builds_a_module(packages) and ctx.kernel_headers_available:
+        packages.append(headers_package(ctx.kernel))
+    if not packages and entry.check.kind == "dpkg":
+        packages = list(entry.check.values)
+    paths: list[str] = []
+    if entry.repo:
+        paths += [entry.repo.sources_path, entry.repo.keyring_path]
+    if entry.kind == "tarball-opt":
+        paths += [entry.opt_dir, tarball_desktop_path(entry)]
+    if entry.kind == "user-script":
+        paths += [str(expand_home(p, Path(ctx.home))) for p in entry.remove_paths]
+    return {"id": entry.id, "kind": entry.kind, "packages": packages, "paths": paths}
+
+
+def pick_release_asset(payload: dict, pattern: str) -> str:
+    """The download URL of the one release asset whose name matches."""
+    matcher = re.compile(pattern)
+    urls = [
+        asset["browser_download_url"]
+        for asset in payload.get("assets", [])
+        if matcher.search(asset.get("name", ""))
+    ]
+    if len(urls) != 1:
+        raise ValueError(
+            f"expected one asset matching {pattern!r}, found {len(urls)}"
+        )
+    return urls[0]
+
+
+# -- the hardware scan -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PciDevice:
+    slot: str
+    class_code: str
+    class_name: str
+    vendor: str
+    device: str
+    name: str
+
+
+GPU_CLASSES = {"0300", "0302", "0380"}
+WIFI_CLASS = "0280"
+VENDORS = {"10de": "nvidia", "1002": "amd", "8086": "intel", "14e4": "broadcom"}
+VIRTUAL_VENDORS = {"1234": "QEMU", "1af4": "virtio", "15ad": "VMware", "80ee": "VirtualBox"}
+
+# Chips the wl driver from broadcom-sta-dkms handles and the open drivers
+# do not (or do badly). From the driver's own PCI table.
+BROADCOM_WL_IDS = {
+    "4311", "4312", "4313", "4315", "4328", "4329", "432a", "432b", "432c",
+    "432d", "4331", "4353", "4357", "4358", "4359", "435a", "43a0", "43a9",
+    "43aa", "43b1", "4365",
+}
+
+LSPCI_LINE = re.compile(
+    r"^(?P<slot>\S+) (?P<class_name>.+?) \[(?P<class>[0-9a-f]{4})\]: "
+    r"(?P<name>.+?) \[(?P<vendor>[0-9a-f]{4}):(?P<device>[0-9a-f]{4})\]"
+)
+NVIDIA_DETECT_ANSWER = re.compile(r"It is recommended to install the\s+(\S+)\s+package")
+
+
+def parse_lspci(text: str) -> list[PciDevice]:
+    devices = []
+    for line in text.splitlines():
+        match = LSPCI_LINE.match(line.strip())
+        if match:
+            devices.append(
+                PciDevice(
+                    slot=match["slot"],
+                    class_code=match["class"],
+                    class_name=match["class_name"],
+                    vendor=match["vendor"],
+                    device=match["device"],
+                    name=match["name"],
+                )
+            )
+    return devices
+
+
+def parse_nvidia_detect(text: str) -> str | None:
+    match = NVIDIA_DETECT_ANSWER.search(text)
+    return match.group(1) if match else None
+
+
+def _device_summary(device: PciDevice) -> dict:
+    return {
+        "slot": device.slot,
+        "vendor": VENDORS.get(device.vendor, VIRTUAL_VENDORS.get(device.vendor, device.vendor)),
+        "name": device.name,
+        "id": f"{device.vendor}:{device.device}",
+    }
+
+
+def recommend(devices, *, nvidia_detect_output: str | None = None) -> dict:
+    """Which catalog entries fit this hardware, and why."""
+    gpus = [d for d in devices if d.class_code in GPU_CLASSES]
+    wifi = [d for d in devices if d.class_code == WIFI_CLASS]
+    suggestions: list[dict] = []
+    notes: list[str] = []
+
+    vendors = [gpu.vendor for gpu in gpus]
+    if "10de" in vendors:
+        card = next(gpu for gpu in gpus if gpu.vendor == "10de")
+        driver = parse_nvidia_detect(nvidia_detect_output or "")
+        suggestions.append(
+            {
+                "entry": "nvidia-driver",
+                "reason": f"{card.name} found",
+                "detail": (
+                    f"nvidia-detect recommends {driver}" if driver
+                    else "Install to find the exact driver for this card"
+                ),
+            }
+        )
+    if "8086" in vendors:
+        suggestions.append({"entry": "intel-graphics", "reason": "Intel graphics found"})
+    if "1002" in vendors:
+        suggestions.append({"entry": "amd-graphics", "reason": "AMD graphics found"})
+    for chip in wifi:
+        if chip.vendor == "14e4" and chip.device in BROADCOM_WL_IDS:
+            suggestions.append(
+                {
+                    "entry": "broadcom-wifi",
+                    "reason": f"Broadcom wifi ({chip.vendor}:{chip.device}) found; "
+                              "only needed if wifi does not work",
+                }
+            )
+    if len(gpus) > 1 and len(set(vendors)) > 1:
+        notes.append(
+            "Two GPUs: a hybrid laptop. One drives the screen; the other is "
+            "used on demand by programs that ask for it."
+        )
+    if not gpus:
+        notes.append("No display controller reported by lspci.")
+    elif all(gpu.vendor in VIRTUAL_VENDORS for gpu in gpus):
+        notes.append("A virtual machine's display. No driver is needed.")
+
+    return {
+        "gpus": [_device_summary(gpu) for gpu in gpus],
+        "wifi": [_device_summary(chip) for chip in wifi],
+        "suggestions": suggestions,
+        "notes": notes,
+    }
+
+
+# -- running plans -------------------------------------------------------------
+
+
+def _stream(argv, env, *, capture: bool, out) -> tuple[int, str]:
+    """Run one command, passing its output through and watching apt's status fd.
+
+    apt reports percentages on a file descriptor of its choosing rather than
+    on stdout, so apt-get commands get a pipe for it and the numbers become
+    ::progress lines. Everything a command prints goes to ``out`` as it is,
+    and is also collected when the caller wants it back.
+    """
+    argv = list(argv)
+    status_read = status_write = None
+    pass_fds = ()
+    if argv[0] == "apt-get":
+        status_read, status_write = os.pipe()
+        argv += ["-o", f"APT::Status-Fd={status_write}"]
+        pass_fds = (status_write,)
+    full_env = {**os.environ, **dict(env)}
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=full_env,
+        pass_fds=pass_fds,
+        text=False,
+    )
+    if status_write is not None:
+        os.close(status_write)
+
+    collected: list[str] = []
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ, "output")
+    if status_read is not None:
+        status_file = os.fdopen(status_read, "rb")
+        selector.register(status_file, selectors.EVENT_READ, "status")
+    open_streams = len(selector.get_map())
+    while open_streams:
+        for key, _ in selector.select():
+            line = key.fileobj.readline()
+            if not line:
+                selector.unregister(key.fileobj)
+                open_streams -= 1
+                continue
+            text = line.decode("utf-8", "replace").rstrip("\n")
+            if key.data == "status":
+                _status_line(text, out)
+            else:
+                if LOCK_WAIT in text:
+                    emit("step", "Waiting for another package manager to finish", out=out)
+                print(text, file=out, flush=True)
+                if capture:
+                    collected.append(text)
+    proc.wait()
+    return proc.returncode, "\n".join(collected)
+
+
+def _status_line(text: str, out) -> None:
+    # pmstatus:<package>:<percent>:<description>, dlstatus likewise.
+    parts = text.split(":", 3)
+    if len(parts) >= 3 and parts[0] in ("pmstatus", "dlstatus"):
+        try:
+            emit("progress", str(int(float(parts[2]))), out=out)
+        except ValueError:
+            pass
+
+
+def _remove_path(path: str) -> None:
+    target = Path(path)
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+
+
+def run_plan(steps, *, dry_run: bool = False, out=None) -> PlanResult:
+    out = out or sys.stdout
+    captured: list[str] = []
+    for step in steps:
+        emit("step", step.text, out=out)
+        if step.warn:
+            emit("warn", step.warn, out=out)
+            continue
+        if dry_run:
+            if step.mkdir:
+                print(f"would create {step.mkdir}", file=out)
+            if step.write:
+                print(f"would write {step.write[0]}", file=out)
+            if step.argv:
+                print("would run: " + " ".join(step.argv), file=out)
+            for path in step.remove:
+                print(f"would remove {path}", file=out)
+            continue
+        try:
+            if step.mkdir:
+                Path(step.mkdir).mkdir(parents=True, exist_ok=True)
+            if step.write:
+                path, content = step.write
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(content)
+                os.chmod(path, 0o644)
+            if step.argv:
+                code, output = _stream(step.argv, step.env, capture=step.capture, out=out)
+                if code != 0:
+                    return PlanResult(False, failure=f"{step.argv[0]} exited with status {code}")
+                if step.capture:
+                    captured.append(output)
+            if step.check_file:
+                target = Path(step.check_file)
+                if not target.exists() or target.stat().st_size == 0:
+                    return PlanResult(False, failure=f"{step.check_file} was not downloaded")
+            for path in step.remove:
+                _remove_path(path)
+        except OSError as exc:
+            return PlanResult(False, failure=str(exc))
+    return PlanResult(True, captured="\n".join(captured))
+
+
+# -- talking to the system -------------------------------------------------------
+
+
+def _os_release_codename() -> str:
+    try:
+        for line in OS_RELEASE.read_text().splitlines():
+            if line.startswith("VERSION_CODENAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "stable"
+
+
+def load_context() -> Context:
+    root = os.geteuid() == 0
+    codename = _os_release_codename()
+    try:
+        sources = parse_sources_list(SOURCES_LIST.read_text())
+    except OSError:
+        sources = []
+    if not sources:
+        sources = [
+            (FALLBACK_MIRROR, codename, ("main",)),
+            (FALLBACK_MIRROR, f"{codename}-updates", ("main",)),
+            (FALLBACK_SECURITY, f"{codename}-security", ("main",)),
+        ]
+    try:
+        dropin = parse_deb822_components(Path(COMPONENT_SOURCES).read_text())
+    except OSError:
+        dropin = ()
+    components: list[str] = []
+    for _, _, listed in sources:
+        for component in listed:
+            if component not in components:
+                components.append(component)
+    for component in dropin:
+        if component not in components:
+            components.append(component)
+
+    if root:
+        account = invoking_user(os.environ)
+        user, home = account if account else (None, "/root")
+    else:
+        record = pwd.getpwuid(os.getuid())
+        user, home = record.pw_name, record.pw_dir
+    if root:
+        download_dir, state_dir = ROOT_DOWNLOADS, ROOT_STATE
+    else:
+        cache = os.environ.get("XDG_CACHE_HOME") or f"{home}/.cache"
+        state = os.environ.get("XDG_STATE_HOME") or f"{home}/.local/state"
+        download_dir, state_dir = f"{cache}/portlin", f"{state}/portlin/software"
+
+    return Context(
+        root=root,
+        codename=codename,
+        sources=tuple(sources),
+        components=tuple(components),
+        dropin_components=dropin,
+        user=user,
+        home=home,
+        kernel=os.uname().release,
+        download_dir=download_dir,
+        state_dir=state_dir,
+    )
+
+
+def headers_available(kernel: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["apt-cache", "policy", headers_package(kernel)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    for line in proc.stdout.splitlines():
+        if line.strip().startswith("Candidate:"):
+            return "(none)" not in line
+    return False
+
+
+def dpkg_installed() -> set[str]:
+    try:
+        proc = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Package} ${db:Status-Status}\n"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return parse_dpkg_status(proc.stdout)
+
+
+def latest_release_asset(entry: Entry) -> str:
+    request = Request(
+        GITHUB_API.format(repo=entry.github_repo),
+        headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.load(response)
+    return pick_release_asset(payload, entry.asset_pattern)
+
+
+def record_path(ctx: Context, entry: Entry) -> Path:
+    return Path(ctx.state_dir) / f"{entry.id}.json"
+
+
+def read_record(ctx: Context, entry: Entry) -> dict | None:
+    try:
+        return json.loads(record_path(ctx, entry).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def write_record(ctx: Context, entry: Entry, record: dict) -> None:
+    path = record_path(ctx, entry)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2) + "\n")
+    except OSError as exc:
+        emit("warn", f"could not record what was installed: {exc}")
+
+
+def drop_record(ctx: Context, entry: Entry) -> None:
+    try:
+        record_path(ctx, entry).unlink()
+    except OSError:
+        pass
+
+
+# -- commands -----------------------------------------------------------------
+
+
+def entry_state(entry: Entry, ctx: Context, dpkg: set[str]) -> dict:
+    return {
+        **to_dict(entry),
+        "installed": installed(entry, dpkg, Path(ctx.home)),
+        "privileged": is_privileged(entry),
+    }
+
+
+def cmd_list(args, ctx: Context) -> int:
+    dpkg = dpkg_installed()
+    grouped = by_category()
+    if args.category:
+        if args.category not in grouped:
+            print(f"unknown category: {args.category}", file=sys.stderr)
+            return EXIT_USAGE
+        grouped = {args.category: grouped[args.category]}
+    if args.json:
+        states = [entry_state(e, ctx, dpkg) for entries in grouped.values() for e in entries]
+        print(json.dumps(states, indent=2))
+        return EXIT_OK
+    for category, entries in grouped.items():
+        if not entries:
+            continue
+        print(category)
+        for entry in entries:
+            mark = "x" if installed(entry, dpkg, Path(ctx.home)) else " "
+            print(f"  [{mark}] {entry.id:<16} {entry.summary}")
+    return EXIT_OK
+
+
+def cmd_show(args, ctx: Context) -> int:
+    entry = by_id(args.id)
+    state = entry_state(entry, ctx, dpkg_installed())
+    if args.json:
+        print(json.dumps(state, indent=2))
+        return EXIT_OK
+    print(f"{entry.name} ({entry.id}): {entry.summary}")
+    print(f"  kind:      {entry.kind}" + ("" if is_privileged(entry) else " (no root needed)"))
+    print(f"  installed: {'yes' if state['installed'] else 'no'}")
+    if entry.packages:
+        print(f"  packages:  {' '.join(entry.packages)}")
+    if entry.repo:
+        print(f"  repo:      {entry.repo.sources_line or entry.repo.sources_url}")
+    if entry.url:
+        print(f"  url:       {entry.url}")
+    if entry.needs_components:
+        print(f"  needs:     {' '.join(entry.needs_components)} component")
+    if entry.warning:
+        print(f"  warning:   {entry.warning}")
+    if entry.notes:
+        print(f"  notes:     {entry.notes}")
+    print(f"  homepage:  {entry.homepage}")
+    return EXIT_OK
+
+
+def cmd_status(args, ctx: Context) -> int:
+    dpkg = dpkg_installed()
+    states = [entry_state(by_id(entry_id), ctx, dpkg) for entry_id in args.ids]
+    if args.json:
+        print(json.dumps(states, indent=2))
+    else:
+        for state in states:
+            print(f"{state['id']}: {'installed' if state['installed'] else 'not installed'}")
+    return EXIT_OK if all(state["installed"] for state in states) else EXIT_FAILED
+
+
+def check_privilege(entry: Entry, ctx: Context) -> int:
+    if is_privileged(entry) and not ctx.root:
+        print(
+            f"{entry.id} needs root: run it from Software, or with sudo.",
+            file=sys.stderr,
+        )
+        return EXIT_PRIVILEGE
+    if entry.kind in USER_KINDS and ctx.root:
+        print(
+            f"run {entry.id} as yourself, not as root: it installs under your home directory.",
+            file=sys.stderr,
+        )
+        return EXIT_PRIVILEGE
+    return EXIT_OK
+
+
+def _finish(result: PlanResult, entry: Entry, steps) -> int:
+    if not result.ok:
+        emit("result", "failed", entry.id, result.failure)
+        return EXIT_FAILED
+    if needs_reboot(steps):
+        emit("reboot")
+    emit("result", "ok", entry.id)
+    return EXIT_OK
+
+
+def install_one(entry: Entry, ctx: Context, *, dry_run: bool) -> int:
+    resolved = None
+    asset_url = None
+    if entry.kind == "github-deb" and not dry_run:
+        try:
+            asset_url = latest_release_asset(entry)
+        except (OSError, ValueError, KeyError) as exc:
+            emit("result", "failed", entry.id, f"could not find the latest release: {exc}")
+            return EXIT_FAILED
+    if entry.resolver == "nvidia-detect":
+        if dry_run:
+            resolved = ("<metapackage from nvidia-detect>",)
+            first = plan_install(entry, ctx)
+            run_plan(first, dry_run=True)
+        else:
+            first = plan_install(entry, ctx)
+            result = run_plan(first)
+            if not result.ok:
+                return _finish(result, entry, first)
+            resolved_name = parse_nvidia_detect(result.captured)
+            if resolved_name is None:
+                emit("result", "failed", entry.id,
+                     "nvidia-detect found no driver for this card")
+                return EXIT_FAILED
+            resolved = (resolved_name,)
+        ctx = replace(ctx, components=tuple(ctx.components) + tuple(entry.needs_components))
+    steps = plan_install(entry, ctx, resolved_packages=resolved, asset_url=asset_url)
+    result = run_plan(steps, dry_run=dry_run)
+    if result.ok and not dry_run:
+        write_record(ctx, entry, record_for(entry, ctx, steps, resolved))
+    return _finish(result, entry, steps)
+
+
+def cmd_install(args, ctx: Context) -> int:
+    entries = [by_id(entry_id) for entry_id in args.ids]
+    for entry in entries:
+        code = check_privilege(entry, ctx)
+        if code != EXIT_OK:
+            return code
+    if any(builds_a_module(list(e.packages) + [e.resolver or ""]) for e in entries):
+        ctx = replace(ctx, kernel_headers_available=headers_available(ctx.kernel))
+    for entry in entries:
+        code = install_one(entry, ctx, dry_run=args.dry_run)
+        if code != EXIT_OK:
+            return code
+    return EXIT_OK
+
+
+def cmd_remove(args, ctx: Context) -> int:
+    entry = by_id(args.id)
+    code = check_privilege(entry, ctx)
+    if code != EXIT_OK:
+        return code
+    steps = plan_remove(entry, ctx, read_record(ctx, entry))
+    result = run_plan(steps, dry_run=args.dry_run)
+    if result.ok and not args.dry_run:
+        drop_record(ctx, entry)
+    return _finish(result, entry, steps)
+
+
+def cmd_upgrade(args, ctx: Context) -> int:
+    if not ctx.root:
+        print("upgrade needs root: run it from Software, or with sudo.", file=sys.stderr)
+        return EXIT_PRIVILEGE
+    steps = plan_upgrade(ctx)
+    result = run_plan(steps, dry_run=args.dry_run)
+    if not result.ok:
+        emit("result", "failed", "upgrade", result.failure)
+        return EXIT_FAILED
+    emit("result", "ok", "upgrade")
+    return EXIT_OK
+
+
+def cmd_scan(args, ctx: Context) -> int:
+    notes: list[str] = []
+    if args.source:
+        text = Path(args.source).read_text()
+    else:
+        try:
+            text = subprocess.run(
+                ["lspci", "-nn"], capture_output=True, text=True, timeout=30
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            text = ""
+            notes.append(f"Could not run lspci: {exc}")
+    devices = parse_lspci(text)
+    detect_output = None
+    if any(d.vendor == "10de" and d.class_code in GPU_CLASSES for d in devices):
+        detect = shutil.which("nvidia-detect")
+        if detect and not args.source:
+            try:
+                detect_output = subprocess.run(
+                    [detect], capture_output=True, text=True, timeout=30
+                ).stdout
+            except (OSError, subprocess.SubprocessError):
+                detect_output = None
+    report = recommend(devices, nvidia_detect_output=detect_output)
+    report["notes"] = notes + report["notes"]
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return EXIT_OK
+    for label, devices_found in (("GPU", report["gpus"]), ("Wifi", report["wifi"])):
+        for device in devices_found:
+            print(f"{label}: {device['name']} [{device['id']}]")
+    for suggestion in report["suggestions"]:
+        detail = f" ({suggestion['detail']})" if suggestion.get("detail") else ""
+        print(f"Suggested: {suggestion['entry']}: {suggestion['reason']}{detail}")
+    for note in report["notes"]:
+        print(f"Note: {note}")
+    return EXIT_OK
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="portlin-install",
+        description="Install and remove software from the portlin catalog.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    listing = commands.add_parser("list", help="show the catalog")
+    listing.add_argument("--json", action="store_true")
+    listing.add_argument("--category")
+    listing.set_defaults(func=cmd_list)
+
+    show = commands.add_parser("show", help="describe one entry")
+    show.add_argument("id")
+    show.add_argument("--json", action="store_true")
+    show.set_defaults(func=cmd_show)
+
+    status = commands.add_parser("status", help="whether entries are installed")
+    status.add_argument("ids", nargs="+")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=cmd_status)
+
+    install = commands.add_parser("install", help="install entries")
+    install.add_argument("ids", nargs="+")
+    install.add_argument("--dry-run", action="store_true")
+    install.set_defaults(func=cmd_install)
+
+    remove = commands.add_parser("remove", help="remove an entry")
+    remove.add_argument("id")
+    remove.add_argument("--dry-run", action="store_true")
+    remove.set_defaults(func=cmd_remove)
+
+    upgrade = commands.add_parser("upgrade", help="upgrade every installed package")
+    upgrade.add_argument("--dry-run", action="store_true")
+    upgrade.set_defaults(func=cmd_upgrade)
+
+    scan = commands.add_parser("scan", help="which drivers fit this machine")
+    scan.add_argument("--json", action="store_true")
+    scan.add_argument("--from", dest="source", metavar="FILE",
+                      help="read lspci -nn output from a file instead of running it")
+    scan.set_defaults(func=cmd_scan)
+    return parser
+
+
+def main(argv=None) -> int:
+    problems = validate()
+    if problems:
+        print("the catalog is broken:\n  " + "\n  ".join(problems), file=sys.stderr)
+        return EXIT_FAILED
+    args = build_parser().parse_args(argv)
+    ctx = load_context()
+    try:
+        return args.func(args, ctx)
+    except KeyError as exc:
+        known = ", ".join(entry.id for entry in ENTRIES)
+        print(f"unknown entry {exc.args[0]!r}. Known: {known}", file=sys.stderr)
+        return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())
