@@ -577,6 +577,37 @@ def test_desktop_depends_on_what_the_about_dialog_needs():
         assert dependency in depends
 
 
+def test_desktop_ships_the_software_app_and_its_menu_entry():
+    files = package.text_files("portlin-desktop")
+    assert files["usr/bin/portlin-software"].startswith("#!/usr/bin/env python3")
+    assert "usr/bin/portlin-software" in package.executable_paths("portlin-desktop")
+    assert "usr/share/applications/portlin-software.desktop" in files
+
+
+def test_desktop_depends_on_what_the_software_app_elevates_through():
+    # pkexec is a separate package from polkitd in trixie, and it is the
+    # whole of how the app acts as root. Without it the window opens, lists
+    # everything, and installs none of it.
+    control = package.text_files("portlin-desktop")["DEBIAN/control"]
+    depends = [d.strip() for d in control.split("Depends: ")[1].splitlines()[0].split(",")]
+    assert "pkexec" in depends
+
+
+def test_desktop_recommends_an_authentication_agent():
+    # Recommends rather than Depends: any polkit agent draws the prompt, and
+    # someone running a different one should not have to remove this package.
+    control = package.text_files("portlin-desktop")["DEBIAN/control"]
+    assert "mate-polkit" in control.split("Recommends: ")[1].splitlines()[0]
+
+
+def test_a_minimal_stick_gets_the_installer_without_the_window():
+    # portlin-runtime goes onto a stick with no X at all, so the GTK half
+    # has to stay in portlin-desktop.
+    runtime = package.text_files("portlin-runtime")
+    assert "usr/bin/portlin-install" in runtime
+    assert "usr/bin/portlin-software" not in runtime
+
+
 def test_desktop_ships_the_caffeine_applet_and_both_its_entries():
     files = package.text_files("portlin-desktop")
     assert files["usr/bin/portlin-caffeine"].startswith("#!/usr/bin/env python3")

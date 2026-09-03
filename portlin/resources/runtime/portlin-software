@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Software: install common programs, and the drivers this machine needs.
+
+This window runs as the user and never installs anything itself. Every
+action is portlin-install, started as a child process: through pkexec for
+the catalog entries that need root, and directly for the ones that must not
+have it. So the program that can be asked to act as root is one command with
+a fixed set of verbs, and this is a reader of what it prints.
+
+What it prints is a line protocol. `::step` moves the status line,
+`::progress` moves the bar, `::warn` and `::reboot` raise a notice, and
+`::result` ends the job. Everything else is apt and curl talking, and goes
+into the log pane unchanged, so a person who wants to know exactly what was
+run can read it here rather than reaching for a terminal.
+
+A stick travels between machines, so the Drivers page is not a list of
+drivers but a report on the machine the stick is plugged into right now:
+what portlin-install's scan found, and which catalog entries answer to it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+
+from gi.repository import GLib, Gtk  # noqa: E402
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from catalog import (  # noqa: E402
+    CATEGORIES,
+    ENTRIES,
+    Entry,
+    by_category,
+    by_id,
+    expand_home,
+    installed,
+    is_privileged,
+    parse_dpkg_status,
+    search,
+)
+
+APP_ID = "org.portlin.Software"
+INSTALLER = "/usr/bin/portlin-install"
+ICON_NAME = "portlin"
+DRIVERS = "Drivers"
+
+# Exit codes portlin-install and pkexec use, by what they mean here.
+EXIT_OK = 0
+EXIT_PRIVILEGE = 3
+PKEXEC_REFUSED = 126
+PKEXEC_NO_AGENT = 127
+
+
+def elevation_argv(passwordless_sudo: bool) -> list[str]:
+    """How to become root for one command.
+
+    pkexec is the ordinary path: it puts a password dialog on screen through
+    the session's authentication agent. But first boot offers to waive the
+    sudo password, and someone who took that offer has already said they do
+    not want to be asked. `sudo -n` fails rather than prompting, so it is
+    only ever used where it has been proven to work.
+    """
+    return ["sudo", "-n"] if passwordless_sudo else ["pkexec"]
+
+
+def launch_argv(entry: Entry, action: str, *, passwordless_sudo: bool) -> list[str]:
+    if is_privileged(entry):
+        return [*elevation_argv(passwordless_sudo), INSTALLER, action, entry.id]
+    # Deliberately not elevated: portlin-install refuses these as root, and
+    # asking for a password to install into a home directory would teach
+    # people to type it where it is not needed.
+    return [INSTALLER, action, entry.id]
+
+
+def upgrade_argv(*, passwordless_sudo: bool) -> list[str]:
+    return [*elevation_argv(passwordless_sudo), INSTALLER, "upgrade"]
+
+
+def parse_event(line: str) -> tuple[str, str] | None:
+    """One `::` line as (kind, rest), or None for ordinary tool output."""
+    if not line.startswith("::"):
+        return None
+    kind, _, rest = line[2:].partition(" ")
+    return kind, rest.strip()
+
+
+def explain_exit(code: int, *, privileged: bool) -> str:
+    """Why a job ended, in words rather than a number.
+
+    126 and 127 come from pkexec rather than from portlin-install, and both
+    are things the person can act on: one is a password dialog they
+    dismissed, the other is a session with no agent to draw it.
+    """
+    if code == EXIT_OK:
+        return ""
+    if privileged and code == PKEXEC_REFUSED:
+        return "Authentication was cancelled, so nothing was changed."
+    if privileged and code == PKEXEC_NO_AGENT:
+        return (
+            "No authentication agent answered, so the password could not be "
+            "asked for. Log out and in, or install mate-polkit."
+        )
+    if code == EXIT_PRIVILEGE:
+        return "That was run with the wrong privileges. Nothing was changed."
+    return f"It did not finish (exit status {code}). The log says where it stopped."
+
+
+def row_state(entry: Entry, is_installed: bool, busy: bool) -> tuple[str, str, bool]:
+    """The status text, the button label, and whether the button can be pressed."""
+    if busy:
+        return ("Working...", "Remove" if is_installed else "Install", False)
+    if is_installed:
+        return ("Installed", "Remove", True)
+    return ("", "Install", True)
+
+
+def visible_entries(query: str, category: str | None, entries=ENTRIES) -> list[Entry]:
+    """What the list shows: a search across everything, or one category.
+
+    A query wins over the category, because someone who types a name is
+    looking for that name rather than for it inside whatever page they had
+    open.
+    """
+    if query.strip():
+        return search(query, tuple(entries))
+    if category is None:
+        return list(entries)
+    return [entry for entry in entries if entry.category == category]
+
+
+def suggestion_rows(scan: dict, known=None) -> list[tuple[Entry, str]]:
+    """The scan's suggestions as (entry, reason), in the order it made them.
+
+    A suggestion naming an entry this catalog does not have is skipped
+    rather than fatal: the scan and the catalog ship together, but a stick
+    can have a newer portlin-install than portlin-software for as long as an
+    upgrade takes.
+    """
+    rows = []
+    for suggestion in scan.get("suggestions", []):
+        try:
+            entry = (known or {}).get(suggestion["entry"]) or by_id(suggestion["entry"])
+        except KeyError:
+            continue
+        reason = suggestion.get("reason", "")
+        detail = suggestion.get("detail")
+        rows.append((entry, f"{reason}. {detail}" if detail else reason))
+    return rows
+
+
+def describe_machine(scan: dict) -> str:
+    """The one-paragraph answer to "what is this stick plugged into"."""
+    lines = []
+    for device in scan.get("gpus", []):
+        lines.append(f"Graphics: {device['name']}")
+    for device in scan.get("wifi", []):
+        lines.append(f"Wifi: {device['name']}")
+    lines += scan.get("notes", [])
+    return "\n".join(lines) or "Nothing was found to report about this machine."
+
+
+def has_passwordless_sudo(run=subprocess.run) -> bool:
+    """Whether sudo will act for this account without asking anything.
+
+    -n makes sudo fail rather than prompt, so this asks the question without
+    ever putting a password prompt on screen. Anything unexpected is a no,
+    which costs a pkexec dialog and nothing else.
+    """
+    try:
+        return run(
+            ["sudo", "-n", "true"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=3,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def dpkg_installed(run=subprocess.run) -> set[str]:
+    try:
+        proc = run(
+            ["dpkg-query", "-W", "-f=${Package} ${db:Status-Status}\n"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return parse_dpkg_status(proc.stdout)
+
+
+class Job:
+    """One portlin-install run, read line by line without blocking the window.
+
+    The output is watched through the main loop rather than read in a loop
+    here, because a package manager can take minutes and a window that stops
+    redrawing for minutes is one people force-quit half way through an
+    install.
+    """
+
+    def __init__(self, argv, *, on_event, on_output, on_done) -> None:
+        self.argv = argv
+        self.on_event = on_event
+        self.on_output = on_output
+        self.on_done = on_done
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        GLib.io_add_watch(
+            self.proc.stdout,
+            GLib.PRIORITY_DEFAULT,
+            GLib.IO_IN | GLib.IO_HUP,
+            self._on_readable,
+        )
+
+    def _on_readable(self, source, condition) -> bool:
+        line = source.readline()
+        if line:
+            line = line.rstrip("\n")
+            event = parse_event(line)
+            if event:
+                self.on_event(*event)
+            else:
+                self.on_output(line)
+            return True
+        self.proc.wait()
+        self.on_done(self.proc.returncode)
+        return False
+
+
+class SoftwareWindow(Gtk.ApplicationWindow):
+    def __init__(self, application=None, *, scan=None, dpkg=None, sudo=None) -> None:
+        super().__init__(application=application, title="Software")
+        self.set_default_size(940, 640)
+        self.set_icon_name(ICON_NAME)
+
+        self.passwordless_sudo = has_passwordless_sudo() if sudo is None else sudo
+        self.dpkg = dpkg_installed() if dpkg is None else dpkg
+        self.home = os.path.expanduser("~")
+        self.scan: dict = scan or {}
+        self.scan_pending = scan is None
+        self.category: str | None = CATEGORIES[0]
+        self.query = ""
+        self.job: Job | None = None
+        self.busy_id: str | None = None
+        self.rows: dict[str, dict] = {}
+
+        self._build()
+        self._populate()
+        if self.scan_pending:
+            self._start_scan()
+
+    # -- construction ------------------------------------------------------
+
+    def _build(self) -> None:
+        header = Gtk.HeaderBar(title="Software", show_close_button=True)
+        self.search = Gtk.SearchEntry(placeholder_text="Search software")
+        self.search.connect("search-changed", self._on_search)
+        header.pack_start(self.search)
+        self.upgrade_button = Gtk.Button(label="Update everything")
+        self.upgrade_button.connect("clicked", lambda *_: self._start_upgrade())
+        header.pack_end(self.upgrade_button)
+        self.set_titlebar(header)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(outer)
+
+        panes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        panes.set_vexpand(True)
+        outer.pack_start(panes, True, True, 0)
+
+        self.categories = Gtk.ListBox()
+        self.categories.connect("row-selected", self._on_category)
+        for category in CATEGORIES:
+            row = Gtk.ListBoxRow()
+            label = Gtk.Label(label=category, xalign=0.0)
+            label.set_margin_start(12)
+            label.set_margin_end(12)
+            label.set_margin_top(8)
+            label.set_margin_bottom(8)
+            row.add(label)
+            row.category = category
+            self.categories.add(row)
+        sidebar = Gtk.ScrolledWindow()
+        sidebar.set_size_request(180, -1)
+        sidebar.add(self.categories)
+        panes.pack_start(sidebar, False, False, 0)
+        panes.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        panes.pack_start(right, True, True, 0)
+
+        self.machine = Gtk.Label(xalign=0.0)
+        self.machine.set_line_wrap(True)
+        self.machine.set_margin_start(12)
+        self.machine.set_margin_end(12)
+        self.machine.set_margin_top(12)
+        self.machine_frame = Gtk.Frame(label="This machine")
+        self.machine_frame.set_margin_start(12)
+        self.machine_frame.set_margin_end(12)
+        self.machine_frame.set_margin_top(12)
+        self.machine_frame.add(self.machine)
+        self.machine_frame.set_no_show_all(True)
+        right.pack_start(self.machine_frame, False, False, 0)
+
+        self.listing = Gtk.ListBox()
+        self.listing.set_selection_mode(Gtk.SelectionMode.NONE)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.add(self.listing)
+        right.pack_start(scroller, True, True, 0)
+
+        self.revealer = Gtk.Revealer()
+        progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        progress_box.set_margin_start(12)
+        progress_box.set_margin_end(12)
+        progress_box.set_margin_bottom(12)
+        self.status = Gtk.Label(xalign=0.0)
+        progress_box.pack_start(self.status, False, False, 0)
+        self.progress = Gtk.ProgressBar()
+        progress_box.pack_start(self.progress, False, False, 0)
+        self.log = Gtk.TextView(editable=False, monospace=True)
+        log_scroller = Gtk.ScrolledWindow()
+        log_scroller.set_size_request(-1, 160)
+        log_scroller.add(self.log)
+        progress_box.pack_start(log_scroller, False, False, 0)
+        self.revealer.add(progress_box)
+        outer.pack_start(self.revealer, False, False, 0)
+
+        self.categories.select_row(self.categories.get_row_at_index(0))
+
+    # -- the list ----------------------------------------------------------
+
+    def _row_for(self, entry: Entry, reason: str | None = None) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        name = Gtk.Label(xalign=0.0)
+        name.set_markup(f"<b>{GLib.markup_escape_text(entry.name)}</b>")
+        text.pack_start(name, False, False, 0)
+        summary = Gtk.Label(label=entry.summary, xalign=0.0)
+        summary.set_line_wrap(True)
+        text.pack_start(summary, False, False, 0)
+        if reason:
+            why = Gtk.Label(label=reason, xalign=0.0)
+            why.set_line_wrap(True)
+            text.pack_start(why, False, False, 0)
+        if entry.notes:
+            notes = Gtk.Label(label=entry.notes, xalign=0.0)
+            notes.set_line_wrap(True)
+            text.pack_start(notes, False, False, 0)
+        box.pack_start(text, True, True, 0)
+
+        status = Gtk.Label(xalign=1.0)
+        box.pack_start(status, False, False, 0)
+        button = Gtk.Button()
+        button.connect("clicked", lambda _b, e=entry: self._on_button(e))
+        box.pack_start(button, False, False, 0)
+
+        row.add(box)
+        self.rows[entry.id] = {"row": row, "status": status, "button": button}
+        self._refresh_row(entry)
+        return row
+
+    def _refresh_row(self, entry: Entry) -> None:
+        widgets = self.rows.get(entry.id)
+        if not widgets:
+            return
+        state, label, sensitive = row_state(
+            entry, self.is_installed(entry), self.job is not None
+        )
+        widgets["status"].set_text(state)
+        widgets["button"].set_label(label)
+        widgets["button"].set_sensitive(sensitive)
+
+    def is_installed(self, entry: Entry) -> bool:
+        from pathlib import Path
+
+        return installed(entry, self.dpkg, Path(self.home))
+
+    def _populate(self) -> None:
+        for child in self.listing.get_children():
+            self.listing.remove(child)
+        self.rows.clear()
+
+        showing_drivers = self.category == DRIVERS and not self.query.strip()
+        self.machine_frame.set_visible(showing_drivers)
+        if showing_drivers:
+            self.machine.set_text(
+                "Looking at this machine..." if self.scan_pending
+                else describe_machine(self.scan)
+            )
+
+        entries = visible_entries(self.query, self.category)
+        reasons = {}
+        if showing_drivers:
+            suggested = suggestion_rows(self.scan)
+            reasons = {entry.id: reason for entry, reason in suggested}
+            # Suggestions first: on the Drivers page the question is what this
+            # machine needs, and the rest of the list is there for the person
+            # who knows better than the scan does.
+            entries = [entry for entry, _ in suggested] + [
+                entry for entry in entries if entry.id not in reasons
+            ]
+        for entry in entries:
+            self.listing.add(self._row_for(entry, reasons.get(entry.id)))
+        self.listing.show_all()
+
+    def _on_category(self, _listbox, row) -> None:
+        if row is None:
+            return
+        self.category = row.category
+        self._populate()
+
+    def _on_search(self, entry) -> None:
+        self.query = entry.get_text()
+        self._populate()
+
+    # -- the scan ----------------------------------------------------------
+
+    def _start_scan(self) -> None:
+        collected: list[str] = []
+
+        def done(_code: int) -> None:
+            self.scan_pending = False
+            try:
+                self.scan = json.loads("\n".join(collected))
+            except ValueError:
+                self.scan = {"notes": ["The hardware scan did not report anything."]}
+            self.scan_job = None
+            self._populate()
+
+        try:
+            self.scan_job = Job(
+                [INSTALLER, "scan", "--json"],
+                on_event=lambda *_: None,
+                on_output=collected.append,
+                on_done=done,
+            )
+        except OSError as exc:
+            self.scan_pending = False
+            self.scan = {"notes": [f"Could not run the hardware scan: {exc}"]}
+
+    # -- running things ----------------------------------------------------
+
+    def _on_button(self, entry: Entry) -> None:
+        if self.job is not None:
+            return
+        action = "remove" if self.is_installed(entry) else "install"
+        if action == "install" and entry.warning and not self._confirm(entry):
+            return
+        self._start(launch_argv(entry, action, passwordless_sudo=self.passwordless_sudo),
+                    entry=entry)
+
+    def _confirm(self, entry: Entry) -> bool:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Install {entry.name}?",
+        )
+        dialog.format_secondary_text(entry.warning)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Install", Gtk.ResponseType.ACCEPT)
+        answer = dialog.run()
+        dialog.destroy()
+        return answer == Gtk.ResponseType.ACCEPT
+
+    def _start_upgrade(self) -> None:
+        if self.job is not None:
+            return
+        self._start(upgrade_argv(passwordless_sudo=self.passwordless_sudo), entry=None)
+
+    def _start(self, argv, *, entry: Entry | None) -> None:
+        self.busy_id = entry.id if entry else None
+        self.privileged_job = is_privileged(entry) if entry else True
+        self.revealer.set_reveal_child(True)
+        self.progress.set_fraction(0.0)
+        self.status.set_text("Starting...")
+        self._append(f"$ {shlex.join(argv)}")
+        self._set_busy(True)
+        try:
+            self.job = Job(
+                argv,
+                on_event=self._on_event,
+                on_output=self._append,
+                on_done=self._on_done,
+            )
+        except OSError as exc:
+            self.job = None
+            self._set_busy(False)
+            self.status.set_text(f"Could not start {argv[0]}: {exc}")
+
+    def _set_busy(self, busy: bool) -> None:
+        self.upgrade_button.set_sensitive(not busy)
+        for entry in ENTRIES:
+            self._refresh_row(entry)
+
+    def _append(self, line: str) -> None:
+        buffer = self.log.get_buffer()
+        buffer.insert(buffer.get_end_iter(), line + "\n")
+
+    def _on_event(self, kind: str, rest: str) -> None:
+        if kind == "step":
+            self.status.set_text(rest)
+            self.progress.pulse()
+        elif kind == "progress":
+            try:
+                self.progress.set_fraction(min(1.0, max(0.0, int(rest) / 100)))
+            except ValueError:
+                pass
+        elif kind == "warn":
+            self._append(rest)
+            self.status.set_text(rest)
+        elif kind == "reboot":
+            self._append("Reboot before relying on this driver.")
+        elif kind == "result":
+            self._append(rest)
+
+    def _on_done(self, code: int) -> None:
+        self.job = None
+        self.dpkg = dpkg_installed()
+        if code == EXIT_OK:
+            self.status.set_text("Done.")
+            self.progress.set_fraction(1.0)
+        else:
+            message = explain_exit(code, privileged=getattr(self, "privileged_job", True))
+            self.status.set_text(message)
+            self._append(message)
+        self.busy_id = None
+        self._set_busy(False)
+        self._populate()
+
+
+def main() -> int:
+    application = Gtk.Application(application_id=APP_ID)
+    windows: dict[str, SoftwareWindow] = {}
+
+    def on_activate(app) -> None:
+        # A second launch from the menu asks the first to show itself rather
+        # than opening a second window over the top of it.
+        if "window" in windows:
+            windows["window"].present()
+            return
+        Gtk.Window.set_default_icon_name(ICON_NAME)
+        window = windows["window"] = SoftwareWindow(application=app)
+        window.show_all()
+
+    application.connect("activate", on_activate)
+    return application.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

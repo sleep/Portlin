@@ -1,0 +1,16 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Software
+GenericName=Software Installer
+Comment=Install common programs, and the drivers this machine needs
+Exec=portlin-software
+Icon=portlin
+Terminal=false
+StartupNotify=true
+# System rather than Settings: it is a program that installs things, and the
+# applications menu files Settings entries away where nobody looks for a
+# program to launch. PackageManager is what the menu specification calls this
+# kind of program.
+Categories=System;PackageManager;
+Keywords=software;install;apps;drivers;nvidia;vpn;browser;packages;

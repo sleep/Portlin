@@ -50,10 +50,11 @@ POLKIT_ACTIONS = {
 # The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
 # a --minimal, headless stick installs, and putting a GTK program there would
 # drag X libraries onto a system that has no X.
-DESKTOP_TOOLS = ["portlin-about", "portlin-caffeine"]
+DESKTOP_TOOLS = ["portlin-about", "portlin-caffeine", "portlin-software"]
 MENU_ENTRIES = {
     "portlin-about.desktop": "usr/share/applications/portlin-about.desktop",
     "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
+    "portlin-software.desktop": "usr/share/applications/portlin-software.desktop",
 }
 
 # X-Xfce-Toplevel (see portlin-about.desktop) only keeps About Portlin out of
@@ -376,7 +377,17 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     # back to the stock icons -- it leaves the desktop with
                     # the menu button and nothing else.
                     "adwaita-icon-theme",
+                    # What the Software app becomes root through. It runs
+                    # portlin-install and nothing else, so without pkexec the
+                    # window opens, lists everything, and installs none of it.
+                    "pkexec",
                 ],
+                # The agent that draws pkexec's password dialog. A Recommends
+                # rather than a Depends because any polkit agent will do, and
+                # someone running a different one should not have to remove
+                # portlin-desktop to do it. Without one, pkexec exits 127 and
+                # the app says that an agent is what is missing.
+                recommends=["mate-polkit"],
             ),
         }
         for destination, source in {**THEME_FILES, **ICON_THEME_FILES}.items():
