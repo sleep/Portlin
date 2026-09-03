@@ -58,6 +58,7 @@ harness:
 	    python3-gi gir1.2-gtk-3.0 librsvg2-common xvfb x11-xserver-utils \
 	    ca-certificates curl pciutils polkitd pkexec dbus xz-utils >/dev/null; \
 	  python3 -u scripts/test-caffeine.py && \
+	  python3 -u scripts/test-stats.py && \
 	  python3 -u scripts/test-package-conflicts.py && \
 	  python3 -u scripts/test-encrypt-hook.py && \
 	  python3 -u scripts/test-stash-passphrase.py && \

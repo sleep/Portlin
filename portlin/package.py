@@ -50,7 +50,20 @@ POLKIT_ACTIONS = {
 # The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
 # a --minimal, headless stick installs, and putting a GTK program there would
 # drag X libraries onto a system that has no X.
-DESKTOP_TOOLS = ["portlin-about", "portlin-caffeine", "portlin-software"]
+DESKTOP_TOOLS = [
+    "portlin-about",
+    "portlin-caffeine",
+    "portlin-software",
+    # The only one of these that is not a GTK program. It is here rather than
+    # in TOOLS because it is useless without a panel to print into, and a
+    # --minimal stick has none.
+    "portlin-stats",
+]
+
+# The panel id genmon is given, which is also the id in the filename genmon
+# looks its configuration up under. One constant, because a layout naming one
+# id and a file named for another is a panel item that runs nothing.
+STATS_PLUGIN_ID = 5
 MENU_ENTRIES = {
     "portlin-about.desktop": "usr/share/applications/portlin-about.desktop",
     "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
@@ -141,6 +154,7 @@ XDG_DEFAULTS = {
     "gtk-3.0/settings.ini": "gtk-3.0-settings.ini",
     "gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
     "xfce4/terminal/terminalrc": "terminalrc",
+    f"xfce4/panel/genmon-{STATS_PLUGIN_ID}.rc": "genmon-stats.rc",
 }
 
 # plugin-1 in Debian trixie's shipped /etc/xdg/xfce4/panel/default.xml is

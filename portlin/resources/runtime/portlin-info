@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, "/usr/lib/portlin")
 
 from devices import (  # noqa: E402
+    UNCLAIMED_ADVICE,
     backing_disk,
     backing_partition,
     command_output,
@@ -30,16 +31,6 @@ from hostinfo import format_bytes, read_gpu, read_host  # noqa: E402
 
 RELEASE = Path("/etc/portlin-release")
 OS_RELEASE = Path("/etc/os-release")
-
-# The one wording for unclaimed space. A constant rather than a literal in the
-# print below because the panel readout quotes this exact sentence in its
-# tooltip: two places telling a user to run portlin-expand in two different
-# forms of words is how one of them ends up saying something no longer true.
-UNCLAIMED_ADVICE = (
-    "There is {gb:.1f} GB of unused space on this drive. "
-    "Run portlin-expand to claim it."
-)
-
 
 def _parse_env_file(path: Path) -> dict[str, str]:
     """Parse a simple KEY=value file, tolerating os-release's quoted values.

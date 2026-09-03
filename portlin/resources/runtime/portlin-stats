@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""One line in the panel saying what this machine is doing.
+
+The panel runs this every couple of seconds through xfce4-genmon-plugin and
+draws whatever it prints. One script rather than five stock plugins, because
+five plugins is five paddings, five fonts and five ideas about how a number
+should be written; and because no stock plugin reports a GPU, a local address,
+or how much of the stick is still unclaimed, which are the four things a
+portable system is actually asked about.
+
+What it will not do is guess. Every field here has a state in which the honest
+answer is "not known yet", and each of them says so rather than printing a
+number that looks like the others. The CPU figure is the sharpest case: genmon
+starts a fresh process each time, so the first run of a session has nothing to
+compare against, and the tempting fix -- reporting the since-boot average -- is
+a number that is never wrong and never useful.
+
+Deliberately not a GTK program. It is the only member of portlin-desktop that
+imports no gi, because a preferences dialog here would mean forking the GTK
+stack every two seconds for the life of the session.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+from xml.sax.saxutils import escape
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+import hostinfo  # noqa: E402
+from devices import (  # noqa: E402
+    UNCLAIMED_ADVICE,
+    backing_disk,
+    backing_partition,
+    command_output,
+    disk_tail_bytes,
+    root_source,
+    unclaimed_bytes,
+)
+
+# The brand's own three, and only these. muted for the label words, paper for
+# the values, and accent for exactly one thing.
+MUTED = "#7C8B9E"
+PAPER = "#E8EDF3"
+
+# Crimson means the encrypted root and nothing else, anywhere in portlin. Not a
+# low battery, not a pegged CPU, not an unexpanded stick. A colour that means
+# one thing stops meaning it the moment it is spent on a second.
+ACCENT = "#FF3355"
+
+# Two spaces rather than a separator glyph. A middle dot would be one more
+# character to fall back on a machine whose fonts nobody chose, and the label
+# words already tell the eye where each field starts.
+FIELD_GAP = "  "
+
+# What genmon runs when the readout is clicked. About Portlin already answers
+# "what is this stick, and what is it running on", and it prints portlin-info,
+# which now carries the machine description and the expand advice. Deliberately
+# not portlin-expand: that needs root and prompts for the LUKS passphrase, and
+# privilege in portlin goes through one command with a fixed set of verbs.
+CLICK_COMMAND = "portlin-about"
+
+# The order fields appear in, which is also the order to cut them in if the
+# readout ever has to be trimmed for a narrow panel.
+PANEL_FIELDS = ("cpu", "mem", "gpu", "disk", "ip", "bat")
+
+STATE_NAME = "portlin-stats.json"
+
+# Longer than this between runs and the CPU delta spans a suspend, a locked
+# screen, or a panel that was restarted. The average over that window is
+# arithmetically true and describes nothing a person is looking at.
+MAX_SAMPLE_GAP_SECONDS = 60
+
+# nvidia-smi can take seconds on a hybrid laptop and asking it can wake a
+# runtime-suspended card, which is a battery cost this would be blamed for. Ask
+# rarely and hold the answer in between.
+NVIDIA_INTERVAL_SECONDS = 15
+
+# lspci reads PCI config space and can hang on firmware that mishandles it, so
+# the topology lookup is bounded. It is asked once per boot either way.
+TOPOLOGY_TIMEOUT_SECONDS = 5
+
+
+def state_path() -> Path:
+    """Where the previous sample lives.
+
+    XDG_RUNTIME_DIR is tmpfs, mode 0700, per-user, and destroyed at last logout,
+    which is exactly the lifetime of a CPU delta: meaningful inside one session
+    on one machine and meaningless outside it. It also means none of this
+    touches the flash, which matters on a device with finite write cycles.
+
+    A startx session that never ran pam_systemd has no XDG_RUNTIME_DIR. The
+    fallback is per-uid rather than a shared name, because a predictable path in
+    a world-writable directory is somewhere another user could leave a file.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / STATE_NAME
+    return Path(tempfile.gettempdir()) / f"portlin-stats-{os.getuid()}.json"
+
+
+def load_state(path: Path, boot: str) -> dict:
+    """The previous run's state, or an empty one if it belongs to another boot.
+
+    The boot check is the reason this function is not two lines. A stick is
+    suspended in one laptop and resumed in another, and the filesystem comes
+    with it: the cached model, CPU and drive geometry all describe the machine
+    it was plugged into yesterday. Every one of those would be silently wrong
+    and none of them would look it. Discarding the whole file on a boot_id
+    mismatch is cheaper to reason about than deciding which parts survive.
+    """
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(state, dict) or state.get("boot_id") != boot:
+        return {}
+    return state
+
+
+def save_state(path: Path, state: dict) -> None:
+    """Write the state file whole, or not at all.
+
+    A panel killed between opening and writing would otherwise leave a truncated
+    file that never parses again, and the visible symptom is a CPU field stuck
+    at "--%" for the rest of the session with nothing to explain it. Written to
+    a temporary name in the same directory and renamed, which is atomic within a
+    filesystem, at 0600 because the fallback path is in a shared directory.
+    """
+    handle = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=".portlin-stats")
+        handle = os.fdopen(descriptor, "w")
+        json.dump(state, handle)
+        handle.close()
+        handle = None
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except OSError:
+        # A readout that cannot cache is a readout with no CPU number, which is
+        # a great deal better than a panel item that vanishes.
+        if handle is not None:
+            handle.close()
+
+
+def read_topology() -> dict:
+    """The stick's geometry: which partition, which drive, and how big.
+
+    Cached for the whole boot rather than read every couple of seconds. None of
+    it changes while the machine is running -- the root partition does not move
+    -- and each answer costs a fork of lsblk, which at this refresh rate would
+    be the most expensive thing on an idle desktop.
+    """
+    source = root_source()
+    partition = backing_partition(source)
+    disk = backing_disk(partition) if partition else ""
+    return {
+        "source": source,
+        "encrypted": source.startswith("/dev/mapper/"),
+        "partition_bytes": _lsblk_size(partition),
+        "drive_bytes": _lsblk_size(disk),
+        "tail_bytes": disk_tail_bytes(disk, partition) if disk and partition else 0,
+    }
+
+
+def _lsblk_size(name: str) -> int:
+    if not name:
+        return 0
+    size = command_output(["lsblk", "-bdno", "SIZE", f"/dev/{name}"])
+    return int(size) if size.isdigit() else 0
+
+
+def label(text: str, value: str, *, colour: str = PAPER) -> str:
+    """One field, as the panel's markup: a muted word and a bright value."""
+    return (
+        f'<span foreground="{MUTED}">{escape(text)}</span> '
+        f'<span foreground="{colour}">{escape(value)}</span>'
+    )
+
+
+def render_text(fields: dict) -> str:
+    """The panel line.
+
+    Fields whose value is None are absent rather than blank. Two of them can be
+    absent, and the asymmetry is deliberate: a machine with no battery is a
+    desktop, and "bat --%" on a desktop is noise; a GPU with no counter has
+    nothing that changes, and a static string in a readout of moving numbers is
+    the same noise. Both keep their full answer in the tooltip.
+    """
+    parts = []
+    for name in PANEL_FIELDS:
+        value = fields.get(name)
+        if value is None:
+            continue
+        if name == "disk" and fields.get("encrypted"):
+            # The one place crimson is spent, and the reason it is reserved.
+            parts.append(
+                f'<span foreground="{MUTED}">disk</span> '
+                f'<span foreground="{ACCENT}">luks</span> '
+                f'<span foreground="{PAPER}">{escape(value)}</span>'
+            )
+            continue
+        parts.append(label(name, value))
+    return FIELD_GAP.join(parts)
+
+
+def render_tooltip(host, gpu, topology: dict, unclaimed: int) -> str:
+    """What the panel line had no room for: the machine, and the caveats.
+
+    The GPU line is the one that earns this. A frequency and a utilisation
+    percentage are different measurements, and the panel has room for the number
+    but not for the sentence saying which one it is.
+    """
+    lines = []
+    if host.model:
+        lines.append(escape(host.model))
+    if host.cpu:
+        threads = f", {host.threads} threads" if host.threads else ""
+        lines.append(escape(f"{host.cpu}{threads}"))
+    if host.memory_bytes:
+        lines.append(escape(f"{hostinfo.format_bytes(host.memory_bytes)} memory"))
+    if gpu is not None and gpu.detail:
+        lines.append(escape(gpu.detail))
+    lines.append(escape(host.firmware))
+    if topology.get("source"):
+        lines.append(escape(f"root on {topology['source']}"))
+    if unclaimed:
+        lines.append("")
+        lines.append(escape(UNCLAIMED_ADVICE.format(gb=unclaimed / 1_000_000_000)))
+    return "\n".join(lines)
+
+
+def disk_field(topology: dict) -> tuple[str | None, int]:
+    """Used against capacity, and how much of the drive is still unclaimed.
+
+    Shows a second capacity only when the two differ, which is what makes an
+    unexpanded stick visible without spending a colour on it: an expanded stick
+    reads "6.1/31.0G" and an unexpanded one "6.1/6.5G of 31.0G". If the drive's
+    size could not be read, the "of" half is dropped rather than guessed --
+    unexpandedness is not knowable without it.
+    """
+    try:
+        usage = shutil.disk_usage("/")
+    except OSError:
+        return None, 0
+    used = hostinfo.format_bytes(usage.used)
+    total = hostinfo.format_bytes(usage.total)
+    unclaimed = unclaimed_bytes(
+        usage.total, topology.get("partition_bytes", 0), topology.get("tail_bytes", 0)
+    )
+    drive = topology.get("drive_bytes", 0)
+    if unclaimed and drive:
+        return f"{used}/{total} of {hostinfo.format_bytes(drive)}", unclaimed
+    return f"{used}/{total}", unclaimed
+
+
+def nvidia_reading(state: dict, now: float) -> int | None:
+    """The last nvidia-smi answer, refreshed at most every NVIDIA_INTERVAL.
+
+    A failure is cached exactly like a success. On a machine with no proprietary
+    driver -- the ordinary case -- the alternative is a which() lookup and a
+    subprocess attempt every two seconds, forever, for an answer that is not
+    going to change until somebody installs a driver.
+    """
+    cached = state.get("nvidia")
+    if isinstance(cached, dict) and now - cached.get("at", 0) < NVIDIA_INTERVAL_SECONDS:
+        return cached.get("value")
+    value = hostinfo.read_nvidia_percent()
+    state["nvidia"] = {"value": value, "at": now}
+    return value
+
+
+def main() -> int:
+    now = time.monotonic()
+    boot = hostinfo.boot_id()
+    path = state_path()
+    state = load_state(path, boot)
+    state["boot_id"] = boot
+
+    if "topology" not in state:
+        state["topology"] = read_topology()
+    topology = state["topology"]
+
+    if "host" not in state:
+        host = hostinfo.read_host()
+        state["host"] = host.__dict__.copy()
+    host = hostinfo.Host(**state["host"])
+
+    sample = hostinfo.read_cpu_sample()
+    previous = state.get("stat")
+    elapsed = now - state.get("monotonic", now)
+    busy = None
+    if previous is not None and 0 < elapsed <= MAX_SAMPLE_GAP_SECONDS:
+        busy = hostinfo.cpu_percent(hostinfo.CpuSample(*previous), sample)
+    if sample is not None:
+        state["stat"] = [sample.total, sample.idle]
+        state["monotonic"] = now
+
+    memory = hostinfo.read_memory()
+    gpu = hostinfo.read_gpu(nvidia=nvidia_reading(state, now))
+    battery = hostinfo.read_battery()
+    address = hostinfo.local_address()
+    disk, unclaimed = disk_field(topology)
+
+    fields = {
+        "cpu": f"{busy:.0f}%" if busy is not None else "--%",
+        "mem": (
+            f"{hostinfo.format_bytes(memory.used_bytes)}/"
+            f"{hostinfo.format_bytes(memory.total_bytes)}"
+            if memory
+            else "--"
+        ),
+        # An empty label means a card with no counter: named in the tooltip,
+        # absent from a line whose whole job is numbers that move.
+        "gpu": gpu.label if gpu is not None and gpu.label else None,
+        "disk": disk,
+        # "none" rather than a blank, because that is the answer, and it is what
+        # a person sees when they ask the system the same question.
+        "ip": address or "none",
+        "bat": (
+            f"{battery.percent}%{'+' if battery.charging else ''}"
+            if battery is not None
+            else None
+        ),
+        "encrypted": topology.get("encrypted", False),
+    }
+
+    print(f"<txt>{render_text(fields)}</txt>")
+    print(f"<tool>{render_tooltip(host, gpu, topology, unclaimed)}</tool>")
+    print(f"<txtclick>{CLICK_COMMAND}</txtclick>")
+
+    save_state(path, state)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

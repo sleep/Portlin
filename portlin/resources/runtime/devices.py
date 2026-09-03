@@ -25,6 +25,15 @@ INSIDE_SLACK_FLOOR_BYTES = 64 * 1024**2
 # user could usefully claim.
 REPORT_FLOOR_BYTES = 1024**3
 
+# The one wording for unclaimed space, beside the arithmetic that decides
+# whether to say it. Both the report and the panel tooltip quote this: two
+# places telling someone to run portlin-expand in two different forms of words
+# is how one of them ends up saying something that is no longer true.
+UNCLAIMED_ADVICE = (
+    "There is {gb:.1f} GB of unused space on this drive. "
+    "Run portlin-expand to claim it."
+)
+
 
 def command_output(argv: list[str]) -> str:
     """Run a command and return its stripped stdout, or "" if it is missing.

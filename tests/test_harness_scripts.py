@@ -10,6 +10,7 @@ assumes a clean slate is a script that breaks whenever an earlier one changes
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -179,3 +180,41 @@ class TestExpandHarnessLoadsTheWizardAsWritten:
 
         missing = sorted(loaded - bound - known)
         assert not missing, f"the expansion path reads names nothing defines: {missing}"
+
+
+class TestEveryHarnessIsActuallyRun:
+    """A harness the Makefile does not name is a harness nobody runs.
+
+    Adding one is two edits in two files, and the second is the easy one to
+    forget: the script lands, its tests look thorough, `make harness` goes
+    green, and none of it ever executed. Nothing else in the suite would
+    notice, because the thing that is missing is an absence.
+    """
+
+    MAKEFILE = SCRIPTS.parent / "Makefile"
+
+    # Harnesses that take an argument rather than running against the bare
+    # container. test-firstboot-boot.py needs a built image to boot, which is
+    # `make prove`'s tier, not this one. Listed here rather than inferred, so
+    # that adding a script to the exclusion is a deliberate line in a diff.
+    NOT_IN_THE_CONTAINER = {"test-firstboot-boot.py"}
+
+    def test_the_makefile_runs_every_harness_script(self):
+        recipe = self.MAKEFILE.read_text()
+        for script in sorted(SCRIPTS.glob("test-*.py")):
+            if script.name in self.NOT_IN_THE_CONTAINER:
+                continue
+            assert f"scripts/{script.name}" in recipe, script.name
+
+    def test_the_exclusions_still_exist(self):
+        # A stale exclusion silently re-opens the hole it was carved for.
+        for name in self.NOT_IN_THE_CONTAINER:
+            assert (SCRIPTS / name).exists(), name
+
+    def test_every_script_the_makefile_names_exists(self):
+        # The other direction. A renamed script leaves the harness failing on
+        # the first missing file, which is loud, but the failure names a path
+        # rather than saying the list is stale.
+        recipe = self.MAKEFILE.read_text()
+        for named in re.findall(r"scripts/(test-[\w-]+\.py)", recipe):
+            assert (SCRIPTS / named).exists(), named
