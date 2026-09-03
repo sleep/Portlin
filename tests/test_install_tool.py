@@ -668,3 +668,44 @@ class TestTheScanCommand:
         report = json.loads(capsys.readouterr().out)
         assert report["suggestions"] == []
         assert any("Could not run lspci" in note for note in report["notes"])
+
+
+class TestRemovingWithoutARecord:
+    """The state record can be missing: an entry installed by hand, a record
+    deleted, a stick whose /var was cleared. Removal still has to take away
+    what is actually there, and this is the path the NVIDIA entry's own
+    recovery instructions go down, from a text console, on a machine whose
+    desktop will not start."""
+
+    def test_the_fallback_purges_the_driver_a_resolver_chose(self, tool, catalog, ctx):
+        entry = catalog.by_id("nvidia-driver")
+        record = tool.fallback_record(
+            entry, {"nvidia-driver", "linux-headers-amd64"}, Path(ctx.home)
+        )
+        assert set(record["packages"]) == {"nvidia-driver", "linux-headers-amd64"}
+        assert tool.apt_argv("purge", *record["packages"]) in argvs(
+            tool.plan_remove(entry, ctx, record)
+        )
+
+    def test_it_never_names_a_driver_that_was_not_chosen(self, tool, catalog, ctx):
+        # nvidia-detect picks one of several metapackages. Asking apt to purge
+        # the one it did not pick fails the whole removal, because apt has
+        # never heard of it unless non-free is still enabled.
+        entry = catalog.by_id("nvidia-driver")
+        record = tool.fallback_record(entry, {"nvidia-driver"}, Path(ctx.home))
+        assert "nvidia-tesla-535-driver" not in record["packages"]
+
+    def test_nothing_installed_means_no_record_to_act_on(self, tool, catalog, ctx):
+        assert tool.fallback_record(catalog.by_id("vlc"), set(), Path(ctx.home)) is None
+
+    def test_it_still_takes_the_repository_files_away(self, tool, catalog, ctx):
+        entry = catalog.by_id("mullvad")
+        record = tool.fallback_record(entry, {"mullvad-vpn"}, Path(ctx.home))
+        assert entry.repo.keyring_path in record["paths"]
+
+    def test_the_catalog_fallback_covers_both_name_sets(self, tool, catalog):
+        # packages and the check can name different things, and neither alone
+        # is the whole install.
+        names = tool.installed_packages(catalog.by_id("nvidia-driver"), None)
+        assert "linux-headers-amd64" in names
+        assert "nvidia-driver" in names

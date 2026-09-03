@@ -496,14 +496,40 @@ def plan_install(
 
 
 def installed_packages(entry: Entry, record: dict | None) -> list[str]:
-    """What to purge: what the record says was installed, else the catalog."""
+    """What to purge: what the record says was installed, else the catalog.
+
+    The fallback is the catalog's packages *and* the names its check looks
+    for, because for some entries those are different sets and neither alone
+    is the whole install. nvidia-driver is the one that matters: it lists
+    only the kernel headers, because which driver gets installed is
+    nvidia-detect's answer rather than the catalog's, and that answer is what
+    the check knows about. Purging the headers and leaving the driver would
+    fail exactly the person following the entry's own recovery instructions
+    from a text console.
+    """
     if record and record.get("packages"):
         return list(record["packages"])
-    if entry.packages:
-        return list(entry.packages)
+    names = list(entry.packages)
     if entry.check.kind == "dpkg":
-        return list(entry.check.values)
-    return []
+        names += [name for name in entry.check.values if name not in names]
+    return names
+
+
+def fallback_record(entry: Entry, dpkg: set[str], home: Path) -> dict | None:
+    """Stand in for a state record that was never written or has been lost.
+
+    Narrowed to what is actually installed, so removing an entry whose
+    driver came from a resolver does not ask apt for the name of a package
+    that was never chosen. Without this, `apt-get purge` on a name apt has
+    never heard of fails the whole removal.
+    """
+    names = [name for name in installed_packages(entry, None) if name in dpkg]
+    if not names:
+        return None
+    paths: list[str] = []
+    if entry.repo:
+        paths += [entry.repo.sources_path, entry.repo.keyring_path]
+    return {"id": entry.id, "kind": entry.kind, "packages": names, "paths": paths}
 
 
 def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
@@ -1095,7 +1121,10 @@ def cmd_remove(args, ctx: Context) -> int:
     code = check_privilege(entry, ctx)
     if code != EXIT_OK:
         return code
-    steps = plan_remove(entry, ctx, read_record(ctx, entry))
+    record = read_record(ctx, entry)
+    if record is None and entry.check.kind == "dpkg":
+        record = fallback_record(entry, dpkg_installed(), Path(ctx.home))
+    steps = plan_remove(entry, ctx, record)
     result = run_plan(steps, dry_run=args.dry_run)
     if result.ok and not args.dry_run:
         drop_record(ctx, entry)
