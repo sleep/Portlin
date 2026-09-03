@@ -624,3 +624,41 @@ if it has `OnlyShowIn`, that it includes XFCE).
   still works.
 - **Cached rootfs tarballs** predating Task 1 cannot satisfy the new Depends
   in write's offline chroot; rebuild with `make image`.
+
+---
+
+## What changed while this was built
+
+The catalog above was written from documentation. Building it meant checking
+each entry against a real `debian:trixie` container, and six things were not
+what the documentation said.
+
+- **Telegram has no Debian package.** `telegram-desktop` is not in trixie, so
+  the entry became `tarball-opt` against Telegram's own build, which unpacks
+  to `/opt/telegram` and updates itself.
+- **`libva-utils` is a source package.** The binary is `vainfo`, in both the
+  Intel and AMD entries.
+- **`nvidia-tesla-470-driver` is not in trixie.** The legacy metapackage
+  there is `nvidia-tesla-535-driver`, which is what the entry's check names.
+- **Cursor does publish a stable download.** The URL its own updater uses
+  serves the current `.deb`, so the entry is `deb-url` rather than a page to
+  open in a browser. That left the `web` kind with no entries, and it was
+  removed rather than kept as an unreachable branch.
+- **Kimi Code installs to `~/.kimi-code`,** not `~/.local/bin`, and adds that
+  directory to `PATH` in `~/.profile`. Removal cannot undo the `PATH` line,
+  which the entry's notes now say. Its installer also needs `bash`, which is
+  what every vendor script is now run with.
+- **The wl driver's PCI table claims every Broadcom device,** so it cannot
+  say which chips actually need it. The suggestion list is curated and says
+  plainly that it is only needed if wifi does not work.
+
+Two facts the plan assumed were confirmed rather than changed: `mate-polkit`
+does ship the autostart entry that draws pkexec's prompt (in
+`mate-polkit-common`, which it depends on), and every vendor repository in
+the table resolves, accepts its own signature, and carries the package name
+the catalog claims.
+
+One bug outside this work was found and fixed on the way: `test-encrypt-hook.py`
+leaves a breadcrumb in `/run/portlin`, and `test-stash-passphrase.py` then
+tried to remove that directory as if it owned it, so `make harness` failed on
+the harness before it rather than on anything it was testing.
