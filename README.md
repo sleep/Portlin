@@ -80,14 +80,47 @@ you click it again, or for a span you pick from `Activate for`. It holds a login
 `idle:sleep:handle-lid-switch`, so a closed lid does not suspend either. Right-click for
 preferences; untick it in Settings > Session and Startup to stop it appearing at all.
 
+## Software
+
+**Software**, in the applications menu, installs the things people go looking for on a fresh
+system: Chrome, Brave, Chromium, Tor Browser, Pale Moon, Signal, Telegram, Discord, VLC, OBS,
+LibreOffice, GIMP, VS Code, Zed, Cursor, Claude Desktop, Claude Code, Kimi Code, Docker,
+RustDesk, AnyDesk, Mullvad, Tailscale, qBittorrent, Deluge and more. Each entry says where it
+comes from, because they are not all the same kind of thing: Debian's archive, the vendor's apt
+repository, a `.deb` the vendor publishes, a tarball unpacked into `/opt`, or an installer that
+runs as you, under your own home directory.
+
+It also looks at the machine the stick is plugged into. The **Drivers** page names the graphics
+and wifi hardware it found and offers what fits: NVIDIA's proprietary driver, picked for that
+exact card by `nvidia-detect`, video acceleration and Vulkan for Intel and AMD, the Broadcom STA
+driver for the chips the open ones do not cover, and printing and scanning. A stick travels, so
+the NVIDIA entry says plainly what installing it does to the next machine, and how to undo it
+from a text console.
+
+Everything privileged goes through one command, `portlin-install`, which the window runs under
+`pkexec`, or under `sudo` if first boot was told sudo needs no password. So the program that can
+be asked to act as root is one command with a fixed set of verbs rather than a window, and the
+same verbs work from a terminal:
+
+```
+portlin-install list                 # the catalog, and what is already installed
+portlin-install install mullvad      # or remove, or status
+portlin-install scan                 # what this machine needs
+```
+
+Entries that need Debian's `non-free` component get it through a drop-in under
+`/etc/apt/sources.list.d/`, so sticks written before that component was enabled by default are
+not left out. Deleting that file takes it away again.
+
 ## Updates
 
 The Debian system updates itself: it is a real install, so `apt full-upgrade`
 and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
-the wallpapers, the caffeine applet, the About Portlin menu entry and the `portlin-info`,
-`portlin-expand` and `portlin-encrypt` commands are Debian packages, and will update from portlin's archive like
+the wallpapers, the caffeine applet, the Software app and its catalog, the About Portlin menu
+entry and the `portlin-info`, `portlin-expand`, `portlin-encrypt` and `portlin-install`
+commands are Debian packages, and will update from portlin's archive like
 anything else once that archive is published; until then they stay at
 whatever version the stick was written with. The bootloader, the initramfs,
 `fstab` and `crypttab` are written once and stay put, because an update that
@@ -213,7 +246,7 @@ would leave an unbootable drive.
 | End to end | qemu | `make prove` |
 
 `make harness` earns its keep. It runs the *shipped* scripts and packages against real block
-devices, a real dpkg and a real X server, in about three minutes. Six harnesses, nine runs:
+devices, a real dpkg and a real X server, in about three minutes. Seven harnesses, ten runs:
 
 | Harness | What only a real device shows |
 |---|---|
@@ -223,6 +256,7 @@ devices, a real dpkg and a real X server, in about three minutes. Six harnesses,
 | `test-package-conflicts.py` | portlin's packages installing where something else already owns `/etc/xdg` |
 | `test-package-upgrade.py` | conffiles surviving an upgrade, against a real dpkg |
 | `test-caffeine.py` | the applet actually moving the screen settings, against a real X server |
+| `test-software.py` | `portlin-install` installing and removing real packages from Debian's archive and from a vendor repository, every package name in the catalog resolving, both privilege refusals, and the Software window against a real X server |
 
 Between them they caught a malformed `partx` argument, `lsblk -o PKNAME` returning empty for
 device-mapper volumes, an assumption that udev had created `/dev/mapper` symlinks, a filesystem

@@ -84,7 +84,7 @@ their tier before they are written.
 | | Frozen | Updatable |
 |---|---|---|
 | Written by | `write`, once | `portlin-runtime` and `portlin-desktop`, by apt |
-| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, wallpaper, branding, the `portlin-*` commands |
+| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, wallpaper, branding, the software catalog and the Software app, the `portlin-*` commands |
 | Failure mode | a stick that will not boot or will not unlock | a desktop that looks wrong, or a command that refuses to run |
 
 **The test.** If a broken version of a file can stop a stick booting or
@@ -104,6 +104,14 @@ detect the prerequisite at runtime and refuse cleanly when it is absent,
 because the frozen half of a stick written last year cannot be brought
 forward.
 
+**Privilege lives in one place.** The Software app runs as the user and never
+touches apt. Everything needing root is `portlin-install`, reached through a
+polkit action whose `exec.path` annotation names that one program, so what
+can be asked to act as root is a single command with a fixed set of verbs
+rather than a window. It refuses in both directions: a system package
+without root, and a vendor script that installs into a home directory with
+it.
+
 ## Module decomposition
 
 Each module has one job and a testable surface.
@@ -120,6 +128,7 @@ Each module has one job and a testable surface.
 | `rootfs.py` | debootstrap + package installation -> cached tarball |
 | `install.py` | Orchestrates `write`: partition, format, unpack, configure, GRUB |
 | `packages.py` | The package set, grouped and overridable |
+| `resources/runtime/catalog.py` | Pure: the software catalog both shipped programs read |
 | `package.py` | Pure: the three runtime packages as a path-to-content mapping |
 | `progress.py` | Pure: command output -> progress events, stage weights, bars and ETAs |
 | `cli.py` | Argument parsing, confirmation prompts, wiring |
