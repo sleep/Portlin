@@ -324,16 +324,6 @@ def test_the_icon_theme_inherits_the_stock_set_rather_than_replacing_it():
     assert inherits[0].strip().endswith("hicolor")
 
 
-def test_the_icon_theme_carries_the_applications_menu_button():
-    # xfce4-panel does not set button-icon in Debian's panel layout, so the
-    # plugin falls back to the icon name compiled into it. Answering to that
-    # name is the whole mechanism by which the mark reaches the menu button.
-    destinations = package.binary_files("portlin-desktop")
-    icon = f"{package.ICON_THEME_DIR}/scalable/apps/{package.MENU_BUTTON_ICON}.svg"
-    assert icon in destinations
-    assert destinations[icon].name == "logo.svg"
-
-
 def test_the_mark_is_installed_under_its_own_name_in_hicolor():
     # Icon=portlin in a desktop entry resolves here. hicolor rather than the
     # portlin theme because this one has to be found whichever icon theme is
@@ -381,7 +371,6 @@ def test_the_applications_menu_button_is_labelled_with_the_running_version():
         f'"button-title" type="string" value="Portlin {__version__}"' in panel_defaults
     )
     assert '"show-button-title" type="bool" value="true"' in panel_defaults
-    assert '"plugin-1" type="empty"' in panel_defaults
 
 
 def test_the_greeter_shows_the_portlin_wallpaper():

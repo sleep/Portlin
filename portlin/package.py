@@ -99,30 +99,35 @@ CAFFEINE_ICONS = {
     for state in ("on", "off")
 }
 
-# The icon theme portlin ships, and the one icon in it.
-#
-# xfce4-panel's applications menu takes its button icon from a name compiled
-# into the plugin: Debian's panel layout declares the plugin with no
-# button-icon at all. Answering to that name from a theme portlin owns changes
-# the menu button without freezing Debian's panel layout into the image and
-# without diverting the eight files -- one SVG and seven PNG sizes --
-# xfce4-panel ships for that icon.
+# The icon theme portlin ships. It carried exactly one icon until the panel
+# layout landed: the applications menu took its button icon from a name
+# compiled into the plugin, and answering to that name from a theme portlin
+# owns was the only way to reach it. whiskermenu takes its icon from an
+# ordinary panel property instead, so nothing asks for that name any more and
+# the theme is now an index with no icons under it, inheriting the stock set
+# and changing nothing. Retiring it is its own change: IconThemeName is spelled
+# in four shipped files and folding that into a panel rework makes one commit
+# nobody can bisect.
 ICON_THEME = "Portlin"
 ICON_THEME_DIR = f"usr/share/icons/{ICON_THEME}"
-MENU_BUTTON_ICON = "org.xfce.panel.applicationsmenu"
 
-# portlin's own icon, by the name desktop entries use. In hicolor rather than
-# the theme above, because every icon theme falls back to hicolor and none
-# falls back to Portlin: an entry that says Icon=portlin has to resolve even
-# for someone who has since picked a different icon theme in Settings.
+# portlin's own icon, by the name desktop entries and the panel both ask for.
+# In hicolor because that is the icon spec's terminal fallback: every theme
+# ends there, so an entry saying Icon=portlin resolves under whichever icon
+# theme is in force, including one the user picks later in Settings.
+#
+# This one name is why portlin no longer ships an icon theme of its own. The
+# applications menu took its button icon from a name compiled into the plugin,
+# and answering to that name from a one-icon theme was the only way to reach
+# it; whiskermenu takes its icon from an ordinary panel property, which this
+# name is now written into.
 APP_ICON = "portlin"
 HICOLOR_APP_ICON = f"usr/share/icons/hicolor/scalable/apps/{APP_ICON}.svg"
 
-# Both copies of the mark, keyed by destination. Copies rather than symlinks
-# into portlin-runtime's logo.svg for the same reason the default backdrop is
-# a copy: 614 bytes each, against a dangling link the day anything moves.
+# The mark, by destination. A copy rather than a symlink into portlin-runtime's
+# logo.svg for the same reason the default backdrop is a copy: 614 bytes,
+# against a dangling link the day anything moves.
 MARK_ICONS = {
-    f"{ICON_THEME_DIR}/scalable/apps/{MENU_BUTTON_ICON}.svg": "logo.svg",
     HICOLOR_APP_ICON: "logo.svg",
 }
 
@@ -157,13 +162,15 @@ XDG_DEFAULTS = {
     f"xfce4/panel/genmon-{STATS_PLUGIN_ID}.rc": "genmon-stats.rc",
 }
 
-# plugin-1 in Debian trixie's shipped /etc/xdg/xfce4/panel/default.xml is
-# applicationsmenu, the first of eighteen plugins across its two panels. The
-# panel's button-title lives at that plugin's numeric xfconf path with no
-# name-based alternative -- there is no icon-theme-style trick for text -- so
-# the label depends on Debian never renumbering that plugin. verify-image.sh
-# asserts the layout still agrees, so a renumbering fails the build instead of
-# silently labelling some other button "Portlin".
+# Portlin ships the panel layout in full rather than layering properties onto
+# Debian's. It has to: plugin-ids is a single array property and xfconf has no
+# append, so adding the readout means restating the list, and restating the
+# list is owning the layout.
+#
+# Owning it removes more than it costs. The version label used to sit at the
+# numeric path of whichever plugin Debian made plugin-1, so it depended on
+# Debian never renumbering; now portlin assigns the ids and the dependency is
+# gone rather than merely checked.
 PANEL_DEFAULTS_FILE = f"{XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
 
 # Substituted into PANEL_DEFAULTS_FILE after it is read, so the button label

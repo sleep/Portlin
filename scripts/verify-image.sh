@@ -460,10 +460,6 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "the inherited icon theme is installed" \
         || fail "Adwaita is missing (the portlin theme inherits from nothing)"
 
-    test -f "$MNT/$ICON_THEME_DIR/scalable/apps/org.xfce.panel.applicationsmenu.svg" \
-        && pass "the mark is installed as the applications menu button" \
-        || fail "the menu button icon is missing (the menu keeps Xfce's own)"
-
     grep -q 'IconThemeName" type="string" value="Portlin"' \
         "$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" \
         && pass "the session asks for the portlin icon theme" \
@@ -484,27 +480,64 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "the greeter background is a wallpaper the image ships" \
         || fail "the greeter background $GREETER_BACKGROUND is not installed"
 
-    # The name the plugin asks for is compiled into it, not configurable. A
-    # Debian that renames its menu icon leaves every check above passing and
-    # every stick showing Xfce's own button. This is the one that notices.
-    PANEL_PLUGIN="$MNT/usr/lib/x86_64-linux-gnu/xfce4/panel/plugins/libapplicationsmenu.so"
-    if test -f "$PANEL_PLUGIN"; then
-        grep -qa "org.xfce.panel.applicationsmenu" "$PANEL_PLUGIN" \
-            && pass "the panel still asks for the icon name portlin provides" \
-            || fail "libapplicationsmenu asks for some other icon name now"
+    # Both plugins the shipped layout names. They arrive through the
+    # xfce4-goodies metapackage, whose expansion is not a promise across
+    # releases, and a layout naming a plugin the image did not install is a
+    # hole in the panel with nothing on screen to explain it.
+    PLUGIN_DIR="$MNT/usr/lib/x86_64-linux-gnu/xfce4/panel/plugins"
+    for PLUGIN in libgenmon libwhiskermenu; do
+        test -f "$PLUGIN_DIR/$PLUGIN.so" \
+            && pass "the $PLUGIN panel plugin is installed" \
+            || fail "$PLUGIN.so is missing (its slot in the panel draws nothing)"
+    done
+
+    # genmon has no xfconf backend: it reads these four keys out of an rc file
+    # named for its plugin id. A genmon that renamed one would leave the readout
+    # silently unconfigured -- default command, default period -- which looks
+    # like an empty panel item and reports nothing.
+    if test -f "$PLUGIN_DIR/libgenmon.so"; then
+        for KEY in Command UpdatePeriod UseLabel Font; do
+            grep -qa "$KEY" "$PLUGIN_DIR/libgenmon.so" \
+                && pass "genmon still reads $KEY from its rc file" \
+                || fail "genmon no longer knows the $KEY setting"
+        done
     fi
 
-    # The button's text label. There is no name-based indirection for text the
-    # way there is for the icon, so this is a direct xfconf property write
-    # keyed by plugin-1's numeric id -- the id Debian's own shipped
-    # /etc/xdg/xfce4/panel/default.xml assigns to applicationsmenu. The check
-    # right below this one is what notices if that ever stops being true.
+    # The panel layout, which portlin now ships in full. The ids are portlin's
+    # own, so the label no longer depends on Debian's numbering and there is no
+    # longer a check here for it.
     PANEL_DEFAULTS="$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
     PORTLIN_VERSION="$(sed -n 's/^PORTLIN_VERSION=//p' "$MNT/etc/portlin-release" 2>/dev/null)"
 
-    grep -q '"plugin-1" type="empty"' "$PANEL_DEFAULTS" 2>/dev/null \
-        && pass "the panel label targets plugin-1" \
-        || fail "no plugin-1 override in $PANEL_DEFAULTS (the button keeps no label)"
+    # configver, and its absence is the silent failure of this whole file.
+    # xfce4-panel/migrate reads it, and below the current version it loads
+    # Debian's default.xml and writes that into the user's own config, which
+    # beats every system default including this one. Without it the layout does
+    # not partly apply -- it is gone a second after the first login.
+    grep -q '"configver" type="int"' "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the panel layout declares configver" \
+        || fail "no configver in $PANEL_DEFAULTS (first login discards the layout)"
+
+    grep -q '"plugin-ids" type="array"' "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the panel layout places its plugins" \
+        || fail "no plugin-ids in $PANEL_DEFAULTS (the panel comes up empty)"
+
+    # The readout's command, resolved out of the rc file rather than repeated
+    # here, so the two cannot disagree. genmon reports a command it cannot run
+    # as an empty panel item and says nothing else about it.
+    GENMON_RC=""
+    for CANDIDATE in "$MNT"/etc/xdg/xdg-portlin/xfce4/panel/genmon-*.rc; do
+        test -f "$CANDIDATE" && GENMON_RC="$CANDIDATE"
+    done
+    if test -n "$GENMON_RC"; then
+        pass "the readout ships an rc file genmon will look for"
+        STATS_COMMAND="$(sed -n 's/^Command=//p' "$GENMON_RC")"
+        test -x "$MNT/${STATS_COMMAND#/}" \
+            && pass "the readout command is installed and executable" \
+            || fail "$STATS_COMMAND is not an executable in the image"
+    else
+        fail "no genmon rc file (the readout runs with genmon's own defaults)"
+    fi
 
     grep -qF "\"button-title\" type=\"string\" value=\"Portlin ${PORTLIN_VERSION:-unknown}\"" \
         "$PANEL_DEFAULTS" 2>/dev/null \
@@ -515,16 +548,9 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "the menu button is set to show its label" \
         || fail "show-button-title is not enabled (the label would be invisible)"
 
-    # Debian's own layout, not portlin's overlay: this is the fact the label
-    # above depends on. If a future Debian renumbers its default panel, this
-    # is the check that fails instead of the stick quietly mislabelling
-    # whatever plugin-1 has become.
-    DEBIAN_PANEL_DEFAULT="$MNT/etc/xdg/xfce4/panel/default.xml"
-    if test -f "$DEBIAN_PANEL_DEFAULT"; then
-        grep -q '"plugin-1" type="string" value="applicationsmenu"' "$DEBIAN_PANEL_DEFAULT" \
-            && pass "Debian's panel layout still assigns plugin-1 to applicationsmenu" \
-            || fail "plugin-1 is no longer applicationsmenu in Debian's default panel layout"
-    fi
+    grep -q '"button-icon" type="string" value="portlin"' "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the menu button asks for the portlin mark by name" \
+        || fail "the menu button names no icon (it keeps the plugin's own)"
 
     # Icon=portlin in the About entry resolves here. In hicolor rather than in
     # the portlin theme, because every icon theme falls back to hicolor and
