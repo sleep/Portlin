@@ -32,7 +32,20 @@ KEYRING_PATH = "/usr/share/keyrings/portlin-archive-keyring.gpg"
 # in one apt transaction that has to resolve.
 PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install"]
+
+# Python modules the tools import from /usr/lib/portlin rather than carrying
+# a copy of. catalog.py is here rather than inside portlin-install because
+# portlin-software reads it too, and a copy in each would be the copy that
+# drifts.
+SHARED_MODULES = ["devices.py", "catalog.py"]
+
+# The polkit action the Software app elevates through. It ships in
+# portlin-runtime, beside the program its exec.path annotation names, so the
+# two cannot end up in different packages naming different paths.
+POLKIT_ACTIONS = {
+    "org.portlin.install.policy": "usr/share/polkit-1/actions/org.portlin.install.policy",
+}
 
 # The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
 # a --minimal, headless stick installs, and putting a GTK program there would
@@ -318,13 +331,24 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     "python3",
                     "cloud-guest-utils",
                     "cryptsetup-bin",
+                    # portlin-install's own two: every download it makes is a
+                    # curl, and the driver scan reads lspci. Neither shows in
+                    # the file list, and without either the tool starts, lists
+                    # the catalog, and then fails at the first useful thing.
+                    "curl",
+                    "pciutils",
                 ],
                 recommends=["portlin-desktop"],
             ),
-            "usr/lib/portlin/devices.py": (RESOURCES / "runtime" / "devices.py").read_text(),
         }
+        for module in SHARED_MODULES:
+            files[f"usr/lib/portlin/{module}"] = (
+                RESOURCES / "runtime" / module
+            ).read_text()
         for tool in TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
+        for source, destination in POLKIT_ACTIONS.items():
+            files[destination] = (RESOURCES / "runtime" / source).read_text()
     elif package == "portlin-desktop":
         files = {
             "DEBIAN/control": render_control(

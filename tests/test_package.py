@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -85,12 +86,13 @@ def test_keyring_package_ships_the_key_and_source_once_a_real_key_lands(
     }
 
 
-def test_runtime_ships_the_three_tools_as_executables():
+def test_runtime_ships_every_tool_as_an_executable():
     executables = package.executable_paths("portlin-runtime")
     assert executables == {
         "usr/bin/portlin-info",
         "usr/bin/portlin-expand",
         "usr/bin/portlin-encrypt",
+        "usr/bin/portlin-install",
     }
 
 
@@ -147,6 +149,38 @@ def test_runtime_ships_the_shared_device_lookup_module():
     node_body = source[source.index("def sysfs_node") : source.index("def backing_partition")]
     assert "st_rdev" in node_body
     assert "/sys/class/block" not in node_body
+
+
+def test_runtime_ships_the_catalog_beside_the_device_module():
+    # Both shared modules land in the same directory the tools put on
+    # sys.path, and neither is executable: they are imported, not run.
+    files = package.text_files("portlin-runtime")
+    executables = package.executable_paths("portlin-runtime")
+    for module in package.SHARED_MODULES:
+        assert f"usr/lib/portlin/{module}" in files
+        assert f"usr/lib/portlin/{module}" not in executables
+
+
+def test_runtime_ships_the_polkit_action_beside_the_program_it_names():
+    # The action grants the right to run one path as root. If the file said
+    # one path and the package installed the program at another, pkexec would
+    # refuse every request with nothing on screen to say why.
+    files = package.text_files("portlin-runtime")
+    destination = package.POLKIT_ACTIONS["org.portlin.install.policy"]
+    assert destination in files
+    named = re.search(r"exec\.path\">([^<]+)<", files[destination]).group(1)
+    assert named.lstrip("/") in files
+    assert named.lstrip("/") in package.executable_paths("portlin-runtime")
+
+
+def test_runtime_depends_on_what_the_installer_shells_out_to():
+    # Neither is visible in the file list: portlin-install downloads with
+    # curl and reads the hardware with lspci, and without them it starts,
+    # lists the catalog, and fails at the first thing anyone wanted.
+    control = package.text_files("portlin-runtime")["DEBIAN/control"]
+    depends = [d.strip() for d in control.split("Depends: ")[1].splitlines()[0].split(",")]
+    assert "curl" in depends
+    assert "pciutils" in depends
 
 
 def test_info_tool_is_shipped_and_executable():

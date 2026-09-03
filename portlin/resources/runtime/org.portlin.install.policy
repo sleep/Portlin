@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+Part of portlin. Lets the Software app run portlin-install as root.
+
+The exec.path annotation is what makes this narrow: it names one program,
+so the right this grants is to run that program as root and nothing else.
+auth_admin_keep, rather than auth_admin, so installing three things in a row
+asks for the password once instead of three times.
+-->
+<policyconfig>
+  <vendor>Portlin</vendor>
+  <vendor_url>https://github.com/sleep/Portlin</vendor_url>
+  <action id="org.portlin.install">
+    <description>Install or remove software on this stick</description>
+    <message>Authentication is required to install or remove software</message>
+    <icon_name>portlin</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/portlin-install</annotate>
+  </action>
+</policyconfig>
