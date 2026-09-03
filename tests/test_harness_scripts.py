@@ -16,6 +16,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 UPGRADE = SCRIPTS / "test-package-upgrade.py"
 SOFTWARE = SCRIPTS / "test-software.py"
 STASH = SCRIPTS / "test-stash-passphrase.py"
+EXPAND = SCRIPTS / "test-expand.py"
 
 
 class TestUpgradeHarnessStartsFromNothing:
@@ -126,3 +127,55 @@ class TestStashHarnessOwnsNothingItDidNotMake:
         source = STASH.read_text()
         assert "rmtree" in source
         assert ".parent.rmdir()" not in source
+
+
+class TestExpandHarnessLoadsTheWizardAsWritten:
+    """The point of this harness is that it runs the wizard's real code.
+
+    It execs the expansion functions out of the shipped file, so anything
+    those functions reference has to be in the namespace too. Hand-listing
+    the names goes stale in silence: the expansion path grew a reference to
+    the passphrase stash, and the harness then failed with a NameError
+    inside code that is correct on a real stick.
+    """
+
+    def test_it_executes_the_wizards_own_constants(self):
+        source = EXPAND.read_text()
+        body = source[source.index("def wizard_functions"):source.index("def run_packaged_expand")]
+        assert 'source[:source.index("\\ndef ")]' in body
+
+    def test_every_name_the_expansion_path_uses_resolves(self):
+        # The check the harness cannot make about itself until it is too
+        # late: take the same slice it takes, and require every global that
+        # slice reads to be either a builtin, something the harness seeds, or
+        # something the wizard's own header defines.
+        import ast
+        import builtins
+
+        wizard = (
+            Path(__file__).resolve().parent.parent
+            / "portlin" / "resources" / "firstboot" / "portlin-firstboot"
+        )
+        source = wizard.read_text()
+        header = source[: source.index("\ndef ")]
+        namespace: dict = {}
+        exec(compile(header, str(wizard), "exec"), namespace)
+        seeded = {"Path", "re", "os", "subprocess", "log", "ask_password", "message", "run"}
+        known = set(namespace) | seeded | set(dir(builtins))
+
+        block = source[source.index("def _resize_mapping"):source.index("def step_autologin")]
+        tree = ast.parse(block)
+        bound = {node.name for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        bound |= {node.id for node in ast.walk(tree)
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+        bound |= {argument.arg for node in ast.walk(tree)
+                  if isinstance(node, ast.arguments)
+                  for argument in node.posonlyargs + node.args + node.kwonlyargs}
+        bound |= {node.name for node in ast.walk(tree)
+                  if isinstance(node, ast.ExceptHandler) and node.name}
+        loaded = {node.id for node in ast.walk(tree)
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+
+        missing = sorted(loaded - bound - known)
+        assert not missing, f"the expansion path reads names nothing defines: {missing}"

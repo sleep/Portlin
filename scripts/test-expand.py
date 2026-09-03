@@ -73,10 +73,17 @@ def wizard_functions() -> dict:
     drift from what actually runs on the stick.
     """
     source = WIZARD.read_text()
-    namespace: dict = {
+    namespace: dict = {}
+    # Everything above the first def: the wizard's imports, its constants and
+    # its Cancelled exception. Executed rather than hand-listed, because a
+    # hand-written list is a list that goes stale silently -- the expansion
+    # path grew a reference to STASH, and this harness then failed with a
+    # NameError inside code that is correct on a real stick.
+    exec(source[:source.index("\ndef ")], namespace)
+    namespace.update({
         "Path": pathlib.Path, "re": re, "os": os, "subprocess": subprocess,
         "log": lambda message: print(f"    wizard: {message}", flush=True),
-    }
+    })
     exec(source[source.index("def _root_devices"):source.index("def step_expand")], namespace)
     exec(source[source.index("def _unused_inside_partition"):source.index("def step_expand")], namespace)
     exec(source[source.index("def _resize_mapping"):source.index("def step_autologin")], namespace)
