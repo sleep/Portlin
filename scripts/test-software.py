@@ -375,13 +375,18 @@ def check_upgrade_asks_before_removing() -> None:
     if run([INSTALLER, "install", DEBIAN_ENTRY]).returncode != 0:
         skip("could not install the stand-in package for the upgrade check")
         return
-    simulated = run(["apt-get", "--simulate", "purge", "-y", DEBIAN_ENTRY])
     installer = sys.modules.get("portlin_install") or load(Path(INSTALLER), "portlin_install")
-    removals = installer.parse_removals(simulated.stdout)
-    if DEBIAN_ENTRY in removals:
-        ok("apt's own simulation output is read for what it would remove")
-    else:
-        bad(f"could not read a removal out of apt's simulation: {simulated.stdout[:300]}")
+    # Both words apt uses, because which one it prints depends on the verb
+    # and an upgrade may reach for either.
+    for verb, token in (("remove", "Remv"), ("purge", "Purg")):
+        simulated = run(["apt-get", "--simulate", verb, "-y", DEBIAN_ENTRY])
+        if DEBIAN_ENTRY in installer.parse_removals(simulated.stdout):
+            ok(f"apt's {token} lines are read as a removal")
+        else:
+            bad(
+                f"could not read a {token} out of apt's simulation:\n"
+                f"{simulated.stdout.strip()[-500:]}"
+            )
     run([INSTALLER, "remove", DEBIAN_ENTRY])
 
     result = run([INSTALLER, "upgrade"])

@@ -602,8 +602,11 @@ def parse_removals(text: str) -> list[str]:
     """
     removed = []
     for line in text.splitlines():
-        # `apt-get --simulate` prints one line per action: Remv <name> [ver].
-        if line.startswith("Remv "):
+        # apt's simulation prints one line per action, in tokens it does not
+        # translate: Remv for a removal, Purg for one that takes the
+        # configuration too. The human-readable block above them is
+        # translated and wrapped, so it is the wrong thing to read.
+        if line.startswith(("Remv ", "Purg ")):
             name = line.split()[1]
             if name not in removed:
                 removed.append(name)

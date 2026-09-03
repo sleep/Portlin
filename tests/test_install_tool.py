@@ -798,3 +798,25 @@ class TestUpgradeAsksBeforeRemovingAnything:
         # second wait for an answer already given.
         assert plans[-1] == argvs(tool.plan_upgrade(ctx, refresh=False))
         assert plans[-1].count(tool.apt_argv("update")) == 0
+
+
+class TestBothWordsAptUsesForARemoval:
+    """apt prints Remv for a removal and Purg for one that takes the
+    configuration too, and which it prints depends on the verb. Reading only
+    one of them is a safety check that quietly never fires."""
+
+    def test_purge_lines_count_as_removals(self, tool):
+        assert tool.parse_removals("Purg tmux [3.5a-3]\n") == ["tmux"]
+
+    def test_remove_lines_count_as_removals(self, tool):
+        assert tool.parse_removals("Remv tmux [3.5a-3]\n") == ["tmux"]
+
+    def test_the_translated_summary_is_not_what_is_read(self, tool):
+        # The human block is translated and wrapped; the tokens above are
+        # neither. Reading the block would break on a non-English stick.
+        block = (
+            "The following packages will be REMOVED:\n"
+            "  tmux libevent-core-2.1-7t64\n"
+            "0 upgraded, 0 newly installed, 2 to remove.\n"
+        )
+        assert tool.parse_removals(block) == []
