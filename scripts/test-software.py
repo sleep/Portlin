@@ -209,6 +209,94 @@ def check_install_and_remove(entry_id: str, *, expect_paths=()) -> None:
             bad(f"removing {entry_id} left {path} behind")
 
 
+def check_the_other_install_kinds() -> None:
+    """Drive the downloaded-package and tarball paths against real files.
+
+    Every catalog entry of these kinds is a hundred megabytes or more from
+    somebody's CDN, which is too slow and too flaky to install on every run,
+    so their executors would otherwise ship having only ever been planned.
+    Two entries built here, served over file:// through the same curl the
+    real ones use, exercise the whole path: download, check, install or
+    unpack, write a menu entry, and take it all away again.
+    """
+    installer = load(Path(INSTALLER), "portlin_install")
+    catalog = sys.modules["catalog"]
+    ctx = installer.load_context()
+
+    # A .deb with nothing in it but a name, built the way dpkg builds one.
+    root = Path("/tmp/harness-deb/portlin-harness-probe")
+    (root / "DEBIAN").mkdir(parents=True, exist_ok=True)
+    (root / "DEBIAN/control").write_text(
+        "Package: portlin-harness-probe\n"
+        "Version: 1\n"
+        "Section: utils\n"
+        "Priority: optional\n"
+        "Architecture: all\n"
+        "Maintainer: The portlin authors <portlin@localhost>\n"
+        "Description: Stand-in for a vendor .deb in portlin's harness\n"
+    )
+    if run(["dpkg-deb", "--build", str(root), "/tmp/probe.deb"]).returncode != 0:
+        bad("could not build the stand-in .deb")
+        return
+    deb_entry = catalog.Entry(
+        id="harness-deb",
+        name="Harness probe",
+        summary="A stand-in for a vendor .deb",
+        category="System tools",
+        kind="deb-url",
+        url="file:///tmp/probe.deb",
+        check=catalog.dpkg("portlin-harness-probe"),
+        homepage="https://example.invalid/",
+    )
+    result = installer.run_plan(installer.plan_install(deb_entry, ctx))
+    if result.ok and "portlin-harness-probe" in installer.dpkg_installed():
+        ok("a downloaded .deb installs through apt")
+    else:
+        bad(f"the .deb path failed: {result.failure}")
+    if Path(f"{ctx.download_dir}/harness-deb.deb").exists():
+        bad("the .deb path left its download behind")
+    installer.run_plan(installer.plan_remove(deb_entry, ctx, None))
+    if "portlin-harness-probe" in installer.dpkg_installed():
+        bad("the .deb path did not remove what it installed")
+    else:
+        ok("a downloaded .deb removes cleanly")
+
+    # A tarball shaped like a vendor's: one top-level directory, stripped.
+    payload = Path("/tmp/harness-tar/harness-app")
+    payload.mkdir(parents=True, exist_ok=True)
+    (payload / "run-me").write_text("#!/bin/sh\necho harness\n")
+    (payload / "run-me").chmod(0o755)
+    if run(["tar", "-cJf", "/tmp/probe.tar.xz", "-C", "/tmp/harness-tar", "harness-app"]).returncode:
+        bad("could not build the stand-in tarball")
+        return
+    tar_entry = catalog.Entry(
+        id="harness-tar",
+        name="Harness tarball",
+        summary="A stand-in for a vendor tarball",
+        category="System tools",
+        kind="tarball-opt",
+        url="file:///tmp/probe.tar.xz",
+        opt_dir="/opt/harness-app",
+        launcher="run-me",
+        check=catalog.path("/opt/harness-app/run-me"),
+        homepage="https://example.invalid/",
+    )
+    result = installer.run_plan(installer.plan_install(tar_entry, ctx))
+    launcher = Path("/opt/harness-app/run-me")
+    menu = Path("/usr/share/applications/portlin-harness-tar.desktop")
+    if result.ok and launcher.exists() and menu.exists():
+        ok("a tarball unpacks into /opt with a menu entry")
+    else:
+        bad(f"the tarball path failed: {result.failure}")
+    if menu.exists() and "Exec=/opt/harness-app/run-me" not in menu.read_text():
+        bad("the generated menu entry does not run the program it unpacked")
+    installer.run_plan(installer.plan_remove(tar_entry, ctx, None))
+    if launcher.exists() or menu.exists():
+        bad("the tarball path left files behind")
+    else:
+        ok("a tarball removes its directory and its menu entry")
+
+
 def check_privilege_refusals() -> None:
     """Both refusals, against a real unprivileged account."""
     run(["useradd", "-m", "probe"])
@@ -457,6 +545,7 @@ def main() -> int:
             "/etc/apt/sources.list.d/tailscale.list",
         ),
     )
+    check_the_other_install_kinds()
     check_privilege_refusals()
     check_the_scan()
     check_polkit_reads_the_action()

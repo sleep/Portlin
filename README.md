@@ -106,7 +106,11 @@ same verbs work from a terminal:
 portlin-install list                 # the catalog, and what is already installed
 portlin-install install mullvad      # or remove, or status
 portlin-install scan                 # what this machine needs
+portlin-install upgrade              # what Update everything runs
 ```
+
+**Update everything** in the window's header is that last one: `apt full-upgrade` with its
+output in the log pane, for the system and everything installed from here alike.
 
 Entries that need Debian's `non-free` component get it through a drop-in under
 `/etc/apt/sources.list.d/`, so sticks written before that component was enabled by default are
