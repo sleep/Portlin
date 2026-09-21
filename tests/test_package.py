@@ -93,6 +93,7 @@ def test_runtime_ships_every_tool_as_an_executable():
         "usr/bin/portlin-expand",
         "usr/bin/portlin-encrypt",
         "usr/bin/portlin-install",
+        "usr/bin/portlin-migrate",
     }
 
 
@@ -738,3 +739,21 @@ def test_runtime_depends_on_what_the_migration_tool_shells_out_to():
     depends = next(line for line in control.splitlines() if line.startswith("Depends:"))
     assert "rsync" in depends
     assert "zstd" in depends
+
+
+def test_runtime_ships_the_migration_tool_and_its_module():
+    files = package.text_files("portlin-runtime")
+    assert "usr/bin/portlin-migrate" in files
+    assert "usr/lib/portlin/migrate.py" in files
+    assert "usr/bin/portlin-migrate" in package.executable_paths("portlin-runtime")
+    assert "usr/lib/portlin/migrate.py" not in package.executable_paths("portlin-runtime")
+
+
+def test_runtime_ships_the_migrate_polkit_action_beside_the_program_it_names():
+    files = package.text_files("portlin-runtime")
+    policy = files["usr/share/polkit-1/actions/org.portlin.migrate.policy"]
+    granted = re.search(r'exec\.path">([^<]+)<', policy).group(1)
+    assert granted == "/usr/bin/portlin-migrate"
+    assert granted.lstrip("/") in files
+    assert 'id="org.portlin.migrate"' in policy
+    assert "auth_admin_keep" in policy

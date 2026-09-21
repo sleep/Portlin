@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+Part of portlin. Lets the Migrate window run portlin-migrate as root.
+
+Same shape as org.portlin.install: the exec.path annotation names one
+program, so the right granted is to run that program and nothing else.
+auth_admin_keep, because a migration is a candidates call, an inventory
+call and an apply call in a row, and three password dialogs for one job
+teaches people to type the password without reading the dialog.
+-->
+<policyconfig>
+  <vendor>Portlin</vendor>
+  <vendor_url>https://github.com/sleep/Portlin</vendor_url>
+  <action id="org.portlin.migrate">
+    <description>Bring files and settings over from another portlin</description>
+    <message>Authentication is required to read another portlin drive and copy from it</message>
+    <icon_name>portlin</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/portlin-migrate</annotate>
+  </action>
+</policyconfig>

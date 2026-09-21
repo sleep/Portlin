@@ -33,19 +33,21 @@ KEYRING_PATH = "/usr/share/keyrings/portlin-archive-keyring.gpg"
 # in one apt transaction that has to resolve.
 PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate"]
 
 # Python modules the tools import from /usr/lib/portlin rather than carrying
 # a copy of. catalog.py is here rather than inside portlin-install because
 # portlin-software reads it too, and a copy in each would be the copy that
-# drifts.
-SHARED_MODULES = ["devices.py", "catalog.py", "hostinfo.py"]
+# drifts. migrate.py is shared because the window reads inventories through the
+# tool but the tool and the tests both import the module.
+SHARED_MODULES = ["devices.py", "catalog.py", "hostinfo.py", "migrate.py"]
 
 # The polkit action the Software app elevates through. It ships in
 # portlin-runtime, beside the program its exec.path annotation names, so the
 # two cannot end up in different packages naming different paths.
 POLKIT_ACTIONS = {
     "org.portlin.install.policy": "usr/share/polkit-1/actions/org.portlin.install.policy",
+    "org.portlin.migrate.policy": "usr/share/polkit-1/actions/org.portlin.migrate.policy",
 }
 
 # The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
