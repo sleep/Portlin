@@ -821,3 +821,19 @@ class TestHostileSourceAtRun:
         shells.write_text("# /etc/shells: valid login shells\n/bin/sh\n/bin/bash\n\n/usr/bin/zsh\n")
         assert tool.local_shells(shells) == {"/bin/sh", "/bin/bash", "/usr/bin/zsh"}
         assert tool.local_shells(tmp_path / "missing") == set()
+
+    def test_a_move_aside_whose_backup_side_leads_outside_the_roots_is_refused(self, tool, migrate, tmp_path):
+        home = tmp_path / "home/alice"
+        home.mkdir(parents=True)
+        (home / "notes.txt").write_text("mine")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (home / ".portlin-migrate-backup").symlink_to(outside)
+        backup = home / ".portlin-migrate-backup/stamp/notes.txt"
+        step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(home / "notes.txt"), str(backup)),))
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=(home,),
+                                execute=lambda *a: pytest.fail("the step must not run"))
+        assert not result.ok and "notes.txt" in result.failure
+        assert (home / "notes.txt").read_text() == "mine"
+        # Nothing was created on the far side of the link either.
+        assert list(outside.iterdir()) == []

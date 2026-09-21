@@ -253,6 +253,8 @@ LOCALE_RE = re.compile(r"[A-Za-z0-9_.@-]+")
 KEYBOARD_RE = re.compile(r"[a-z0-9_,+-]+")
 TIMEZONE_RE = re.compile(r"[A-Za-z0-9_+/-]+")
 THEME_NAME_RE = re.compile(r"[A-Za-z0-9 ._-]+")
+# Files under /usr/share/zoneinfo that are not zones.
+NOT_ZONES = ("localtime", "posixrules")
 
 
 def valid_identity_value(name: str, value: str) -> bool:
@@ -266,8 +268,15 @@ def valid_identity_value(name: str, value: str) -> bool:
         return bool(KEYBOARD_RE.fullmatch(value))
     if name == "timezone":
         # The value becomes a path under /usr/share/zoneinfo, so it must not
-        # be able to climb back out of it.
-        return bool(TIMEZONE_RE.fullmatch(value)) and ".." not in value.split("/")
+        # climb back out of it, and it must name a zone rather than the two
+        # files there that are not zones.
+        parts = value.split("/")
+        return (
+            bool(TIMEZONE_RE.fullmatch(value))
+            and ".." not in parts
+            and "" not in parts
+            and value not in NOT_ZONES
+        )
     return False
 
 
@@ -718,7 +727,10 @@ ALLOWED_SYSTEM_PATHS = (CONNECTIONS, BLUETOOTH, *CUPS_PATHS)
 
 
 def _malformed(path: str) -> bool:
-    """A relative path that names one thing and cannot climb or be an option."""
+    """A relative path that names one thing, cannot climb or be an option,
+    and stays out of the backup tree: that tree is where replaced files
+    go, so a source that could plant something there could steer every
+    rename that follows."""
     parts = path.split("/")
     return (
         not path
@@ -726,6 +738,7 @@ def _malformed(path: str) -> bool:
         or path.startswith("-")
         or ".." in parts
         or "" in parts
+        or BACKUP_DIRNAME in parts
     )
 
 
@@ -774,11 +787,33 @@ def _confined(destination: str, target: Target) -> None:
     unsafe_paths keeps the path itself honest; this keeps the filesystem
     honest, where a symlink left at the destination by a previous run or by
     anyone with the account would otherwise have rsync or tar write on the
-    far side of it.
+    far side of it. A home entry may resolve anywhere inside the home. The
+    fixed system paths are never legitimately links at all, and a link
+    inside /etc is exactly what would turn a printer copy into a write to
+    sudoers.d, so for those nothing below the root may be a link.
     """
     root = confinement_root(destination, target)
     if root is None or not within(target.root / destination, root):
         raise ValueError(f"refusing to touch {destination}: it leads outside {root or 'the home'}")
+    if not is_home(destination, target.home):
+        real = os.path.realpath(target.root / destination)
+        if real != os.path.join(os.path.realpath(target.root), os.path.normpath(destination)):
+            raise ValueError(f"refusing to touch {destination}: a symlink is on the way to it")
+
+
+def _backup_confined(destination: str, backup: Path, target: Target) -> None:
+    """Raise unless the backup path resolves where replaced files belong:
+    the home for a home entry, /var/backups for a system path. A backup
+    tree planted as a symlink would otherwise carry every rename and
+    rsync's --backup-dir out through it."""
+    if is_home(destination, target.home):
+        root = target.root / target.home
+    else:
+        # /var/backups rather than the portlin-migrate directory under it,
+        # which is the entry that could itself have been planted.
+        root = target.root / Path(SYSTEM_BACKUP_ROOT).parent
+    if not within(backup, root):
+        raise ValueError(f"refusing to back up into {backup}: it leads outside {root}")
 
 
 def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: Target, stamp: str) -> list[Step]:
@@ -791,6 +826,8 @@ def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: 
         for position, path in enumerate(item.paths):
             destination = target_path(path, inventory.home, target.home)
             _confined(destination, target)
+            backup = backup_dir(target, destination, stamp)
+            _backup_confined(destination, backup, target)
             chown = (target.uid, target.gid) if is_home(destination, target.home) else None
             steps.append(
                 Step(
@@ -798,7 +835,7 @@ def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: 
                     argv=rsync_argv(
                         source_root / path,
                         target.root / destination,
-                        backup_dir=backup_dir(target, destination, stamp),
+                        backup_dir=backup,
                         chown=chown,
                     ),
                     progress="rsync",
@@ -941,6 +978,7 @@ def collisions(members: list[str], source_home: str, target: Target, stamp: str)
             if root is None or not entry_within(existing, root):
                 raise ValueError(f"refusing to touch {destination}: it leads outside {root or 'the home'}")
             backup = backup_dir(target, destination, stamp)
+            _backup_confined(destination, backup, target)
             moves.append((str(existing), str(backup)))
     return moves
 
@@ -979,6 +1017,8 @@ def plan_archive(inventory: Inventory, ids: list[str], archive: Path, listing: s
     bad = unsafe_members(listing, paths)
     if bad:
         raise ValueError("refusing to touch " + ", ".join(bad))
+    for path in paths:
+        _confined(target_path(path, inventory.home, target.home), target)
     steps = [
         Step(
             "Restoring from the archive",

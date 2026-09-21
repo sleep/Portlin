@@ -381,9 +381,17 @@ def move_aside(existing: str, backup: str, roots: tuple[Path, ...]) -> None:
     renamed sits inside one of roots once every symlink is resolved. The
     planner checks the same thing; this is the last line of defence should
     the filesystem have changed since, or a plan arrive from elsewhere."""
+    allowed = ", ".join(map(str, roots)) or "every allowed root"
     if not any(entry_within(existing, root) for root in roots):
-        log(f"refused to move aside {existing}: outside {', '.join(map(str, roots)) or 'every allowed root'}")
+        log(f"refused to move aside {existing}: outside {allowed}")
         raise OSError(f"refusing to touch {existing}: it leads outside the home and the system trees")
+    # The backup side too, and before the mkdir: a backup tree that is a
+    # symlink would otherwise have the directories made, and the file
+    # renamed, on its far side. realpath resolves what exists and keeps
+    # the rest, so the check reads the same before the directories exist.
+    if not any(entry_within(backup, root) for root in roots):
+        log(f"refused to move aside {existing}: its backup {backup} is outside {allowed}")
+        raise OSError(f"refusing to back up {existing}: {backup} leads outside the home and the system trees")
     Path(backup).parent.mkdir(parents=True, exist_ok=True)
     os.rename(existing, backup)
     log(f"moved aside {existing} -> {backup}")

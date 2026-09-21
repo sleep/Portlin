@@ -1191,3 +1191,96 @@ class TestHostileSource:
     # T3: the hash must not leak through a logged or printed Account.
     def test_the_password_hash_is_kept_out_of_the_accounts_repr(self, migrate):
         assert "$y$" not in repr(self._account(migrate))
+
+    # Round two: the system-path half of the destination check, the archive
+    # planner's destinations, and the backup side of every rename.
+    def test_plan_stick_refuses_a_system_destination_with_a_symlink_on_the_way(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        make_source(source)
+        (source / "etc/cups/ppd").mkdir(parents=True)
+        (source / "etc/cups/ppd/printer.ppd").write_text("*PPD\n")
+        inventory = migrate.build_inventory(source)
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/etc/cups").mkdir(parents=True)
+        (tmp_path / "t/etc/sudoers.d").mkdir(parents=True)
+        # Still under /etc, so a check that only asks for the /etc tree
+        # would let rsync write into sudoers.d through it.
+        (tmp_path / "t/etc/cups/ppd").symlink_to(tmp_path / "t/etc/sudoers.d")
+        with pytest.raises(ValueError, match="etc/cups/ppd"):
+            migrate.plan_stick(inventory, ["extras.printers"], source, target, STAMP)
+        (tmp_path / "t/etc/cups/ppd").unlink()
+        (tmp_path / "t/etc/cups/ppd").mkdir()
+        assert migrate.plan_stick(inventory, ["extras.printers"], source, target, STAMP)
+
+    def test_plan_archive_refuses_a_destination_symlinked_out_of_the_home(self, migrate, tmp_path):
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/etc/sudoers.d").mkdir(parents=True)
+        (tmp_path / "t/home/alice").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Documents").symlink_to(tmp_path / "t/etc/sudoers.d")
+        items = [migrate.Item("docs", "home.files", "Documents", paths=("home/olduser/Documents",))]
+        # Nothing at the member's own name, so collisions alone has nothing
+        # to refuse; tar would still write through the link.
+        listing = "home/olduser/Documents/\nhome/olduser/Documents/evil\n"
+        with pytest.raises(ValueError, match="Documents"):
+            migrate.plan_archive(self._inventory(migrate, items), ["docs"], tmp_path / "a.tar.zst", listing, target, STAMP)
+
+    def test_a_path_naming_the_backup_tree_is_unsafe(self, migrate):
+        items = [
+            migrate.Item("bad1", "home.settings", "backup", paths=(f"home/olduser/{migrate.BACKUP_DIRNAME}",)),
+            migrate.Item("bad2", "home.files", "nested", paths=(f"home/olduser/Documents/{migrate.BACKUP_DIRNAME}/x",)),
+            migrate.Item("good", "home.files", "docs", paths=("home/olduser/Documents",)),
+        ]
+        bad = migrate.unsafe_paths(self._inventory(migrate, items), ["bad1", "bad2", "good"])
+        assert bad == [f"home/olduser/{migrate.BACKUP_DIRNAME}", f"home/olduser/Documents/{migrate.BACKUP_DIRNAME}/x"]
+        listing = f"home/olduser/Documents/{migrate.BACKUP_DIRNAME}/x\n"
+        assert migrate.unsafe_members(listing, ["home/olduser/Documents"]) == [
+            f"home/olduser/Documents/{migrate.BACKUP_DIRNAME}/x",
+        ]
+
+    def test_plan_stick_refuses_a_backup_tree_symlinked_out_of_the_home(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        populate_home(make_source(source))
+        inventory = migrate.build_inventory(source)
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/home/alice").mkdir(parents=True)
+        (tmp_path / "t/etc").mkdir()
+        (tmp_path / "t/home/alice" / migrate.BACKUP_DIRNAME).symlink_to(tmp_path / "t/etc")
+        with pytest.raises(ValueError, match=migrate.BACKUP_DIRNAME):
+            migrate.plan_stick(inventory, ["home.files.Documents"], source, target, STAMP)
+
+    def test_plan_stick_refuses_a_system_backup_tree_symlinked_elsewhere(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        make_source(source)
+        connections = source / migrate.CONNECTIONS
+        connections.mkdir(parents=True)
+        (connections / "cafe.nmconnection").write_text("[wifi]\n")
+        inventory = migrate.build_inventory(source)
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/var/backups").mkdir(parents=True)
+        (tmp_path / "t/home/alice").mkdir(parents=True)
+        (tmp_path / "t/var/backups/portlin-migrate").symlink_to(tmp_path / "t/home/alice")
+        with pytest.raises(ValueError, match="portlin-migrate"):
+            migrate.plan_stick(inventory, ["network"], source, target, STAMP)
+
+    def test_ordinary_links_in_the_home_still_copy_and_collide(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        populate_home(make_source(source))
+        inventory = migrate.build_inventory(source)
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/home/alice/Documents").mkdir(parents=True)
+        (tmp_path / "t/home/alice/link-to-docs").symlink_to("Documents")
+        (tmp_path / "t/home/alice/.bashrc").write_text("# mine\n")
+        ids = ["home.files.link-to-docs", "home.settings..bashrc"]
+        steps = migrate.plan_stick(inventory, ids, source, target, STAMP)
+        assert [s.argv[-1] for s in steps] == [
+            str(tmp_path / "t/home/alice/link-to-docs"), str(tmp_path / "t/home/alice/.bashrc"),
+        ]
+        members = ["home/olduser/link-to-docs", "home/olduser/.bashrc"]
+        assert [e for e, _ in migrate.collisions(members, "home/olduser", target, STAMP)] == [
+            str(tmp_path / "t/home/alice/link-to-docs"), str(tmp_path / "t/home/alice/.bashrc"),
+        ]
+
+    @pytest.mark.parametrize("value", ["/Europe/London", "Europe/London/", "localtime", "posixrules", "Europe//London"])
+    def test_a_timezone_that_is_not_a_zone_name_is_refused(self, migrate, value):
+        steps = migrate.identity_steps(migrate.Identity(timezone=value), ["identity.timezone"], hosts_text="")
+        assert len(steps) == 1 and steps[0].warn and steps[0].write == ()
