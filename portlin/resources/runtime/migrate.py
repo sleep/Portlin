@@ -23,6 +23,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from catalog import ENTRIES, expand_home, parse_dpkg_status
 from devices import UNCLAIMED_ADVICE
@@ -61,21 +62,55 @@ def lsblk_argv() -> list[str]:
 
 
 def _partition_number(child: dict) -> int | None:
-    """child["partn"] as an int. Some util-linux builds render PARTN as a
-    JSON string ("4") rather than a number; a string key there would never
-    match the int lookups below, and every candidate would be silently
-    dropped."""
+    """child["partn"] as an int. PARTN can come back as either a JSON string
+    or a number depending on what printed it, and the parser should not
+    depend on which: a string key here would never match the int lookups
+    below, and every candidate would be silently dropped."""
     try:
         return int(child.get("partn"))
     except (TypeError, ValueError):
         return None
 
 
-def parse_lsblk(text: str, running_disk: str) -> list[Candidate]:
+def parse_blkid_export(text: str) -> dict[str, str]:
+    """blkid -o export's KEY=value lines, as a dict."""
+    pairs = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            pairs[key] = value
+    return pairs
+
+
+def _probed(child: dict, probe: Callable[[str], dict[str, str]]) -> dict:
+    """child with a missing fstype or label filled in from blkid.
+
+    lsblk reads both from the udev database, which nothing populates in a
+    freshly started container and which can lag behind a drive that was just
+    plugged into real hardware. blkid probes the device itself rather than
+    reading that cache, so it is the fallback for whichever of the two
+    lsblk left blank -- never for a value lsblk already gave.
+    """
+    if child.get("fstype") and child.get("label"):
+        return child
+    info = probe(child["path"])
+    filled = dict(child)
+    if not filled.get("fstype"):
+        filled["fstype"] = info.get("TYPE") or filled.get("fstype")
+    if not filled.get("label"):
+        filled["label"] = info.get("LABEL") or filled.get("label")
+    return filled
+
+
+def parse_lsblk(
+    text: str, running_disk: str, *, probe: Callable[[str], dict[str, str]] | None = None
+) -> list[Candidate]:
     """Every portlin stick in lsblk's output, other than the one running.
 
     Excluded by disk rather than by partition, so the running stick's own
-    /boot is never offered as somewhere to migrate from.
+    /boot is never offered as somewhere to migrate from. ``probe`` is asked
+    about a partition only when lsblk left its fstype or label blank; see
+    ``_probed`` for why that happens at all.
     """
     try:
         disks = json.loads(text).get("blockdevices", [])
@@ -91,7 +126,11 @@ def parse_lsblk(text: str, running_disk: str) -> list[Candidate]:
             if number is not None:
                 parts[number] = child
         boot, root = parts.get(3), parts.get(4)
-        if not boot or not root or boot.get("label") != BOOT_LABEL:
+        if not boot or not root:
+            continue
+        if probe:
+            boot, root = _probed(boot, probe), _probed(root, probe)
+        if boot.get("label") != BOOT_LABEL:
             continue
         fstype = root.get("fstype") or ""
         if fstype == "crypto_LUKS":

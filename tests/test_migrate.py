@@ -93,10 +93,9 @@ class TestCandidates:
         assert migrate.parse_lsblk("not json", running_disk="/dev/sda") == []
 
     def test_a_partition_number_printed_as_a_string_still_matches(self, migrate):
-        # Some util-linux builds render PARTN as a JSON string ("4") rather
-        # than a number. A parser keyed on int(3)/int(4) alone would silently
-        # drop every candidate against that lsblk, which is exactly the shape
-        # of bug a fixture built entirely from Python ints cannot catch.
+        # PARTN can come back as either a JSON string or a number; the parser
+        # should not depend on which, so a fixture that renders every partn
+        # as a string has to match the same two candidates as the original.
         data = json.loads(LSBLK)
         for disk in data["blockdevices"]:
             for child in disk.get("children", []):
@@ -105,6 +104,50 @@ class TestCandidates:
         stringy = json.dumps(data)
         found = migrate.parse_lsblk(stringy, running_disk="/dev/sda")
         assert [c.path for c in found] == ["/dev/sdb4", "/dev/sdc4"]
+
+    def test_blkid_export_lines_become_a_dict(self, migrate):
+        parsed = migrate.parse_blkid_export("DEVNAME=/dev/sdb4\nLABEL=portlin-root\nTYPE=ext4\n")
+        assert parsed == {"DEVNAME": "/dev/sdb4", "LABEL": "portlin-root", "TYPE": "ext4"}
+
+    def test_a_blank_label_and_fstype_are_filled_in_by_probing(self, migrate):
+        # lsblk reads label and fstype from udev, which nothing populates in
+        # a container: only the two real sticks' partitions come back blank
+        # here, the way they would with the udev database empty, while every
+        # other device on the fixture keeps what lsblk already told us.
+        data = json.loads(LSBLK)
+        blanked_paths = {"/dev/sdb3", "/dev/sdb4", "/dev/sdc3", "/dev/sdc4"}
+        originals = {}
+        for disk in data["blockdevices"]:
+            for child in disk.get("children", []):
+                originals[child["path"]] = {"LABEL": child["label"], "TYPE": child["fstype"]}
+                if child["path"] in blanked_paths:
+                    child["label"] = None
+                    child["fstype"] = None
+        blanked = json.dumps(data)
+
+        probed_paths = []
+
+        def probe(path: str) -> dict[str, str]:
+            probed_paths.append(path)
+            return {k: v for k, v in originals[path].items() if v is not None}
+
+        found = migrate.parse_lsblk(blanked, running_disk="/dev/sda", probe=probe)
+        assert [c.path for c in found] == ["/dev/sdb4", "/dev/sdc4"]
+        # Every blanked partition was asked about, and a device lsblk already
+        # answered fully for (sdd1, label and fstype both present) never was:
+        # _probed's early return means blkid is only the fallback, not a
+        # second opinion asked of everything.
+        assert blanked_paths <= set(probed_paths)
+        assert "/dev/sdd1" not in probed_paths
+
+    def test_with_no_probe_a_blank_label_means_no_candidates(self, migrate):
+        data = json.loads(LSBLK)
+        for disk in data["blockdevices"]:
+            for child in disk.get("children", []):
+                child["label"] = None
+                child["fstype"] = None
+        blanked = json.dumps(data)
+        assert migrate.parse_lsblk(blanked, running_disk="/dev/sda") == []
 
     def test_lsblk_is_asked_for_json_with_the_columns_the_parser_reads(self, migrate):
         argv = migrate.lsblk_argv()

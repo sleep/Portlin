@@ -79,6 +79,7 @@ from migrate import (  # noqa: E402
     newer_version,
     no_space_message,
     overall_percent,
+    parse_blkid_export,
     parse_lsblk,
     parse_rsync_progress,
     parse_tar_checkpoint,
@@ -181,8 +182,15 @@ def media_mounts() -> list[Path]:
     return mounts
 
 
+def blkid_probe(path: str) -> dict[str, str]:
+    """blkid's own read of a device's label and type, for when lsblk's udev
+    database is empty: nothing populates it in a freshly started container,
+    and a drive plugged into real hardware moments ago can race it too."""
+    return parse_blkid_export(command_output(["blkid", "-o", "export", path]))
+
+
 def list_candidates():
-    sticks = parse_lsblk(command_output(lsblk_argv()), running_disk())
+    sticks = parse_lsblk(command_output(lsblk_argv()), running_disk(), probe=blkid_probe)
     return sticks + archive_candidates(media_mounts())
 
 
