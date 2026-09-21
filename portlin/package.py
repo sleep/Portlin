@@ -356,6 +356,11 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     # the catalog, and then fails at the first useful thing.
                     "curl",
                     "pciutils",
+                    # portlin-migrate's own two: every copy it makes is an
+                    # rsync and every archive it reads or writes goes through
+                    # zstd. Neither shows in the file list.
+                    "rsync",
+                    "zstd",
                 ],
                 recommends=["portlin-desktop"],
             ),

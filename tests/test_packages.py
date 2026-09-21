@@ -132,3 +132,10 @@ class TestSoftwareApp:
         minimal = packages.resolve(packages.MINIMAL_GROUPS)
         assert "pkexec" not in minimal
         assert "mate-polkit" not in minimal
+
+def test_every_stick_carries_the_migration_tools():
+    # portlin-migrate copies with rsync and archives with zstd, and it ships
+    # in portlin-runtime, which a --minimal stick installs. So both live in
+    # the system group rather than in TOOLS, the way pciutils does.
+    assert "rsync" in packages.SYSTEM
+    assert "zstd" in packages.SYSTEM

@@ -732,3 +732,9 @@ def test_packages_installed_on_a_minimal_stick_need_no_desktop():
     for name in ("portlin-archive-keyring", "portlin-runtime"):
         missing = [dep for dep in _declared_depends(name) if dep not in minimal]
         assert not missing, f"{name} depends on {missing}, absent from a --minimal stick"
+
+def test_runtime_depends_on_what_the_migration_tool_shells_out_to():
+    control = package.text_files("portlin-runtime")["DEBIAN/control"]
+    depends = next(line for line in control.splitlines() if line.startswith("Depends:"))
+    assert "rsync" in depends
+    assert "zstd" in depends

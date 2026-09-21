@@ -62,6 +62,11 @@ SYSTEM = [
     # lspci, for the Software app's hardware scan. Here rather than in TOOLS
     # because a --minimal stick carries portlin-runtime, which runs it.
     "pciutils",
+    # rsync copies and zstd compresses for portlin-migrate, which ships in
+    # portlin-runtime. Here rather than in TOOLS for the same reason as
+    # pciutils: a --minimal stick has the tool and must be able to run it.
+    "rsync",
+    "zstd",
     "zram-tools",
     "bash-completion",
     "less",
@@ -233,7 +238,6 @@ TOOLS = [
     "nano",
     "vim-tiny",
     "htop",
-    "rsync",
     "git",
     "usbutils",
     "lshw",
