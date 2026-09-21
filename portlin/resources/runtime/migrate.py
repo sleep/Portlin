@@ -147,3 +147,124 @@ def read_release(root: Path) -> dict[str, str]:
         if sep:
             pairs[key.strip()] = value.strip().strip('"')
     return pairs
+
+
+# Accounts below this are system accounts, and nobody is the one above it.
+FIRST_USER_UID = 1000
+NOBODY_UID = 65534
+
+# Where the wizard records its two yes/no answers. Both are read as answers
+# rather than copied as files, so first boot can put them through its own
+# screens and the same visudo check it applies to a fresh answer.
+SUDOERS_DROPIN = "etc/sudoers.d/50-portlin-nopasswd"
+AUTOLOGIN_CONF = "etc/lightdm/lightdm.conf.d/10-portlin.conf"
+
+
+@dataclass(frozen=True)
+class Account:
+    name: str
+    uid: int
+    gid: int
+    gecos: str
+    shell: str
+    home: str  # relative to the root: "home/somebody"
+    password_hash: str
+    groups: tuple[str, ...]
+    sudo_nopasswd: bool
+    autologin: bool
+
+
+@dataclass(frozen=True)
+class Identity:
+    hostname: str = ""
+    locale: str = ""
+    keyboard: str = ""
+    timezone: str = ""
+
+
+def _read(root: Path, relative: str) -> str:
+    try:
+        return (root / relative).read_text()
+    except OSError:
+        return ""
+
+
+def _shadow_hashes(root: Path) -> dict[str, str]:
+    hashes = {}
+    for line in _read(root, "etc/shadow").splitlines():
+        fields = line.split(":")
+        if len(fields) >= 2:
+            hashes[fields[0]] = fields[1]
+    return hashes
+
+
+def _group_memberships(root: Path) -> dict[str, list[str]]:
+    """Group names by member, from the fourth field of /etc/group."""
+    memberships: dict[str, list[str]] = {}
+    for line in _read(root, "etc/group").splitlines():
+        fields = line.split(":")
+        if len(fields) < 4:
+            continue
+        for member in filter(None, fields[3].split(",")):
+            memberships.setdefault(member, []).append(fields[0])
+    return memberships
+
+
+def read_accounts(root: Path) -> list[Account]:
+    """Every person's account on the source: uid 1000 and up, nobody excluded."""
+    hashes = _shadow_hashes(root)
+    memberships = _group_memberships(root)
+    waiver = _read(root, SUDOERS_DROPIN)
+    autologin = _read(root, AUTOLOGIN_CONF)
+    accounts = []
+    for line in _read(root, "etc/passwd").splitlines():
+        fields = line.split(":")
+        if len(fields) < 7:
+            continue
+        name, _, uid, gid, gecos, home, shell = fields[:7]
+        try:
+            uid_number, gid_number = int(uid), int(gid)
+        except ValueError:
+            continue
+        if uid_number < FIRST_USER_UID or uid_number == NOBODY_UID:
+            continue
+        accounts.append(
+            Account(
+                name=name,
+                uid=uid_number,
+                gid=gid_number,
+                gecos=gecos,
+                shell=shell,
+                home=home.lstrip("/"),
+                password_hash=hashes.get(name, ""),
+                groups=tuple(memberships.get(name, [])),
+                sudo_nopasswd=name in waiver.split(),
+                autologin=f"autologin-user={name}" in autologin,
+            )
+        )
+    return accounts
+
+
+def _shell_value(text: str, key: str) -> str:
+    """The value of KEY=value or KEY="value" in a file of shell assignments."""
+    for line in text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            return value.strip().strip('"')
+    return ""
+
+
+def read_identity(root: Path) -> Identity:
+    timezone = _read(root, "etc/timezone").strip()
+    if not timezone:
+        try:
+            target = os.readlink(root / "etc" / "localtime")
+            timezone = target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else ""
+        except OSError:
+            timezone = ""
+    return Identity(
+        hostname=_read(root, "etc/hostname").strip(),
+        locale=_shell_value(_read(root, "etc/default/locale"), "LANG"),
+        keyboard=_shell_value(_read(root, "etc/default/keyboard"), "XKBLAYOUT"),
+        timezone=timezone,
+    )
