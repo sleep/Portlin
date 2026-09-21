@@ -446,6 +446,49 @@ class TestWizardScript:
         finally_block = main[main.index("finally:"):]
         assert "close_migration()" in finally_block
 
+    def test_a_plan_without_an_account_name_or_label_does_not_stop_setup(self):
+        # The plan is the tool's output and the wizard is frozen: a key the
+        # tool stops writing must fall through to the ordinary screens, not
+        # raise KeyError inside setup and make it start over on every boot.
+        body = WIZARD.read_text()
+        wizard = body[body.index("def wizard("):body.index("def main(")]
+        assert 'account_plan["name"]' not in wizard and "account_plan['name']" not in wizard
+        assert 'migration["label"]' not in wizard and "migration['label']" not in wizard
+        assert "migration.get('label', 'the old drive')" in wizard
+        # A plan naming an account the wizard's own screen would refuse is
+        # treated as no account plan, so step_account() asks instead.
+        assert "USERNAME_RE.fullmatch" in wizard[:wizard.index("step_account()")]
+
+    def test_closing_the_tool_is_bounded_and_its_failure_is_swallowed(self, tmp_path):
+        plan = tmp_path / "plan.json"
+        plan.write_text("{}")
+        seen = []
+
+        class Timeout(Exception):
+            pass
+
+        class FakeSubprocess:
+            SubprocessError = Timeout
+
+            @staticmethod
+            def run(argv, **kwargs):
+                seen.append((argv, kwargs))
+                raise Timeout()
+
+        class Exists:
+            def __init__(self, path):
+                pass
+
+            def exists(self):
+                return True
+
+        namespace = {"Path": Exists, "subprocess": FakeSubprocess, "MIGRATION_PLAN": plan,
+                     "MIGRATE_TOOL": "/usr/bin/portlin-migrate"}
+        load_function(WIZARD, "close_migration", namespace)()
+        assert seen[0][0] == ["/usr/bin/portlin-migrate", "close"]
+        assert seen[0][1].get("timeout") == 60
+        assert not plan.exists()
+
     def test_the_wizard_never_imports_the_tools_module(self):
         # The wizard is frozen; the package moves. The subprocess boundary is
         # what lets them drift, and an import would quietly undo it.

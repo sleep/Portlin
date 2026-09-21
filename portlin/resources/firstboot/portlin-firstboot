@@ -411,7 +411,13 @@ def close_migration() -> None:
     if not MIGRATION_PLAN.exists():
         return
     if Path(MIGRATE_TOOL).exists():
-        subprocess.run([MIGRATE_TOOL, "close"], input="", capture_output=True, text=True)
+        # This runs from main's finally, where a hung unmount must not keep
+        # the console claimed forever and a failure must not hide whatever
+        # brought setup here.
+        try:
+            subprocess.run([MIGRATE_TOOL, "close"], input="", capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
     MIGRATION_PLAN.unlink(missing_ok=True)
 
 
@@ -1206,6 +1212,11 @@ def wizard() -> None:
         migration = step_migration(candidates)
     prefill = (migration or {}).get("identity") or {}
     account_plan = (migration or {}).get("account")
+    # The plan is the tool's output, and only an account named the way the
+    # screen below would accept is taken from it; anything else means the
+    # account is asked for here as usual.
+    if not isinstance(account_plan, dict) or not USERNAME_RE.fullmatch(str(account_plan.get("name") or "")):
+        account_plan = None
     migrated_ids = set((migration or {}).get("ids") or [])
 
     layout, _ = step_keyboard(default=prefill.get("keyboard", ""))
@@ -1217,7 +1228,7 @@ def wizard() -> None:
     if account_plan:
         # The tool recreates the account with its password hash, so there is
         # no password to ask for and none to hold here.
-        username, full_name, password = account_plan["name"], account_plan.get("gecos", ""), None
+        username, full_name, password = account_plan.get("name", ""), account_plan.get("gecos", ""), None
         message(
             "Your account",
             f"\nThe account '{username}' comes over from the old drive, with its password.",
@@ -1251,7 +1262,7 @@ def wizard() -> None:
         f"Sudo:      {'asks for a password' if sudo_password else 'no password'}\n"
         + (f"Theme:     {theme}\n" if theme else "")
         + (f"Icons:     {icon_theme}\n" if icon_theme else "")
-        + (f"Restore:   {len(migrated_ids)} items from {migration['label']}\n" if migration else "")
+        + (f"Restore:   {len(migrated_ids)} items from {migration.get('label', 'the old drive')}\n" if migration else "")
         + f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
         "Apply these settings now?",
     ):
