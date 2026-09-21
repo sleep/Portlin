@@ -61,15 +61,26 @@ def lsblk_argv() -> list[str]:
     return ["lsblk", "--json", "-o", LSBLK_COLUMNS]
 
 
+_TRAILING_DIGITS = re.compile(r"(\d+)$")
+
+
 def _partition_number(child: dict) -> int | None:
-    """child["partn"] as an int. PARTN can come back as either a JSON string
-    or a number depending on what printed it, and the parser should not
-    depend on which: a string key here would never match the int lookups
-    below, and every candidate would be silently dropped."""
+    """The partition number, from PARTN or failing that from the name.
+
+    PARTN can come back as a JSON string or a number depending on what
+    printed it, and the parser should not depend on which. It can also be
+    null: lsblk fills it from the same udev record it takes the labels from,
+    which a container has none of and a freshly plugged stick may not have
+    yet. Every naming scheme the kernel uses ends the name with the number
+    (sda4, nvme0n1p4, loop0p4, mmcblk0p4), so the trailing digits are the
+    same answer without udev.
+    """
     try:
         return int(child.get("partn"))
     except (TypeError, ValueError):
-        return None
+        pass
+    match = _TRAILING_DIGITS.search(child.get("name") or "")
+    return int(match.group(1)) if match else None
 
 
 def parse_blkid_export(text: str) -> dict[str, str]:

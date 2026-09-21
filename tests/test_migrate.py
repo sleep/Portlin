@@ -1307,3 +1307,22 @@ class TestHostileSource:
         listing = "home/olduser/Documents/\nhome/olduser/Documents/sub/evil\n"
         steps = migrate.plan_archive(self._inventory(migrate, items), ["docs"], tmp_path / "a.tar.zst", listing, target, STAMP)
         assert steps[0].argv[0] == "tar" and steps[0].move_aside == ()
+
+
+class TestPartitionNumberWithoutUdev:
+    """What lsblk prints inside a container, or before udev has settled."""
+
+    def test_a_null_partn_falls_back_to_the_trailing_digits_of_the_name(self, migrate):
+        data = json.loads(LSBLK)
+        for disk in data["blockdevices"]:
+            for child in disk.get("children", []):
+                child["partn"] = None
+                child["name"] = child["path"].removeprefix("/dev/")
+        found = migrate.parse_lsblk(json.dumps(data), running_disk="/dev/sda")
+        assert [c.path for c in found] == ["/dev/sdb4", "/dev/sdc4"]
+
+    def test_the_fallback_reads_every_naming_scheme(self, migrate):
+        for name, number in (("sda4", 4), ("nvme0n1p3", 3), ("loop0p4", 4), ("mmcblk0p12", 12)):
+            assert migrate._partition_number({"partn": None, "name": name}) == number
+        assert migrate._partition_number({"partn": None, "name": "sda"}) is None
+        assert migrate._partition_number({"partn": None}) is None
