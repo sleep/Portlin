@@ -50,6 +50,7 @@ from typing import Callable
 
 sys.path.insert(0, "/usr/lib/portlin")
 
+from catalog import ENTRIES  # noqa: E402
 from devices import (  # noqa: E402
     backing_disk,
     backing_partition,
@@ -72,6 +73,7 @@ from migrate import (  # noqa: E402
     checkpoint_bytes,
     describe,
     dpkg_status_lines,
+    entry_within,
     human,
     mark_existing_account,
     identity_steps,
@@ -112,6 +114,7 @@ PLAN_DIR = Path("/run/portlin/migrate")
 LOG = Path("/var/log/portlin-migrate.log")
 MEDIA_ROOTS = ("/media", "/run/media")
 LOCAL_ROOT = Path("/")
+SHELLS = Path("/etc/shells")
 
 # cryptsetup's exit status for a passphrase that does not open the device.
 WRONG_PASSPHRASE = 2
@@ -339,6 +342,24 @@ def uid_in_use(uid: int) -> bool:
         return False
 
 
+def local_shells(path: Path = SHELLS) -> set[str]:
+    """The login shells this system allows, so a shell named by the source
+    is only kept when it is one of them."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return set()
+    return {line.strip() for line in lines if line.strip() and not line.startswith("#")}
+
+
+def move_roots(target: Target) -> tuple[Path, ...]:
+    """Where a move-aside may act: the account's home and the two system
+    trees the plan's fixed paths live in. Nothing else on this system is
+    the plan's to rename, whatever the source says."""
+    roots = (Path("/etc"), Path("/var"))
+    return (Path("/") / target.home, *roots) if target.home else roots
+
+
 def unclaimed_now() -> int:
     """portlin-info's arithmetic, so the no-space refusal gives the same advice."""
     partition = backing_partition(root_source())
@@ -354,7 +375,14 @@ def unclaimed_now() -> int:
 # -- running a plan -------------------------------------------------------------
 
 
-def move_aside(existing: str, backup: str) -> None:
+def move_aside(existing: str, backup: str, roots: tuple[Path, ...]) -> None:
+    """Rename existing into the backup tree, but only when the entry being
+    renamed sits inside one of roots once every symlink is resolved. The
+    planner checks the same thing; this is the last line of defence should
+    the filesystem have changed since, or a plan arrive from elsewhere."""
+    if not any(entry_within(existing, root) for root in roots):
+        log(f"refused to move aside {existing}: outside {', '.join(map(str, roots)) or 'every allowed root'}")
+        raise OSError(f"refusing to touch {existing}: it leads outside the home and the system trees")
     Path(backup).parent.mkdir(parents=True, exist_ok=True)
     os.rename(existing, backup)
     log(f"moved aside {existing} -> {backup}")
@@ -405,7 +433,9 @@ def _execute(step: Step, on_line: Callable[[str], None]) -> int:
     return proc.wait()
 
 
-def run_steps(steps, *, total: int, out=None, execute=None) -> RunResult:
+def run_steps(steps, *, total: int, out=None, execute=None, move_roots: tuple[Path, ...] = ()) -> RunResult:
+    """Run a plan's steps in order. ``move_roots`` is where a step's
+    move-asides may act; with none given, every move-aside is refused."""
     out = out or sys.stdout
     execute = execute or _execute
     warnings: list[str] = []
@@ -419,7 +449,7 @@ def run_steps(steps, *, total: int, out=None, execute=None) -> RunResult:
             emit("step", step.text, out=out)
         try:
             for existing, backup in step.move_aside:
-                move_aside(existing, backup)
+                move_aside(existing, backup, move_roots)
             for directory in step.mkdir:
                 Path(directory).mkdir(parents=True, exist_ok=True)
             for path, content in step.write:
@@ -495,7 +525,15 @@ def apply_steps(inventory: Inventory, ids: list[str], source: Source, target: Ta
         if item.id == "extras.theme":
             names = json.loads(item.value)
             steps += theme_steps(names, target, icon_theme_installed=icon_theme_installed(names.get("icons", "")))
-    steps += software_steps([item.value for item in selected(inventory, ids) if item.category == "software"])
+    # The installer takes the entry id as an argument, so only ids the
+    # catalog shipped here knows are passed on; the rest are named and left.
+    known = {entry.id for entry in ENTRIES}
+    software = [item.value for item in selected(inventory, ids) if item.category == "software"]
+    steps += [
+        Step("", warn=f"ignoring the source's software {value!r}: not in this portlin's catalog")
+        for value in software if value not in known
+    ]
+    steps += software_steps([value for value in software if value in known])
     return steps
 
 
@@ -841,14 +879,16 @@ def apply_plan(path: Path, *, out, only=None, skip=None, passphrase=passphrase_f
         warnings: list[str] = []
         account = next((a for a in inventory.accounts if f"account.{a.name}" in ids), None)
         if account and not target.user:
-            result = run_steps(
-                account_steps(account, existing_groups={g.gr_name for g in grp.getgrall()},
-                              uid_free=not uid_in_use(account.uid)),
-                total=0, out=out,
-            )
+            steps = account_steps(account, existing_groups={g.gr_name for g in grp.getgrall()},
+                                  uid_free=not uid_in_use(account.uid), shells=local_shells())
+            result = run_steps(steps, total=0, out=out)
             warnings += result.warnings
             if not result.ok:
                 return EXIT_FAILED, result.failure
+            if not any(step.argv for step in steps):
+                # The account was refused by name, so there is nothing to
+                # give the files to and nothing useful to do with them.
+                return EXIT_FAILED, "; ".join(result.warnings) or "the account could not be created"
             target = target_for(account.name)
         elif account and target.user:
             emit("warn", f"the account {target.user} already exists here, so {account.name}'s files go into it", out=out)
@@ -857,7 +897,7 @@ def apply_plan(path: Path, *, out, only=None, skip=None, passphrase=passphrase_f
             hosts_text=Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else "",
             icon_theme_installed=lambda name: Path(f"/usr/share/icons/{name}/index.theme").exists(),
         )
-        result = run_steps(steps, total=sum(s.weight for s in steps), out=out)
+        result = run_steps(steps, total=sum(s.weight for s in steps), out=out, move_roots=move_roots(target))
         warnings += result.warnings
         if not result.ok:
             return EXIT_FAILED, result.failure

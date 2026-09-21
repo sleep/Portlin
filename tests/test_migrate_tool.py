@@ -234,7 +234,9 @@ class TestRunSteps:
             seen["hostname"] = (tmp_path / "etc/hostname").read_text()
             return 0
 
-        assert tool.run_steps([step], total=0, out=io.StringIO(), execute=execute).ok
+        result = tool.run_steps([step], total=0, out=io.StringIO(), execute=execute,
+                                move_roots=(tmp_path / "home/alice",))
+        assert result.ok
         assert seen == {"existing": False, "backup": "mine", "made": True, "hostname": "office\n"}
 
     def test_a_passthrough_step_forwards_the_installers_events_but_not_its_result(self, tool, migrate):
@@ -686,3 +688,74 @@ class TestConsoleVerbsSourceError:
         assert code == tool.EXIT_FAILED
         assert closed == [True]
         assert shown and "/dev/sdb4" in shown[0][1]
+
+
+class TestHostileSourceAtRun:
+    """The executor's own line of defence, for the plan data it is handed."""
+
+    def test_a_move_aside_outside_the_allowed_roots_is_refused(self, tool, migrate, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "passwd").write_text("root:x:0:0")
+        home = tmp_path / "home/alice"
+        home.mkdir(parents=True)
+        (home / "Documents").symlink_to(outside)
+        existing = home / "Documents/passwd"
+        backup = home / ".portlin-migrate-backup/stamp/Documents/passwd"
+        step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(existing), str(backup)),))
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=(home,),
+                                execute=lambda *a: pytest.fail("the step must not run"))
+        assert not result.ok
+        assert "passwd" in result.failure
+        assert (outside / "passwd").read_text() == "root:x:0:0"
+        assert not backup.exists()
+
+    def test_a_move_aside_with_no_roots_given_is_refused(self, tool, migrate, tmp_path):
+        existing = tmp_path / "home/alice/notes.txt"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("mine")
+        step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(existing), str(tmp_path / "b")),))
+        result = tool.run_steps([step], total=0, out=io.StringIO(),
+                                execute=lambda *a: pytest.fail("the step must not run"))
+        assert not result.ok and existing.read_text() == "mine"
+
+    def test_a_move_aside_inside_a_root_goes_ahead(self, tool, migrate, tmp_path):
+        existing = tmp_path / "home/alice/notes.txt"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("mine")
+        backup = tmp_path / "home/alice/.portlin-migrate-backup/stamp/notes.txt"
+        step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(existing), str(backup)),))
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=(tmp_path / "home/alice",),
+                                execute=lambda *a: 0)
+        assert result.ok and backup.read_text() == "mine" and not existing.exists()
+
+    def test_apply_plan_confines_moves_to_the_home_etc_and_var(self, tool, migrate):
+        assert tool.move_roots(migrate.Target(Path("/"), "alice", 1000, 1000, "home/alice")) == (
+            Path("/home/alice"), Path("/etc"), Path("/var"),
+        )
+        assert tool.move_roots(migrate.Target(Path("/"))) == (Path("/etc"), Path("/var"))
+
+    def test_software_not_in_the_catalog_is_warned_about_and_not_installed(self, tool, migrate, tmp_path):
+        from test_migrate import make_source
+        source_root = tmp_path / "source"
+        make_source(source_root)
+        items = (
+            migrate.Item("software.mullvad", "software", "Mullvad", value="mullvad"),
+            migrate.Item("software.evil", "software", "Evil", value="--help"),
+            migrate.Item("software.other", "software", "Other", value="not-in-the-catalog"),
+        )
+        inventory = migrate.Inventory(version="0.1.2", hostname="office", home="home/olduser", items=items)
+        target = migrate.Target(root=tmp_path / "t", user="alice", uid=1000, gid=1000, home="home/alice")
+        source = tool.Source("stick", "/dev/sdb4", root=source_root)
+        steps = tool.apply_steps(inventory, [i.id for i in items], source, target, "stamp", firstboot=False,
+                                 hosts_text="", icon_theme_installed=lambda n: True)
+        installs = [s.argv for s in steps if s.argv]
+        assert installs == [(migrate.INSTALLER, "install", "mullvad")]
+        warned = [s.warn for s in steps if s.warn]
+        assert len(warned) == 2 and any("'--help'" in w for w in warned) and any("not-in-the-catalog" in w for w in warned)
+
+    def test_the_account_shell_is_checked_against_the_local_shells_file(self, tool, tmp_path):
+        shells = tmp_path / "shells"
+        shells.write_text("# /etc/shells: valid login shells\n/bin/sh\n/bin/bash\n\n/usr/bin/zsh\n")
+        assert tool.local_shells(shells) == {"/bin/sh", "/bin/bash", "/usr/bin/zsh"}
+        assert tool.local_shells(tmp_path / "missing") == set()

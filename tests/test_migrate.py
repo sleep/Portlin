@@ -997,3 +997,197 @@ class TestDpkgStatus:
             "Package: half\nStatus: install ok unpacked\n\n"
         )
         assert migrate.dpkg_status_lines(text) == "vlc installed\ngone config-files\nhalf unpacked\n"
+
+
+class TestHostileSource:
+    """Everything read off a source stick or out of an archive is somebody
+    else's data, and the plan it feeds runs as root. Each case here is a
+    value that would have reached a rename, a shell-sourced file or an argv
+    unchecked; the boundary that refuses it is what these pin."""
+
+    def _inventory(self, migrate, items):
+        return migrate.Inventory(version="0.1.2", hostname="office", home="home/olduser", items=tuple(items))
+
+    def _target(self, migrate, root: Path):
+        return migrate.Target(root=root, user="alice", uid=1000, gid=1000, home="home/alice")
+
+    # C1: the tar listing is attacker-controlled and only needs to start
+    # with a chosen path to be walked by collisions.
+    def test_a_traversing_member_under_a_chosen_path_is_refused_not_dropped(self, migrate, tmp_path):
+        listing = LISTING + "home/olduser/Documents/../../../etc/passwd\n"
+        assert migrate.unsafe_members(listing, ["home/olduser/Documents"]) == [
+            "home/olduser/Documents/../../../etc/passwd",
+        ]
+        assert "home/olduser/Documents/../../../etc/passwd" not in migrate.chosen_members(
+            listing, ["home/olduser/Documents"]
+        )
+        items = [migrate.Item("docs", "home.files", "Documents", paths=("home/olduser/Documents",))]
+        target = self._target(migrate, tmp_path / "t")
+        with pytest.raises(ValueError, match="refusing to touch .*etc/passwd"):
+            migrate.plan_archive(self._inventory(migrate, items), ["docs"], tmp_path / "a.tar.zst", listing, target, STAMP)
+
+    def test_a_member_with_an_empty_part_is_refused_too(self, migrate):
+        listing = "home/olduser/Documents//notes.txt\n"
+        assert migrate.unsafe_members(listing, ["home/olduser/Documents"]) == ["home/olduser/Documents//notes.txt"]
+        assert migrate.chosen_members(listing, ["home/olduser/Documents"]) == []
+
+    def test_a_collision_reached_through_a_symlink_out_of_the_home_is_refused(self, migrate, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "notes.txt").write_text("not yours")
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/home/alice").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Documents").symlink_to(outside)
+        with pytest.raises(ValueError, match="notes.txt"):
+            migrate.collisions(["home/olduser/Documents/notes.txt"], "home/olduser", target, STAMP)
+        assert (outside / "notes.txt").exists()
+
+    def test_a_system_collision_reached_through_a_symlink_is_refused(self, migrate, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "cafe.nmconnection").write_text("not yours")
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/etc/NetworkManager").mkdir(parents=True)
+        (tmp_path / "t/etc/NetworkManager/system-connections").symlink_to(outside)
+        with pytest.raises(ValueError, match="cafe.nmconnection"):
+            migrate.collisions(["etc/NetworkManager/system-connections/cafe.nmconnection"], "home/olduser", target, STAMP)
+
+    def test_a_symlink_inside_the_home_still_collides_normally(self, migrate, tmp_path):
+        # A link that stays inside the home is the ordinary case, and the
+        # link itself is what gets moved aside, never what it points at.
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/home/alice/Real").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Real/notes.txt").write_text("mine")
+        (tmp_path / "t/home/alice/Documents").symlink_to(tmp_path / "t/home/alice/Real")
+        (tmp_path / "t/home/alice/.bashrc").symlink_to("/etc/skel/.bashrc")
+        moves = migrate.collisions(
+            ["home/olduser/Documents/notes.txt", "home/olduser/.bashrc"], "home/olduser", target, STAMP,
+        )
+        assert [existing for existing, _ in moves] == [
+            str(tmp_path / "t/home/alice/Documents/notes.txt"), str(tmp_path / "t/home/alice/.bashrc"),
+        ]
+
+    # I4: rsync follows a symlinked destination when the path ends in a slash.
+    def test_plan_stick_refuses_a_destination_symlinked_out_of_the_home(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        populate_home(make_source(source))
+        inventory = migrate.build_inventory(source)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/home/alice").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Documents").symlink_to(outside)
+        with pytest.raises(ValueError, match="Documents"):
+            migrate.plan_stick(inventory, ["home.files.Documents"], source, target, STAMP)
+        # The same link with nothing yet at the destination is fine, as is a
+        # link that stays inside the home.
+        (tmp_path / "t/home/alice/Documents").unlink()
+        assert migrate.plan_stick(inventory, ["home.files.Documents"], source, target, STAMP)
+        (tmp_path / "t/home/alice/Real").mkdir()
+        (tmp_path / "t/home/alice/Documents").symlink_to(tmp_path / "t/home/alice/Real")
+        assert migrate.plan_stick(inventory, ["home.files.Documents"], source, target, STAMP)
+
+    def test_plan_stick_refuses_a_system_destination_symlinked_elsewhere(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        make_source(source)
+        connections = source / migrate.CONNECTIONS
+        connections.mkdir(parents=True)
+        (connections / "cafe.nmconnection").write_text("[wifi]\n")
+        inventory = migrate.build_inventory(source)
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/etc/NetworkManager").mkdir(parents=True)
+        (tmp_path / "t/etc/NetworkManager/system-connections").symlink_to(tmp_path / "t/home/alice")
+        with pytest.raises(ValueError, match="system-connections"):
+            migrate.plan_stick(inventory, ["network"], source, target, STAMP)
+
+    # C2: identity values land in shell-sourced files, /etc/hosts and a link.
+    @pytest.mark.parametrize("field, value", [
+        ("keyboard", 'us"; touch /tmp/pwned; echo "'),
+        ("hostname", "evil\n1.2.3.4 bank.example"),
+        ("hostname", "office\n"),
+        ("hostname", "-rf"),
+        ("timezone", "../../../etc/passwd"),
+        ("timezone", "Europe/../../../etc/passwd"),
+        ("locale", "en_GB.UTF-8\"; rm -rf /; echo \""),
+    ])
+    def test_an_invalid_identity_value_is_warned_about_and_not_written(self, migrate, field, value):
+        identity = migrate.Identity(**{field: value})
+        steps = migrate.identity_steps(identity, [f"identity.{field}"], hosts_text="127.0.0.1\tlocalhost\n")
+        assert len(steps) == 1
+        assert steps[0].warn == f"ignoring the source's {field} {value!r}: not a valid {field}"
+        assert steps[0].write == () and steps[0].argv is None
+
+    def test_ordinary_identity_values_still_pass(self, migrate):
+        identity = migrate.Identity(hostname="my-laptop", locale="pt_BR.UTF-8", keyboard="de", timezone="America/Sao_Paulo")
+        steps = migrate.identity_steps(
+            identity, ["identity.hostname", "identity.locale", "identity.keyboard", "identity.timezone"], hosts_text="",
+        )
+        assert not any(s.warn for s in steps)
+
+    def test_the_hostname_and_username_rules_are_the_wizards(self, migrate):
+        from test_firstboot import WIZARD
+        body = WIZARD.read_text()
+        assert f'HOSTNAME_RE = re.compile(r"{migrate.HOSTNAME_RE.pattern}")' in body
+        assert f'USERNAME_RE = re.compile(r"{migrate.USERNAME_RE.pattern}")' in body
+
+    # I2: account fields go straight into useradd's argv and chpasswd's stdin.
+    def _account(self, migrate, **overrides):
+        base = dict(name="olduser", uid=1500, gid=1500, gecos="Old User,,,", shell="/bin/bash",
+                    home="home/olduser", password_hash="$y$j9T$abc$def",
+                    groups=("sudo",), sudo_nopasswd=True, autologin=False)
+        return migrate.Account(**{**base, **overrides})
+
+    @pytest.mark.parametrize("name", ["-r", "--root", "Evil", "a b", "x" * 33, "", "root:x", "olduser\n"])
+    def test_a_bad_account_name_yields_one_warning_and_no_account(self, migrate, name):
+        steps = migrate.account_steps(self._account(migrate, name=name), existing_groups={"sudo"}, uid_free=True)
+        assert len(steps) == 1
+        assert steps[0].argv is None and steps[0].warn and repr(name) in steps[0].warn
+
+    def test_a_shell_not_in_the_local_shells_file_becomes_bash(self, migrate):
+        steps = migrate.account_steps(
+            self._account(migrate, shell="/tmp/evil"), existing_groups=set(), uid_free=True, shells={"/bin/bash", "/bin/zsh"},
+        )
+        useradd = next(s.argv for s in steps if s.argv and s.argv[0] == "useradd")
+        assert useradd[useradd.index("--shell") + 1] == "/bin/bash"
+        steps = migrate.account_steps(
+            self._account(migrate, shell="/bin/zsh"), existing_groups=set(), uid_free=True, shells={"/bin/bash", "/bin/zsh"},
+        )
+        useradd = next(s.argv for s in steps if s.argv and s.argv[0] == "useradd")
+        assert useradd[useradd.index("--shell") + 1] == "/bin/zsh"
+        # No shells file to consult means only bash.
+        steps = migrate.account_steps(self._account(migrate, shell="/bin/zsh"), existing_groups=set(), uid_free=True)
+        useradd = next(s.argv for s in steps if s.argv and s.argv[0] == "useradd")
+        assert useradd[useradd.index("--shell") + 1] == "/bin/bash"
+
+    def test_newlines_are_stripped_from_the_gecos(self, migrate):
+        steps = migrate.account_steps(
+            self._account(migrate, gecos="Old\nUser\r,,,"), existing_groups=set(), uid_free=True,
+        )
+        useradd = next(s.argv for s in steps if s.argv and s.argv[0] == "useradd")
+        comment = useradd[useradd.index("--comment") + 1]
+        assert "\n" not in comment and "\r" not in comment and "Old" in comment and "User" in comment
+
+    def test_a_hash_that_would_add_a_second_chpasswd_line_is_treated_as_unreadable(self, migrate):
+        steps = migrate.account_steps(
+            self._account(migrate, password_hash="$y$abc\nroot:$y$pwned"), existing_groups=set(), uid_free=True,
+        )
+        assert not any(s.argv and s.argv[0] == "chpasswd" for s in steps)
+        assert any("password" in (s.warn or "") for s in steps)
+
+    # I2: the theme name is spliced into a re.sub replacement template.
+    def test_a_theme_name_with_replacement_syntax_is_inserted_literally(self, migrate):
+        pattern, replacement = migrate.THEME_TARGETS["/etc/xdg/xdg-portlin/gtk-3.0/settings.ini"]
+        text = "[Settings]\ngtk-theme-name=Numix\n"
+        assert migrate.rewrite_theme(text, pattern, replacement, r"\g<0>") == "[Settings]\ngtk-theme-name=\\g<0>\n"
+        assert migrate.rewrite_theme(text, pattern, replacement, r"a\1b") == "[Settings]\ngtk-theme-name=a\\1b\n"
+
+    @pytest.mark.parametrize("name", [r"\g<0>", "Numix\nevil", 'x"/>', "a;b"])
+    def test_a_theme_name_outside_the_allowed_characters_is_warned_about_and_skipped(self, migrate, tmp_path, name):
+        target = migrate.Target(root=tmp_path)
+        steps = migrate.theme_steps({"theme": name, "icons": name}, target, icon_theme_installed=True)
+        assert all(s.write == () and s.argv is None and s.warn for s in steps)
+        assert len(steps) == 2
+
+    # T3: the hash must not leak through a logged or printed Account.
+    def test_the_password_hash_is_kept_out_of_the_accounts_repr(self, migrate):
+        assert "$y$" not in repr(self._account(migrate))

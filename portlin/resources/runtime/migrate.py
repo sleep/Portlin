@@ -226,7 +226,8 @@ class Account:
     gecos: str
     shell: str
     home: str  # relative to the root: "home/somebody"
-    password_hash: str
+    # Kept out of the repr so a logged or printed Account never shows it.
+    password_hash: str = field(repr=False)
     groups: tuple[str, ...]
     sudo_nopasswd: bool
     autologin: bool
@@ -238,6 +239,36 @@ class Identity:
     locale: str = ""
     keyboard: str = ""
     timezone: str = ""
+
+
+# What a value read off a source may look like before it is written into a
+# file the system sources as root, spliced into /etc/hosts or handed to a
+# command. The source is somebody else's stick or archive, so each value is
+# checked here rather than trusted because it once passed the wizard's
+# screens on another machine. The name and hostname rules are the wizard's;
+# a test keeps the literals equal, since the wizard cannot import this file.
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
+LOCALE_RE = re.compile(r"[A-Za-z0-9_.@-]+")
+KEYBOARD_RE = re.compile(r"[a-z0-9_,+-]+")
+TIMEZONE_RE = re.compile(r"[A-Za-z0-9_+/-]+")
+THEME_NAME_RE = re.compile(r"[A-Za-z0-9 ._-]+")
+
+
+def valid_identity_value(name: str, value: str) -> bool:
+    # fullmatch throughout: match with a $ anchor would still let a value
+    # through with a newline on the end, which is a second line in a file.
+    if name == "hostname":
+        return bool(HOSTNAME_RE.fullmatch(value))
+    if name == "locale":
+        return bool(LOCALE_RE.fullmatch(value))
+    if name == "keyboard":
+        return bool(KEYBOARD_RE.fullmatch(value))
+    if name == "timezone":
+        # The value becomes a path under /usr/share/zoneinfo, so it must not
+        # be able to climb back out of it.
+        return bool(TIMEZONE_RE.fullmatch(value)) and ".." not in value.split("/")
+    return False
 
 
 def _read(root: Path, relative: str) -> str:
@@ -680,26 +711,72 @@ def overall_percent(done: int, weight: int, step_percent: int, total: int) -> in
     return min(100, int((done + weight * step_percent / 100) * 100 / total))
 
 
+# The fixed system paths a plan may touch, besides the home.
+ALLOWED_SYSTEM_PATHS = (CONNECTIONS, BLUETOOTH, *CUPS_PATHS)
+
+
+def _malformed(path: str) -> bool:
+    """A relative path that names one thing and cannot climb or be an option."""
+    parts = path.split("/")
+    return (
+        not path
+        or path.startswith("/")
+        or path.startswith("-")
+        or ".." in parts
+        or "" in parts
+    )
+
+
 def unsafe_paths(inventory: Inventory, ids: list[str]) -> list[str]:
     """Paths a plan may touch: the source home, and the fixed system paths the
     inventory knows about. A manifest is read from an archive somebody
     handed us and the plan runs as root, so anything else is refused by
     name rather than extracted."""
-    allowed = (CONNECTIONS, BLUETOOTH, *CUPS_PATHS)
     bad = []
     for item in selected(inventory, ids):
         for path in item.paths:
-            parts = path.split("/")
-            if (
-                not path
-                or path.startswith("/")
-                or path.startswith("-")
-                or ".." in parts
-                or "" in parts
-                or not (is_home(path, inventory.home) or path in allowed)
-            ):
+            if _malformed(path) or not (is_home(path, inventory.home) or path in ALLOWED_SYSTEM_PATHS):
                 bad.append(path)
     return bad
+
+
+def confinement_root(destination: str, target: Target) -> Path | None:
+    """The directory a target path is allowed to resolve into: the local
+    home for home paths, /etc or /var for the system paths. None for a path
+    that unsafe_paths would already have refused."""
+    if is_home(destination, target.home):
+        return target.root / target.home
+    if any(destination == p or destination.startswith(p + "/") for p in ALLOWED_SYSTEM_PATHS):
+        return target.root / destination.split("/", 1)[0]
+    return None
+
+
+def within(path: Path | str, root: Path | str) -> bool:
+    """Whether path, with every symlink on the way resolved, is root or under it."""
+    real, base = os.path.realpath(path), os.path.realpath(root)
+    return real == base or real.startswith(base + os.sep)
+
+
+def entry_within(path: Path | str, root: Path | str) -> bool:
+    """Like within, for an operation on the directory entry itself rather
+    than on what it points at: a rename moves the entry, so it is the
+    directory holding the entry that has to resolve inside root. The entry
+    may itself be a symlink pointing anywhere, and moving that link aside
+    touches nothing it points at."""
+    return within(os.path.dirname(str(path)), root) and os.path.basename(str(path)) not in ("", ".", "..")
+
+
+def _confined(destination: str, target: Target) -> None:
+    """Raise unless the destination resolves inside the tree it belongs to.
+
+    unsafe_paths keeps the path itself honest; this keeps the filesystem
+    honest, where a symlink left at the destination by a previous run or by
+    anyone with the account would otherwise have rsync or tar write on the
+    far side of it.
+    """
+    root = confinement_root(destination, target)
+    if root is None or not within(target.root / destination, root):
+        raise ValueError(f"refusing to touch {destination}: it leads outside {root or 'the home'}")
 
 
 def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: Target, stamp: str) -> list[Step]:
@@ -711,6 +788,7 @@ def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: 
     for item in selected(inventory, ids):
         for position, path in enumerate(item.paths):
             destination = target_path(path, inventory.home, target.home)
+            _confined(destination, target)
             chown = (target.uid, target.gid) if is_home(destination, target.home) else None
             steps.append(
                 Step(
@@ -819,25 +897,47 @@ def checkpoint_bytes(records: int) -> int:
     return records * TAR_RECORD_BYTES
 
 
+def _members_under(listing: str, paths: list[str]):
+    """Every listed member under a chosen path, with whether its name is one
+    tar could be allowed to write. The listing comes out of the archive, so a
+    member only has to begin with a chosen path to be walked here, and the
+    rest of its name is checked the way the manifest's paths were."""
+    for name in listing.splitlines():
+        if not name:
+            continue
+        if any(name == path or name.startswith(path + "/") for path in paths):
+            yield name, not _malformed(name.removesuffix("/"))
+
+
 def chosen_members(listing: str, paths: list[str]) -> list[str]:
     """The file members under any chosen path. Directories end in a slash in
     tar's listing and are left out: they merge rather than collide."""
-    members = []
-    for name in listing.splitlines():
-        if not name or name.endswith("/"):
-            continue
-        if any(name == path or name.startswith(path + "/") for path in paths):
-            members.append(name)
-    return members
+    return [name for name, safe in _members_under(listing, paths) if safe and not name.endswith("/")]
+
+
+def unsafe_members(listing: str, paths: list[str]) -> list[str]:
+    """The members under a chosen path that climb, double a slash or start
+    like an option. One of these means the archive was made to do harm, and
+    the whole of it is refused rather than the rest extracted."""
+    return [name for name, safe in _members_under(listing, paths) if not safe]
 
 
 def collisions(members: list[str], source_home: str, target: Target, stamp: str) -> list[tuple[str, str]]:
-    """(existing, backup) for every member that would land on a file already there."""
+    """(existing, backup) for every member that would land on a file already there.
+
+    The rename that follows acts on the entry named here, so the directory
+    holding that entry must resolve inside the home or the system tree the
+    member belongs to: a directory on the way that is really a symlink out
+    of it would otherwise have a file elsewhere renamed into the backup.
+    """
     moves = []
     for member in members:
         destination = target_path(member, source_home, target.home)
         existing = target.root / destination
         if existing.is_symlink() or existing.exists():
+            root = confinement_root(destination, target)
+            if root is None or not entry_within(existing, root):
+                raise ValueError(f"refusing to touch {destination}: it leads outside {root or 'the home'}")
             backup = backup_dir(target, destination, stamp)
             moves.append((str(existing), str(backup)))
     return moves
@@ -872,6 +972,9 @@ def plan_archive(inventory: Inventory, ids: list[str], archive: Path, listing: s
     paths = [path for item in items for path in item.paths]
     if not paths:
         return []
+    bad = unsafe_members(listing, paths)
+    if bad:
+        raise ValueError("refusing to touch " + ", ".join(bad))
     steps = [
         Step(
             "Restoring from the archive",
@@ -940,13 +1043,27 @@ ICON_THEME_TARGETS = {
 }
 
 
-def account_steps(account: Account, *, existing_groups: set[str], uid_free: bool) -> list[Step]:
+DEFAULT_SHELL = "/bin/bash"
+
+
+def account_steps(account: Account, *, existing_groups: set[str], uid_free: bool,
+                  shells: set[str] = frozenset()) -> list[Step]:
     """Recreate the account. The password travels as its hash through
-    chpasswd -e, so nothing here ever holds or shows it in clear."""
+    chpasswd -e, so nothing here ever holds or shows it in clear.
+
+    The account is read off the source, so its fields are checked before
+    they become argv: the name is last on useradd's line and could be an
+    option, the shell is only kept when this system lists it in
+    ``shells`` (its /etc/shells), and the comment cannot span lines.
+    """
+    if not USERNAME_RE.fullmatch(account.name):
+        return [Step("", warn=f"ignoring the source's account {account.name!r}: not a valid username")]
     groups = [g for g in account.groups if g in existing_groups]
+    shell = account.shell if account.shell in shells else DEFAULT_SHELL
+    gecos = " ".join(account.gecos.splitlines())
     steps: list[Step] = []
     useradd = [
-        "useradd", "--create-home", "--shell", account.shell, "--comment", account.gecos,
+        "useradd", "--create-home", "--shell", shell, "--comment", gecos,
         "--groups", ",".join(groups),
     ]
     if uid_free:
@@ -958,7 +1075,10 @@ def account_steps(account: Account, *, existing_groups: set[str], uid_free: bool
     steps.append(Step(f"Creating the account {account.name}", argv=(*useradd, account.name)))
     if not uid_free:
         steps.append(Step("", warn=f"uid {account.uid} is already in use here, so {account.name} was given a new one"))
-    if account.password_hash:
+    # chpasswd reads one "name:hash" per line, so a hash holding either
+    # separator could set a second account's password; it is treated as
+    # unreadable instead.
+    if account.password_hash and not any(c in account.password_hash for c in ":\n\r"):
         steps.append(Step(f"Setting the password for {account.name}", argv=("chpasswd", "-e"),
                           stdin=f"{account.name}:{account.password_hash}\n"))
     else:
@@ -971,6 +1091,11 @@ def identity_steps(identity: Identity, ids: list[str], *, hosts_text: str) -> li
     apply_timezone as data. The systemd calls are optional because the
     files are what persist; the calls only make the change take effect now."""
     steps: list[Step] = []
+    for name in ("hostname", "locale", "keyboard", "timezone"):
+        value = getattr(identity, name)
+        if f"identity.{name}" in ids and value and not valid_identity_value(name, value):
+            steps.append(Step("", warn=f"ignoring the source's {name} {value!r}: not a valid {name}"))
+            ids = [i for i in ids if i != f"identity.{name}"]
     if "identity.hostname" in ids and identity.hostname:
         lines = [line for line in hosts_text.splitlines() if not line.startswith("127.0.1.1")]
         lines.insert(min(1, len(lines)), f"127.0.1.1\t{identity.hostname}")
@@ -1007,7 +1132,9 @@ def identity_steps(identity: Identity, ids: list[str], *, hosts_text: str) -> li
 
 
 def rewrite_theme(text: str, pattern: str, replacement: str, theme: str) -> str | None:
-    rewritten = re.sub(pattern, replacement.format(theme=theme), text, count=1)
+    # The name is spliced into a replacement template, where a backslash
+    # would start a group reference; doubling it keeps the name literal.
+    rewritten = re.sub(pattern, replacement.format(theme=theme.replace("\\", "\\\\")), text, count=1)
     return rewritten if theme in rewritten else None
 
 
@@ -1044,13 +1171,20 @@ def theme_steps(names: dict[str, str], target: Target, *, icon_theme_installed: 
     applied = []
     theme = names.get("theme")
     if theme:
-        if rewrite_all(theme, THEME_TARGETS):
+        # The name is written into XML and ini files read by the desktop
+        # and the greeter, so it is kept to the characters a theme is named
+        # with rather than trusted from the source.
+        if not THEME_NAME_RE.fullmatch(theme):
+            steps.append(Step("", warn=f"ignoring the source's desktop theme {theme!r}: not a valid theme name"))
+        elif rewrite_all(theme, THEME_TARGETS):
             applied.append(f"the desktop theme {theme}")
         else:
             steps.append(Step("", warn=f"the desktop theme {theme} could not be applied here"))
     icons = names.get("icons")
     if icons:
-        if icon_theme_installed and rewrite_all(icons, ICON_THEME_TARGETS):
+        if not THEME_NAME_RE.fullmatch(icons):
+            steps.append(Step("", warn=f"ignoring the source's icon theme {icons!r}: not a valid theme name"))
+        elif icon_theme_installed and rewrite_all(icons, ICON_THEME_TARGETS):
             applied.append(f"the icon theme {icons}")
         else:
             steps.append(Step("", warn=f"the icon theme {icons} is not installed here, so the default stays"))
