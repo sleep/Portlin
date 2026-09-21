@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -71,7 +73,10 @@ class TestOpening:
 
         with pytest.raises(tool.SourceError, match="passphrase"):
             tool.open_source("/dev/sdb4", passphrase=lambda: next(answers), run=run)
-        tries = [c for c in calls if c[0][0] == "cryptsetup"]
+        # Filtered to the "open" attempts specifically: giving up also closes
+        # the mapping it never managed to open, which is its own (idempotent)
+        # "cryptsetup close" call.
+        tries = [c for c in calls if c[0][:2] == ("cryptsetup", "open")]
         assert len(tries) == tool.PASSPHRASE_TRIES
         assert [c[1] for c in tries] == ["bad", "worse", "worst"]
         assert not any(c[0][0] == "mount" for c in calls)
@@ -84,6 +89,33 @@ class TestOpening:
         monkeypatch.setattr(tool, "running_disk", lambda: "/dev/sda")
         with pytest.raises(tool.SourceError, match="running from"):
             tool.open_source("/dev/sda4", passphrase=lambda: "", run=lambda *a, **k: pytest.fail("nothing runs"))
+
+    def test_a_mount_of_a_different_source_is_closed_before_opening_this_one(self, tool, monkeypatch, tmp_path):
+        monkeypatch.setattr(tool, "MOUNT", tmp_path / "source")
+        monkeypatch.setattr(tool, "running_disk", lambda: "")
+        calls = []
+
+        class Result:
+            def __init__(self, code, stdout=""):
+                self.returncode, self.stdout, self.stderr = code, stdout, ""
+
+        def run(argv, **kwargs):
+            calls.append(tuple(argv))
+            if argv[0] == "blkid":
+                return Result(0, "ext4\n")
+            if argv[0] == "findmnt":
+                return Result(0, "/dev/sdc4\n")
+            return Result(0)
+
+        # /dev/sdc4 is mounted at MOUNT already, for a different device than
+        # the one being asked for; read_release then finds nothing at MOUNT
+        # (there is no real stick here), which is why this ends in SourceError
+        # rather than success -- what is being checked is the ordering of the
+        # calls leading up to it.
+        with pytest.raises(tool.SourceError):
+            tool.open_source("/dev/sdb4", passphrase=lambda: "", run=run)
+        names = [c[0] for c in calls]
+        assert names.index("umount") < names.index("mount")
 
 
 class TestRunSteps:
@@ -191,7 +223,9 @@ class TestRunSteps:
         assert "::step Installing packages" in lines
         assert "Get:1 http://deb.debian.org ..." in lines
         assert not any(line.startswith("::result") for line in lines)
-        assert any("vlc" in w for w in result.warnings)
+        # The child's own ::result failed line already recorded a warning;
+        # the exit code 1 that goes with it is the same failure, not a second one.
+        assert len(result.warnings) == 1 and "vlc" in result.warnings[0]
 
     def test_a_warn_only_step_is_emitted_and_runs_nothing(self, tool, migrate):
         out = io.StringIO()
@@ -201,6 +235,53 @@ class TestRunSteps:
         )
         assert result.ok
         assert "::warn uid 1500 is already in use" in out.getvalue()
+
+
+class TestRunStepsErrorHandling:
+    """execute() itself can raise -- a missing binary is FileNotFoundError, a
+    child that hung up is BrokenPipeError -- and that must land in the
+    protocol the same way a bad exit code does, not as a traceback with no
+    ::result line. Cancellation (KeyboardInterrupt, from main's signal
+    handler) is the one exception this must never turn into a warning: it
+    has to propagate so the caller's cleanup runs.
+    """
+
+    def test_a_missing_binary_on_an_optional_step_is_a_warning_and_the_run_goes_on(self, tool, migrate):
+        steps = [
+            migrate.Step("Telling systemd", argv=("timedatectl",), optional=True),
+            migrate.Step("Copying", argv=("rsync", "a")),
+        ]
+        ran = []
+
+        def execute(step, on_line):
+            ran.append(step.argv[0])
+            if step.argv[0] == "timedatectl":
+                raise FileNotFoundError("no such file: timedatectl")
+            return 0
+
+        result = tool.run_steps(steps, total=0, out=io.StringIO(), execute=execute)
+        assert result.ok
+        assert len(result.warnings) == 1 and "timedatectl" in result.warnings[0]
+        assert ran == ["timedatectl", "rsync"]
+
+    def test_a_missing_binary_on_an_ordinary_step_stops_the_run(self, tool, migrate):
+        step = migrate.Step("Creating the account", argv=("useradd",))
+
+        def execute(step, on_line):
+            raise FileNotFoundError("no such file: useradd")
+
+        result = tool.run_steps([step], total=0, out=io.StringIO(), execute=execute)
+        assert not result.ok
+        assert "useradd" in result.failure
+
+    def test_a_cancelled_step_is_not_swallowed(self, tool, migrate):
+        step = migrate.Step("Copying", argv=("rsync", "a"))
+
+        def execute(step, on_line):
+            raise KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            tool.run_steps([step], total=0, out=io.StringIO(), execute=execute)
 
 
 class TestApplySteps:
@@ -257,6 +338,9 @@ class TestPlanFile:
         assert migrate.from_json(json.dumps(data["inventory"])) == inventory
         assert data["account"] == {"name": "olduser", "gecos": "Old User", "sudo_nopasswd": True, "autologin": False}
         assert data["identity"] == {"hostname": "office", "locale": "en_GB.UTF-8", "keyboard": "gb", "timezone": "Europe/London"}
+        # The plan holds the account's password hash, so it is never world
+        # or group readable, not even momentarily while it is being written.
+        assert stat.S_IMODE(plan.stat().st_mode) == 0o600
 
     def test_a_plan_without_an_account_item_reports_no_account(self, tool, migrate, tmp_path):
         from test_migrate import make_source
@@ -281,3 +365,25 @@ class TestLocalTarget:
     def test_no_invoking_user_and_no_account_means_an_empty_target(self, tool, monkeypatch, tmp_path):
         monkeypatch.setattr(tool, "LOCAL_ROOT", tmp_path)
         assert tool.local_target({}) == tool.Target(root=Path("/"))
+
+
+class TestMainErrorHandling:
+    """main() is the last line of defence: whatever a verb raises, someone is
+    reading stdout for a ::result line, not a traceback on stderr."""
+
+    def test_a_missing_plan_ends_in_a_result_line_not_a_traceback(self, tool, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        code = tool.main(["apply", "--plan", str(tmp_path / "missing.json")])
+        assert code == tool.EXIT_FAILED
+        assert "::result failed" in capsys.readouterr().out
+
+    def test_a_cancelled_run_ends_in_a_result_line_not_a_traceback(self, tool, monkeypatch, capsys):
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        def cancelled(args):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(tool, "VERBS", {**tool.VERBS, "candidates": cancelled})
+        code = tool.main(["candidates"])
+        assert code == tool.EXIT_FAILED
+        assert "::result failed cancelled" in capsys.readouterr().out
