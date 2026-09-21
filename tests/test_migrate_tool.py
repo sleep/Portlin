@@ -387,3 +387,92 @@ class TestMainErrorHandling:
         code = tool.main(["candidates"])
         assert code == tool.EXIT_FAILED
         assert "::result failed cancelled" in capsys.readouterr().out
+
+
+class TestChecklist:
+    @pytest.fixture
+    def inventory(self, migrate, tmp_path):
+        from test_migrate import make_source, populate_home
+        populate_home(make_source(tmp_path))
+        return migrate.build_inventory(tmp_path)
+
+    def test_rows_group_items_under_unselectable_headings(self, tool, inventory):
+        rows = tool.checklist_rows(inventory)
+        tags = [tag for tag, _, _ in rows]
+        assert tags[0] == f"{tool.HEADING_PREFIX}account"
+        assert rows[0][1] == "-- Account --" and rows[0][2] is False
+        assert "home.files.Documents" in tags
+        docs = next(row for row in rows if row[0] == "home.files.Documents")
+        assert docs[1].startswith("  Documents") and "1 KB" in docs[1] and docs[2] is True
+        cache = next(row for row in rows if row[0] == "home.settings..cache")
+        assert cache[2] is False
+        # Headings only for categories that have something in them.
+        assert f"{tool.HEADING_PREFIX}network" not in tags
+
+    def test_a_note_is_shown_after_the_label(self, tool, migrate):
+        inventory = migrate.Inventory("0.1.2", "office", "home/x", (
+            migrate.Item("software.nvidia", "software", "NVIDIA driver", note="describes the old machine", default=False),
+        ))
+        row = tool.checklist_rows(inventory)[1]
+        assert "NVIDIA driver" in row[1] and "(describes the old machine)" in row[1]
+
+    def test_the_checklist_asks_for_one_tag_per_line(self, tool):
+        argv = tool.checklist_argv("What to bring over", "Tick what you want.", [("a", "A", True), ("b", "B", False)])
+        assert argv[0] == "whiptail"
+        assert "--separate-output" in argv and "--checklist" in argv
+        assert argv[-6:] == ["a", "A", "on", "b", "B", "off"]
+
+    def test_parsing_drops_headings_and_blank_lines(self, tool):
+        assert tool.parse_checklist("--account\naccount.olduser\n\nhome.files.Documents\n") == [
+            "account.olduser", "home.files.Documents",
+        ]
+
+    def test_the_summary_names_the_count_size_source_and_free_space(self, tool, inventory):
+        text = tool.plan_summary(inventory, ["home.files.Documents", "home.files.Downloads"], "SanDisk Ultra 57.3G", free=50_000_000_000)
+        assert "2 items, 6 KB from SanDisk Ultra 57.3G" in text
+        assert "50 GB" in text
+        assert "moved aside" in text
+
+
+class TestNarrow:
+    def test_only_and_skip_take_ids_or_categories(self, tool, migrate, tmp_path):
+        from test_migrate import make_source, populate_home
+        populate_home(make_source(tmp_path))
+        inventory = migrate.build_inventory(tmp_path)
+        ids = ["account.olduser", "home.files.Documents", "home.files.Downloads", "home.settings..config"]
+        assert tool.narrow(inventory, ids, ["home.files"], None) == ["home.files.Documents", "home.files.Downloads"]
+        assert tool.narrow(inventory, ids, None, ["home.files.Downloads", "account"]) == [
+            "home.files.Documents", "home.settings..config",
+        ]
+        assert tool.narrow(inventory, ids, None, None) == ids
+
+
+class TestVersions:
+    def test_a_newer_source_is_noticed_and_nothing_else_is(self, migrate):
+        assert migrate.newer_version("0.2.0", "0.1.2") is True
+        assert migrate.newer_version("0.1.10", "0.1.2") is True
+        assert migrate.newer_version("0.1.2", "0.1.2") is False
+        assert migrate.newer_version("0.1.1", "0.1.2") is False
+        assert migrate.newer_version("", "0.1.2") is False
+        assert migrate.newer_version("0.1.2~local", "0.1.2") is False
+
+
+class TestGauge:
+    def test_protocol_lines_become_gauge_updates(self, tool):
+        assert tool.gauge_feed("progress", "42", 10) == "XXX\n42\n\nXXX\n"
+        assert tool.gauge_feed("step", "Copying Documents", 42) == "XXX\n42\nCopying Documents\nXXX\n"
+        assert tool.gauge_feed("warn", "something", 42) is None
+
+    def test_the_writer_tracks_the_percent_and_feeds_the_process(self, tool):
+        feed = io.StringIO()
+        gauge = tool.Gauge(feed)
+        gauge.write("::step Copying Documents\n")
+        gauge.write("::progress 30\n")
+        gauge.write("sending incremental file list\n")
+        gauge.write("::step Copying Downloads\n")
+        assert feed.getvalue() == (
+            "XXX\n0\nCopying Documents\nXXX\n"
+            "XXX\n30\n\nXXX\n"
+            "XXX\n30\nCopying Downloads\nXXX\n"
+        )
+        assert gauge.percent == 30

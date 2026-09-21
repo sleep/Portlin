@@ -1032,6 +1032,16 @@ def dpkg_status_lines(status_file: str) -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
+def newer_version(source: str, local: str) -> bool:
+    """Whether the source ran a newer portlin, the direction in which
+    configuration formats diverge. Anything that is not plain dotted
+    integers on both sides is not compared, rather than guessed at."""
+    try:
+        return tuple(int(p) for p in source.split(".")) > tuple(int(p) for p in local.split("."))
+    except ValueError:
+        return False
+
+
 def mark_existing_account(inventory: Inventory, local_user: str) -> Inventory:
     """After setup the account exists, so the item is shown off and says so;
     the files go into the local account instead."""

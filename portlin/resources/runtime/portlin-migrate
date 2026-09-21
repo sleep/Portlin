@@ -34,6 +34,7 @@ Everything else is rsync, tar and apt talking, passed through for the log.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import grp
 import json
 import os
@@ -60,6 +61,7 @@ from devices import (  # noqa: E402
 from migrate import (  # noqa: E402
     ARCHIVE_SUFFIX,
     BACKUP_DIRNAME,
+    CATEGORIES,
     EXIT_NO_SPACE,
     Inventory,
     Step,
@@ -74,6 +76,7 @@ from migrate import (  # noqa: E402
     mark_existing_account,
     identity_steps,
     lsblk_argv,
+    newer_version,
     no_space_message,
     overall_percent,
     parse_lsblk,
@@ -522,6 +525,211 @@ def read_plan(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+# -- the console ----------------------------------------------------------------
+
+BACKTITLE = "Portlin migration"
+# Whiptail checklists are flat, so category headings are rows too: tagged
+# with this prefix so they can be told apart from items when read back.
+HEADING_PREFIX = "--"
+LABEL_WIDTH = 44
+
+
+class Cancelled(Exception):
+    """The user pressed Cancel or Esc."""
+
+
+def _whiptail(args: list[str], *, capture: bool = False) -> str:
+    """Selections come back on stderr, which is whiptail's convention. stdin is
+    the console on purpose: whiptail needs it, unlike everything else run here."""
+    proc = subprocess.run(["whiptail", "--backtitle", BACKTITLE, *args], stderr=subprocess.PIPE, text=True)
+    if proc.returncode == 255 or (proc.returncode != 0 and capture):
+        raise Cancelled()
+    return (proc.stderr or "").strip()
+
+
+def _height(text: str, minimum: int = 12) -> int:
+    return max(minimum, min(text.count("\n") + 9, 22))
+
+
+def message(title: str, text: str) -> None:
+    _whiptail(["--title", title, "--msgbox", text, str(_height(text, 14)), "76"])
+
+
+def confirm(title: str, text: str) -> bool:
+    argv = ["whiptail", "--backtitle", BACKTITLE, "--title", title, "--yesno", text, str(_height(text)), "76"]
+    return subprocess.run(argv).returncode == 0
+
+
+def ask(title: str, text: str, default: str = "") -> str:
+    return _whiptail(["--title", title, "--inputbox", text, "12", "76", default], capture=True)
+
+
+def ask_password(title: str, text: str) -> str:
+    return _whiptail(["--title", title, "--passwordbox", text, "12", "76"], capture=True)
+
+
+def choose(title: str, text: str, entries: list[tuple[str, str]]) -> str:
+    rows = [part for tag, label in entries for part in (tag, label)]
+    return _whiptail(
+        ["--title", title, "--menu", text, "20", "76", str(min(len(entries), 12)), *rows], capture=True
+    )
+
+
+def checklist_rows(inventory: Inventory) -> list[tuple[str, str, bool]]:
+    rows = []
+    for category, heading in CATEGORIES:
+        items = [item for item in inventory.items if item.category == category]
+        if not items:
+            continue
+        rows.append((f"{HEADING_PREFIX}{category}", f"-- {heading} --", False))
+        for item in items:
+            label = item.label[:LABEL_WIDTH]
+            if item.note:
+                label += f" ({item.note})"
+            size = human(item.bytes) if item.bytes else ""
+            rows.append((item.id, f"  {label:<{LABEL_WIDTH + 2}} {size:>9}".rstrip(), item.default))
+    return rows
+
+
+def checklist_argv(title: str, text: str, rows) -> list[str]:
+    flat = [part for tag, label, on in rows for part in (tag, label, "on" if on else "off")]
+    return ["whiptail", "--backtitle", BACKTITLE, "--separate-output", "--title", title,
+            "--checklist", text, "22", "78", "14", *flat]
+
+
+def parse_checklist(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line and not line.startswith(HEADING_PREFIX)]
+
+
+def checklist(title: str, text: str, rows) -> list[str]:
+    proc = subprocess.run(checklist_argv(title, text, rows), stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        raise Cancelled()
+    return parse_checklist(proc.stderr or "")
+
+
+def plan_summary(inventory: Inventory, ids: list[str], label: str, free: int) -> str:
+    count = len(selected(inventory, ids))
+    size = selected_bytes(inventory, ids)
+    return (
+        f"\n{count} item{'s' if count != 1 else ''}, {human(size)} from {label}\n"
+        f"Free space after: {human(max(0, free - size))}\n\n"
+        "Files already here with the same names are moved aside, not deleted.\n\n"
+        "Bring these over now?"
+    )
+
+
+def gauge_feed(kind: str, rest: str, percent: int) -> str | None:
+    """What a protocol line means to whiptail --gauge: a new percentage, or a
+    new caption at the current one. XXX blocks are its update syntax."""
+    if kind == "progress":
+        return f"XXX\n{rest}\n\nXXX\n"
+    if kind == "step":
+        return f"XXX\n{percent}\n{rest}\nXXX\n"
+    return None
+
+
+class Gauge:
+    """An ``out`` for run_steps that draws a whiptail gauge instead of printing.
+
+    Ordinary command output goes to the log only; the gauge shows the step
+    name and the percentage, which is what a person at a console wants to
+    see while a home directory copies.
+    """
+
+    def __init__(self, feed=None) -> None:
+        self.percent = 0
+        self.process = None
+        if feed is None:
+            self.process = subprocess.Popen(
+                ["whiptail", "--backtitle", BACKTITLE, "--title", "Bringing things over",
+                 "--gauge", "Starting...", "8", "76", "0"],
+                stdin=subprocess.PIPE, text=True,
+            )
+            feed = self.process.stdin
+        self.feed = feed
+        self.buffer = ""
+
+    def write(self, text: str) -> None:
+        self.buffer += text
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            self._line(line)
+
+    def _line(self, line: str) -> None:
+        if not line.startswith("::"):
+            log(line)
+            return
+        kind, _, rest = line[2:].partition(" ")
+        if kind == "progress" and rest.isdigit():
+            self.percent = int(rest)
+        update = gauge_feed(kind, rest, self.percent)
+        if update:
+            self.feed.write(update)
+            self.feed.flush()
+        else:
+            log(line)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        if self.process:
+            self.process.stdin.close()
+            self.process.wait()
+
+
+def interactive_plan(source_path: str | None, *, firstboot: bool, keep_open: bool, out_path: Path) -> int:
+    """Steps 1 to 4 of the console flow: source, passphrase, checklist, confirm."""
+    candidate = None
+    if source_path and source_path != "auto":
+        path = source_path
+    else:
+        found = list_candidates()
+        if not found:
+            message("Nothing to migrate from",
+                    "\nNo other portlin drive and no backup archive was found.\n\n"
+                    "Plug the old drive in, or put the archive on a drive that is plugged in, and try again.")
+            return EXIT_FAILED
+        entries = [(c.path, describe(c)) for c in found] + [("other", "Somewhere else (type a path)")]
+        path = choose("Migrate from", "Where should files and settings come from?", entries)
+        if path == "other":
+            path = ask("Migrate from", "Enter the device or archive path:")
+        candidate = next((c for c in found if c.path == path), None)
+    source = open_source(path, passphrase=lambda: ask_password(
+        "Unlock the old drive", "\nEnter the passphrase for the old drive:"))
+    try:
+        inventory = source_inventory(source, firstboot=firstboot)
+        if not firstboot:
+            inventory = mark_existing_account(inventory, local_target().user)
+        if candidate:
+            candidate = dataclasses.replace(candidate, version=inventory.version)
+        label = describe(candidate) if candidate else Path(path).name
+        local_version = read_release(LOCAL_ROOT).get("PORTLIN_VERSION", "")
+        if newer_version(inventory.version, local_version):
+            message(
+                "Newer than this stick",
+                f"\nThe old drive runs portlin {inventory.version} and this one runs "
+                f"{local_version}.\n\nSettings written by a newer version may not be "
+                "understood by an older one. Everything is still copied as it is.",
+            )
+        ids = checklist(
+            "What to bring over",
+            "Space ticks and unticks, Tab reaches the buttons. Headings do nothing.",
+            checklist_rows(inventory),
+        )
+        if not ids:
+            message("Nothing chosen", "\nNothing was ticked, so nothing will be brought over.")
+            return EXIT_FAILED
+        if not confirm("Ready", plan_summary(inventory, ids, label, shutil.disk_usage("/").free)):
+            return EXIT_FAILED
+        write_plan(out_path, source=source, ids=ids, inventory=inventory, firstboot=firstboot, label=label)
+        return EXIT_OK
+    finally:
+        if source.kind == "stick" and not (keep_open and out_path.exists()):
+            close_source()
+
+
 # -- verbs ----------------------------------------------------------------------
 
 
@@ -569,27 +777,33 @@ def cmd_inventory(args) -> int:
     return EXIT_OK
 
 
-def refuse_if_too_big(inventory: Inventory, ids: list[str]) -> int:
-    short = shortfall(selected_bytes(inventory, ids), shutil.disk_usage("/").free)
-    if short:
-        emit("result", "failed", no_space_message(short, unclaimed_now()))
-        return EXIT_NO_SPACE
-    return EXIT_OK
+def narrow(inventory: Inventory, ids: list[str], only, skip) -> list[str]:
+    """--only keeps ids or whole categories; --skip drops them."""
+    kept = []
+    for item in selected(inventory, ids):
+        names = (item.id, item.category)
+        if only and not any(n in only for n in names):
+            continue
+        if skip and any(n in skip for n in names):
+            continue
+        kept.append(item.id)
+    return kept
 
 
-def cmd_apply(args) -> int:
-    plan = read_plan(Path(args.plan))
+def apply_plan(path: Path, *, out, only=None, skip=None) -> tuple[int, str]:
+    """Run a plan. Returns the exit code and the text for ::result or a dialog."""
+    plan = read_plan(path)
     inventory = from_json(json.dumps(plan["inventory"]))
-    ids = list(plan["ids"])
+    ids = narrow(inventory, list(plan["ids"]), only, skip)
     firstboot = bool(plan.get("firstboot"))
     stamp = stamp_now()
     source = open_source(plan["source"], passphrase=passphrase_from_stdin)
     try:
         if source.kind == "archive":
             source_inventory(source, firstboot=firstboot)  # fills the listing
-        code = refuse_if_too_big(inventory, ids)
-        if code:
-            return code
+        short = shortfall(selected_bytes(inventory, ids), shutil.disk_usage("/").free)
+        if short:
+            return EXIT_NO_SPACE, no_space_message(short, unclaimed_now())
         target = local_target()
         warnings: list[str] = []
         account = next((a for a in inventory.accounts if f"account.{a.name}" in ids), None)
@@ -597,30 +811,74 @@ def cmd_apply(args) -> int:
             result = run_steps(
                 account_steps(account, existing_groups={g.gr_name for g in grp.getgrall()},
                               uid_free=not uid_in_use(account.uid)),
-                total=0,
+                total=0, out=out,
             )
             warnings += result.warnings
             if not result.ok:
-                emit("result", "failed", result.failure)
-                return EXIT_FAILED
+                return EXIT_FAILED, result.failure
             target = target_for(account.name)
         elif account and target.user:
-            emit("warn", f"the account {target.user} already exists here, so {account.name}'s files go into it")
+            emit("warn", f"the account {target.user} already exists here, so {account.name}'s files go into it", out=out)
         steps = apply_steps(
             inventory, ids, source, target, stamp, firstboot=firstboot,
             hosts_text=Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else "",
             icon_theme_installed=lambda name: Path(f"/usr/share/icons/{name}/index.theme").exists(),
         )
-        result = run_steps(steps, total=sum(s.weight for s in steps))
+        result = run_steps(steps, total=sum(s.weight for s in steps), out=out)
         warnings += result.warnings
         if not result.ok:
-            emit("result", "failed", result.failure)
-            return EXIT_FAILED
-        emit("result", "ok", summary(len(selected(inventory, ids)), target, stamp, warnings))
-        return EXIT_OK
+            return EXIT_FAILED, result.failure
+        return EXIT_OK, summary(len(selected(inventory, ids)), target, stamp, warnings)
     finally:
         if source.kind == "stick":
             close_source()
+
+
+def cmd_apply(args) -> int:
+    if args.gauge:
+        gauge = Gauge()
+        try:
+            code, text = apply_plan(Path(args.plan), out=gauge)
+        finally:
+            gauge.close()
+        message("Done" if code == EXIT_OK else "Not finished", "\n" + text)
+        return code
+    code, text = apply_plan(Path(args.plan), out=sys.stdout, only=args.only, skip=args.skip)
+    emit("result", "ok" if code == EXIT_OK else "failed", text)
+    return code
+
+
+def cmd_plan(args) -> int:
+    try:
+        return interactive_plan(args.source, firstboot=args.firstboot, keep_open=args.keep_open,
+                                out_path=Path(args.out))
+    except Cancelled:
+        close_source()
+        return EXIT_FAILED
+
+
+def cmd_restore(args) -> int:
+    plan_path = PLAN_DIR / "plan.json"
+    try:
+        code = interactive_plan(args.source, firstboot=False, keep_open=True, out_path=plan_path)
+    except Cancelled:
+        close_source()
+        return EXIT_FAILED
+    if code != EXIT_OK:
+        return code
+    gauge = Gauge()
+    try:
+        code, text = apply_plan(plan_path, out=gauge)
+    finally:
+        gauge.close()
+        plan_path.unlink(missing_ok=True)
+    message("Done" if code == EXIT_OK else "Not finished", "\n" + text)
+    return code
+
+
+def cmd_close(args) -> int:
+    close_source()
+    return EXIT_OK
 
 
 def summary(count: int, target: Target, stamp: str, warnings: list[str]) -> str:
@@ -669,8 +927,19 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("--firstboot", action="store_true")
     apply = verbs.add_parser("apply")
     apply.add_argument("--plan", required=True)
+    apply.add_argument("--gauge", action="store_true", help="draw a whiptail gauge instead of printing")
+    apply.add_argument("--only", nargs="+", metavar="ID", help="ids or categories to keep from the plan")
+    apply.add_argument("--skip", nargs="+", metavar="ID", help="ids or categories to drop from the plan")
     export = verbs.add_parser("export")
     export.add_argument("file")
+    plan = verbs.add_parser("plan")
+    plan.add_argument("source", nargs="?")
+    plan.add_argument("--out", required=True)
+    plan.add_argument("--firstboot", action="store_true")
+    plan.add_argument("--keep-open", action="store_true")
+    restore = verbs.add_parser("restore")
+    restore.add_argument("source", nargs="?")
+    verbs.add_parser("close")
     return parser
 
 
@@ -679,6 +948,9 @@ VERBS = {
     "inventory": cmd_inventory,
     "apply": cmd_apply,
     "export": cmd_export,
+    "plan": cmd_plan,
+    "restore": cmd_restore,
+    "close": cmd_close,
 }
 
 
@@ -703,6 +975,9 @@ def main(argv=None) -> int:
         return EXIT_FAILED
     except KeyboardInterrupt:
         emit("result", "failed", "cancelled")
+        return EXIT_FAILED
+    except Cancelled:
+        close_source()
         return EXIT_FAILED
     except (OSError, KeyError, ValueError) as exc:
         # A malformed or missing plan file, or a manifest that names an
