@@ -235,7 +235,7 @@ class TestRunSteps:
             return 0
 
         result = tool.run_steps([step], total=0, out=io.StringIO(), execute=execute,
-                                move_roots=(tmp_path / "home/alice",))
+                                move_roots=((tmp_path / "home/alice", tmp_path / "home/alice"),))
         assert result.ok
         assert seen == {"existing": False, "backup": "mine", "made": True, "hostname": "office\n"}
 
@@ -703,7 +703,7 @@ class TestHostileSourceAtRun:
         existing = home / "Documents/passwd"
         backup = home / ".portlin-migrate-backup/stamp/Documents/passwd"
         step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(existing), str(backup)),))
-        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=(home,),
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=((home, home),),
                                 execute=lambda *a: pytest.fail("the step must not run"))
         assert not result.ok
         assert "passwd" in result.failure
@@ -725,15 +725,17 @@ class TestHostileSourceAtRun:
         existing.write_text("mine")
         backup = tmp_path / "home/alice/.portlin-migrate-backup/stamp/notes.txt"
         step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(existing), str(backup)),))
-        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=(tmp_path / "home/alice",),
+        result = tool.run_steps([step], total=0, out=io.StringIO(),
+                                move_roots=((tmp_path / "home/alice", tmp_path / "home/alice"),),
                                 execute=lambda *a: 0)
         assert result.ok and backup.read_text() == "mine" and not existing.exists()
 
     def test_apply_plan_confines_moves_to_the_home_etc_and_var(self, tool, migrate):
+        backups = Path("/var/backups")
         assert tool.move_roots(migrate.Target(Path("/"), "alice", 1000, 1000, "home/alice")) == (
-            Path("/home/alice"), Path("/etc"), Path("/var"),
+            (Path("/home/alice"), Path("/home/alice")), (Path("/etc"), backups), (Path("/var"), backups),
         )
-        assert tool.move_roots(migrate.Target(Path("/"))) == (Path("/etc"), Path("/var"))
+        assert tool.move_roots(migrate.Target(Path("/"))) == ((Path("/etc"), backups), (Path("/var"), backups))
 
     def test_a_private_write_is_created_unreadable_to_others(self, tool, migrate, tmp_path):
         path = tmp_path / "export/manifest.json"
@@ -831,9 +833,31 @@ class TestHostileSourceAtRun:
         (home / ".portlin-migrate-backup").symlink_to(outside)
         backup = home / ".portlin-migrate-backup/stamp/notes.txt"
         step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(home / "notes.txt"), str(backup)),))
-        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=(home,),
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=((home, home),),
                                 execute=lambda *a: pytest.fail("the step must not run"))
         assert not result.ok and "notes.txt" in result.failure
         assert (home / "notes.txt").read_text() == "mine"
         # Nothing was created on the far side of the link either.
         assert list(outside.iterdir()) == []
+
+    def test_a_move_aside_must_back_up_into_the_root_the_file_came_from(self, tool, migrate, tmp_path):
+        home = tmp_path / "home/alice"
+        home.mkdir(parents=True)
+        (home / "notes.txt").write_text("mine")
+        var = tmp_path / "var"
+        var.mkdir()
+        step = migrate.Step("Restoring", argv=("tar", "x"),
+                            move_aside=((str(home / "notes.txt"), str(var / "backups/stamp/notes.txt")),))
+        roots = ((home, home), (tmp_path / "etc", var / "backups"), (var, var / "backups"))
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=roots,
+                                execute=lambda *a: pytest.fail("the step must not run"))
+        assert not result.ok and "notes.txt" in result.failure
+        assert (home / "notes.txt").read_text() == "mine" and not (var / "backups").exists()
+        # A system file goes to the system backup tree, as the planner puts it.
+        etc = tmp_path / "etc/cups"
+        etc.mkdir(parents=True)
+        (etc / "printers.conf").write_text("old")
+        backup = var / "backups/portlin-migrate/stamp/etc/cups/printers.conf"
+        step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(etc / "printers.conf"), str(backup)),))
+        result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=roots, execute=lambda *a: 0)
+        assert result.ok and backup.read_text() == "old"

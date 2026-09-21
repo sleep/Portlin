@@ -1284,3 +1284,26 @@ class TestHostileSource:
     def test_a_timezone_that_is_not_a_zone_name_is_refused(self, migrate, value):
         steps = migrate.identity_steps(migrate.Identity(timezone=value), ["identity.timezone"], hosts_text="")
         assert len(steps) == 1 and steps[0].warn and steps[0].write == ()
+
+    # Round three: a link deeper inside a chosen item, below what
+    # _confined checks and above any existing file collisions would see.
+    def test_a_member_below_a_symlink_inside_a_chosen_item_is_refused(self, migrate, tmp_path):
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/etc/sudoers.d").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Documents").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Documents/sub").symlink_to(tmp_path / "t/etc/sudoers.d")
+        items = [migrate.Item("docs", "home.files", "Documents", paths=("home/olduser/Documents",))]
+        listing = "home/olduser/Documents/\nhome/olduser/Documents/sub/evil\n"
+        with pytest.raises(ValueError, match="Documents/sub/evil"):
+            migrate.plan_archive(self._inventory(migrate, items), ["docs"], tmp_path / "a.tar.zst", listing, target, STAMP)
+        assert not (tmp_path / "t/etc/sudoers.d/evil").exists()
+
+    def test_a_member_below_a_symlink_that_stays_inside_the_home_passes(self, migrate, tmp_path):
+        target = self._target(migrate, tmp_path / "t")
+        (tmp_path / "t/home/alice/Documents").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Downloads").mkdir()
+        (tmp_path / "t/home/alice/Documents/sub").symlink_to("../Downloads")
+        items = [migrate.Item("docs", "home.files", "Documents", paths=("home/olduser/Documents",))]
+        listing = "home/olduser/Documents/\nhome/olduser/Documents/sub/evil\n"
+        steps = migrate.plan_archive(self._inventory(migrate, items), ["docs"], tmp_path / "a.tar.zst", listing, target, STAMP)
+        assert steps[0].argv[0] == "tar" and steps[0].move_aside == ()

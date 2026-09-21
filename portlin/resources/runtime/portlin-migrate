@@ -65,6 +65,7 @@ from migrate import (  # noqa: E402
     CATEGORIES,
     EXIT_NO_SPACE,
     MANIFEST,
+    SYSTEM_BACKUP_ROOT,
     Inventory,
     Step,
     Target,
@@ -353,12 +354,19 @@ def local_shells(path: Path = SHELLS) -> set[str]:
     return {line.strip() for line in lines if line.strip() and not line.startswith("#")}
 
 
-def move_roots(target: Target) -> tuple[Path, ...]:
-    """Where a move-aside may act: the account's home and the two system
-    trees the plan's fixed paths live in. Nothing else on this system is
-    the plan's to rename, whatever the source says."""
-    roots = (Path("/etc"), Path("/var"))
-    return (Path("/") / target.home, *roots) if target.home else roots
+def move_roots(target: Target) -> tuple[tuple[Path, Path], ...]:
+    """Where a move-aside may act, as (root, backup root) pairs: a file
+    under the account's home is backed up inside that home, and a file
+    under the two system trees the plan's fixed paths live in is backed
+    up under /var/backups, the same split the planner's backup_dir makes.
+    Nothing else on this system is the plan's to rename, whatever the
+    source says."""
+    backups = Path("/") / Path(SYSTEM_BACKUP_ROOT).parent
+    roots = ((Path("/etc"), backups), (Path("/var"), backups))
+    if target.home:
+        home = Path("/") / target.home
+        return ((home, home), *roots)
+    return roots
 
 
 def unclaimed_now() -> int:
@@ -376,22 +384,25 @@ def unclaimed_now() -> int:
 # -- running a plan -------------------------------------------------------------
 
 
-def move_aside(existing: str, backup: str, roots: tuple[Path, ...]) -> None:
+def move_aside(existing: str, backup: str, roots: tuple[tuple[Path, Path], ...]) -> None:
     """Rename existing into the backup tree, but only when the entry being
-    renamed sits inside one of roots once every symlink is resolved. The
-    planner checks the same thing; this is the last line of defence should
-    the filesystem have changed since, or a plan arrive from elsewhere."""
-    allowed = ", ".join(map(str, roots)) or "every allowed root"
-    if not any(entry_within(existing, root) for root in roots):
+    renamed sits inside one of the roots once every symlink is resolved,
+    and the backup lands in that root's backup tree. The planner checks
+    the same thing; this is the last line of defence should the filesystem
+    have changed since, or a plan arrive from elsewhere."""
+    allowed = ", ".join(str(root) for root, _ in roots) or "every allowed root"
+    pair = next((pair for pair in roots if entry_within(existing, pair[0])), None)
+    if pair is None:
         log(f"refused to move aside {existing}: outside {allowed}")
         raise OSError(f"refusing to touch {existing}: it leads outside the home and the system trees")
     # The backup side too, and before the mkdir: a backup tree that is a
     # symlink would otherwise have the directories made, and the file
     # renamed, on its far side. realpath resolves what exists and keeps
     # the rest, so the check reads the same before the directories exist.
-    if not any(entry_within(backup, root) for root in roots):
-        log(f"refused to move aside {existing}: its backup {backup} is outside {allowed}")
-        raise OSError(f"refusing to back up {existing}: {backup} leads outside the home and the system trees")
+    root, backup_root = pair
+    if not entry_within(backup, backup_root):
+        log(f"refused to move aside {existing}: its backup {backup} is outside {backup_root}")
+        raise OSError(f"refusing to back up {existing}: {backup} leads outside {backup_root}")
     Path(backup).parent.mkdir(parents=True, exist_ok=True)
     os.rename(existing, backup)
     log(f"moved aside {existing} -> {backup}")
@@ -456,9 +467,11 @@ def _execute(step: Step, on_line: Callable[[str], None]) -> int:
     return proc.wait()
 
 
-def run_steps(steps, *, total: int, out=None, execute=None, move_roots: tuple[Path, ...] = ()) -> RunResult:
+def run_steps(steps, *, total: int, out=None, execute=None,
+              move_roots: tuple[tuple[Path, Path], ...] = ()) -> RunResult:
     """Run a plan's steps in order. ``move_roots`` is where a step's
-    move-asides may act; with none given, every move-aside is refused."""
+    move-asides may act, as move_roots() gives it; with none given, every
+    move-aside is refused."""
     out = out or sys.stdout
     execute = execute or _execute
     warnings: list[str] = []

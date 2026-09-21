@@ -964,19 +964,23 @@ def unsafe_members(listing: str, paths: list[str]) -> list[str]:
 def collisions(members: list[str], source_home: str, target: Target, stamp: str) -> list[tuple[str, str]]:
     """(existing, backup) for every member that would land on a file already there.
 
-    The rename that follows acts on the entry named here, so the directory
-    holding that entry must resolve inside the home or the system tree the
-    member belongs to: a directory on the way that is really a symlink out
-    of it would otherwise have a file elsewhere renamed into the backup.
+    Every member's parent must resolve inside the home or the system tree
+    the member belongs to, whether the member exists here yet or not: a
+    directory on the way that is really a symlink out of it would have
+    tar write on the far side, or a file elsewhere renamed into the backup.
     """
     moves = []
     for member in members:
         destination = target_path(member, source_home, target.home)
         existing = target.root / destination
+        # Checked whether or not anything is there yet: tar creates a
+        # member below a directory that is really a link (left by an
+        # earlier restore, since -a keeps links as links) on the far side
+        # of it, and its own guard only covers links from the same archive.
+        root = confinement_root(destination, target)
+        if root is None or not entry_within(existing, root):
+            raise ValueError(f"refusing to touch {destination}: it leads outside {root or 'the home'}")
         if existing.is_symlink() or existing.exists():
-            root = confinement_root(destination, target)
-            if root is None or not entry_within(existing, root):
-                raise ValueError(f"refusing to touch {destination}: it leads outside {root or 'the home'}")
             backup = backup_dir(target, destination, stamp)
             _backup_confined(destination, backup, target)
             moves.append((str(existing), str(backup)))
