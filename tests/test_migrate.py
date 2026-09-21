@@ -243,3 +243,162 @@ class TestReadIdentity:
         (tmp_path / "etc" / "timezone").unlink()
         (tmp_path / "etc" / "localtime").symlink_to("/usr/share/zoneinfo/Europe/Prague")
         assert migrate.read_identity(tmp_path).timezone == "Europe/Prague"
+
+
+def populate_home(home: Path) -> None:
+    (home / "Documents").mkdir()
+    (home / "Documents" / "notes.txt").write_text("x" * 1000)
+    (home / "Downloads").mkdir()
+    (home / "Downloads" / "big.iso").write_text("y" * 5000)
+    (home / ".config").mkdir()
+    (home / ".config" / "app.ini").write_text("z" * 100)
+    (home / ".cache").mkdir()
+    (home / ".cache" / "junk").write_text("w" * 300)
+    (home / ".bashrc").write_text("# rc\n")
+    (home / ".portlin-migrate-backup").mkdir()
+    (home / ".portlin-migrate-backup" / "old").write_text("gone")
+    (home / "link-to-docs").symlink_to("Documents")
+
+
+class TestInventory:
+    @pytest.fixture
+    def source(self, tmp_path):
+        home = make_source(tmp_path)
+        populate_home(home)
+        return tmp_path
+
+    def test_home_entries_split_into_files_and_settings(self, migrate, source):
+        inventory = migrate.build_inventory(source)
+        by_id = {item.id: item for item in inventory.items}
+        assert by_id["home.files.Documents"].category == "home.files"
+        assert by_id["home.files.Downloads"].paths == ("home/olduser/Downloads",)
+        assert by_id["home.settings..config"].category == "home.settings"
+        assert by_id["home.settings..bashrc"].paths == ("home/olduser/.bashrc",)
+
+    def test_sizes_are_the_tree_totals(self, migrate, source):
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert by_id["home.files.Documents"].bytes == 1000
+        assert by_id["home.files.Downloads"].bytes == 5000
+        assert by_id["home.settings..config"].bytes == 100
+
+    def test_a_symlink_counts_as_itself_not_its_target(self, migrate, source):
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert by_id["home.files.link-to-docs"].bytes < 1000
+
+    def test_cache_is_listed_but_unticked_and_the_backup_tree_is_not_listed(self, migrate, source):
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert by_id["home.settings..cache"].default is False
+        assert "home.settings..portlin-migrate-backup" not in by_id
+
+    def test_the_account_and_identity_become_items(self, migrate, source):
+        inventory = migrate.build_inventory(source)
+        by_id = {item.id: item for item in inventory.items}
+        assert by_id["account.olduser"].value == "olduser"
+        assert by_id["identity.hostname"].value == "office"
+        assert by_id["identity.locale"].value == "en_GB.UTF-8"
+        assert by_id["identity.keyboard"].value == "gb"
+        assert by_id["identity.timezone"].value == "Europe/London"
+        assert inventory.accounts[0].name == "olduser"
+        assert inventory.identity.hostname == "office"
+        assert inventory.version == "0.1.2"
+        assert inventory.hostname == "office"
+        assert inventory.home == "home/olduser"
+
+    def test_network_and_extras_appear_only_when_present(self, migrate, source):
+        assert not [i for i in migrate.build_inventory(source).items if i.category in ("network", "extras")]
+        connections = source / "etc/NetworkManager/system-connections"
+        connections.mkdir(parents=True)
+        (connections / "cafe.nmconnection").write_text("[wifi]\n")
+        bluetooth = source / "var/lib/bluetooth/AA:BB"
+        bluetooth.mkdir(parents=True)
+        (bluetooth / "settings").write_text("x")
+        (source / "etc/cups").mkdir(parents=True)
+        (source / "etc/cups/printers.conf").write_text("p")
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert by_id["network"].paths == ("etc/NetworkManager/system-connections",)
+        assert by_id["extras.bluetooth"].paths == ("var/lib/bluetooth",)
+        # ppd/ does not exist here, so only the file that does is planned.
+        assert by_id["extras.printers"].paths == ("etc/cups/printers.conf",)
+
+    def test_theme_names_are_read_out_of_the_overlay(self, migrate, source):
+        xsettings = source / migrate.XSETTINGS
+        xsettings.parent.mkdir(parents=True)
+        xsettings.write_text(
+            '<channel name="xsettings">\n'
+            '  <property name="ThemeName" type="string" value="Greybird-dark"/>\n'
+            '  <property name="IconThemeName" type="string" value="Papirus"/>\n'
+            "</channel>\n"
+        )
+        assert migrate.read_theme_names(source) == {"theme": "Greybird-dark", "icons": "Papirus"}
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert by_id["extras.theme"].value == '{"theme": "Greybird-dark", "icons": "Papirus"}'
+        assert "Greybird-dark" in by_id["extras.theme"].label
+
+    def test_software_comes_from_records_then_from_the_catalog_check(self, migrate, source):
+        catalog = load_tool("catalog.py")
+        state = source / migrate.SOFTWARE_STATE
+        state.mkdir(parents=True)
+        (state / "mullvad.json").write_text('{"packages": ["mullvad-vpn"]}')
+        # A driver entry recorded on the old machine must be listed but off.
+        nvidia = next(e for e in catalog.ENTRIES if e.category == "Drivers")
+        (state / f"{nvidia.id}.json").write_text("{}")
+        # An entry with no record but a dpkg check that matches.
+        by_dpkg = next(e for e in catalog.ENTRIES if e.check.kind == "dpkg" and e.category != "Drivers"
+                       and e.id != "mullvad")
+        dpkg_status = f"{by_dpkg.check.values[0]} installed\n"
+        by_id = {
+            item.id: item
+            for item in migrate.build_inventory(source, dpkg_status=dpkg_status).items
+        }
+        assert by_id["software.mullvad"].default is True
+        assert by_id[f"software.{nvidia.id}"].default is False
+        assert by_id[f"software.{by_dpkg.id}"].value == by_dpkg.id
+        assert by_id["software.mullvad"].category == "software"
+
+    def test_first_boot_leaves_software_unticked_because_there_is_no_network(self, migrate, source):
+        state = source / migrate.SOFTWARE_STATE
+        state.mkdir(parents=True)
+        (state / "mullvad.json").write_text("{}")
+        by_id = {item.id: item for item in migrate.build_inventory(source, firstboot=True).items}
+        assert by_id["software.mullvad"].default is False
+        assert "network" in by_id["software.mullvad"].note
+
+    def test_items_come_out_in_category_order(self, migrate, source):
+        order = [category for category, _ in migrate.CATEGORIES]
+        seen = [item.category for item in migrate.build_inventory(source).items]
+        assert seen == sorted(seen, key=order.index)
+
+    def test_json_round_trips(self, migrate, source):
+        inventory = migrate.build_inventory(source)
+        assert migrate.from_json(migrate.to_json(inventory)) == inventory
+
+
+class TestSelection:
+    @pytest.fixture
+    def inventory(self, migrate, tmp_path):
+        populate_home(make_source(tmp_path))
+        return migrate.build_inventory(tmp_path)
+
+    def test_the_default_plan_is_everything_ticked(self, migrate, inventory):
+        ids = migrate.choose_ids(inventory)
+        assert "home.files.Documents" in ids
+        assert "home.settings..cache" not in ids
+
+    def test_only_narrows_by_id_or_category(self, migrate, inventory):
+        assert migrate.choose_ids(inventory, only=["home.files"]) == [
+            i.id for i in inventory.items if i.category == "home.files"
+        ]
+        assert migrate.choose_ids(inventory, only=["home.settings..cache"]) == ["home.settings..cache"]
+
+    def test_skip_removes_by_id_or_category(self, migrate, inventory):
+        ids = migrate.choose_ids(inventory, skip=["account", "home.files.Downloads"])
+        assert "account.olduser" not in ids
+        assert "home.files.Downloads" not in ids
+        assert "home.files.Documents" in ids
+
+    def test_selected_bytes_sums_only_what_was_chosen(self, migrate, inventory):
+        assert migrate.selected_bytes(inventory, ["home.files.Documents", "identity.hostname"]) == 1000
+
+    def test_selected_keeps_inventory_order(self, migrate, inventory):
+        chosen = migrate.selected(inventory, ["home.files.Downloads", "account.olduser"])
+        assert [i.id for i in chosen] == ["account.olduser", "home.files.Downloads"]
