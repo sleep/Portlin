@@ -92,6 +92,20 @@ class TestCandidates:
         assert migrate.parse_lsblk("", running_disk="/dev/sda") == []
         assert migrate.parse_lsblk("not json", running_disk="/dev/sda") == []
 
+    def test_a_partition_number_printed_as_a_string_still_matches(self, migrate):
+        # Some util-linux builds render PARTN as a JSON string ("4") rather
+        # than a number. A parser keyed on int(3)/int(4) alone would silently
+        # drop every candidate against that lsblk, which is exactly the shape
+        # of bug a fixture built entirely from Python ints cannot catch.
+        data = json.loads(LSBLK)
+        for disk in data["blockdevices"]:
+            for child in disk.get("children", []):
+                if child["partn"] is not None:
+                    child["partn"] = str(child["partn"])
+        stringy = json.dumps(data)
+        found = migrate.parse_lsblk(stringy, running_disk="/dev/sda")
+        assert [c.path for c in found] == ["/dev/sdb4", "/dev/sdc4"]
+
     def test_lsblk_is_asked_for_json_with_the_columns_the_parser_reads(self, migrate):
         argv = migrate.lsblk_argv()
         assert argv[:2] == ["lsblk", "--json"]

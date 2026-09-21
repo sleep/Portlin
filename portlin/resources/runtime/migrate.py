@@ -37,8 +37,11 @@ MANIFEST = "manifest.json"
 RELEASE_FILE = "etc/portlin-release"
 
 # PARTN rather than guessing from the name: sda4 and nvme0n1p4 spell the
-# number differently, and lsblk knows it either way.
-LSBLK_COLUMNS = "PATH,LABEL,FSTYPE,SIZE,MODEL,TRAN,PARTN"
+# number differently, and lsblk knows it either way. NAME is requested and
+# never read: current util-linux only nests a disk's partitions under it as
+# "children" in --json output when NAME is among the requested columns, and
+# parse_lsblk's walk of disk["children"] finds nothing without it.
+LSBLK_COLUMNS = "NAME,PATH,LABEL,FSTYPE,SIZE,MODEL,TRAN,PARTN"
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,17 @@ def lsblk_argv() -> list[str]:
     return ["lsblk", "--json", "-o", LSBLK_COLUMNS]
 
 
+def _partition_number(child: dict) -> int | None:
+    """child["partn"] as an int. Some util-linux builds render PARTN as a
+    JSON string ("4") rather than a number; a string key there would never
+    match the int lookups below, and every candidate would be silently
+    dropped."""
+    try:
+        return int(child.get("partn"))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_lsblk(text: str, running_disk: str) -> list[Candidate]:
     """Every portlin stick in lsblk's output, other than the one running.
 
@@ -71,11 +85,11 @@ def parse_lsblk(text: str, running_disk: str) -> list[Candidate]:
     for disk in disks:
         if disk.get("path") == running_disk:
             continue
-        parts = {
-            child.get("partn"): child
-            for child in disk.get("children", [])
-            if child.get("partn") is not None
-        }
+        parts = {}
+        for child in disk.get("children", []):
+            number = _partition_number(child)
+            if number is not None:
+                parts[number] = child
         boot, root = parts.get(3), parts.get(4)
         if not boot or not root or boot.get("label") != BOOT_LABEL:
             continue
