@@ -40,15 +40,19 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The seven that exercise what a unit test structurally cannot see: the
+# The eight that exercise what a unit test structurally cannot see: the
 # shipped scripts and commands against real block devices, portlin's own
-# packages against a real dpkg, the caffeine applet and the Software window
-# against a real X server, and portlin-install against a real archive, where
-# what is being tested is partly somebody else's promise about a package name
-# or a repository. Each one caught a bug the unit tests could not. Ten runs,
-# because test-expand.py goes four times: the tier rule keeps the wizard's
-# apply_expand and the packaged portlin-expand as two separate implementations
-# that can drift, so both need real-device coverage, encrypted and not.
+# packages against a real dpkg, the caffeine applet, the Software window and
+# the Migrate window against a real X server, and portlin-install against a
+# real archive, where what is being tested is partly somebody else's promise
+# about a package name or a repository. Each one caught a bug the unit tests
+# could not. Twelve runs: test-expand.py goes four times because the tier
+# rule keeps the wizard's apply_expand and the packaged portlin-expand as two
+# separate implementations that can drift, so both need real-device coverage,
+# encrypted and not; test-migrate.py goes twice because an encrypted source
+# is opened through a different pair of commands (cryptsetup then mount) than
+# a plain one (mount alone), and only the real cryptsetup call proves the
+# difference.
 harness:
 	docker run --rm --privileged --platform linux/amd64 -v "$$PWD:/src" -w /src \
 	  debian:trixie bash -c 'export DEBIAN_FRONTEND=noninteractive; \
@@ -56,7 +60,8 @@ harness:
 	    python3 gdisk e2fsprogs cryptsetup-bin util-linux mount coreutils \
 	    dmsetup cloud-guest-utils dpkg-dev \
 	    python3-gi gir1.2-gtk-3.0 librsvg2-common xvfb x11-xserver-utils \
-	    ca-certificates curl pciutils polkitd pkexec dbus xz-utils >/dev/null; \
+	    ca-certificates curl pciutils polkitd pkexec dbus xz-utils \
+	    rsync zstd openssl >/dev/null; \
 	  python3 -u scripts/test-caffeine.py && \
 	  python3 -u scripts/test-stats.py && \
 	  python3 -u scripts/test-package-conflicts.py && \
@@ -67,6 +72,8 @@ harness:
 	  python3 -u scripts/test-expand.py --packaged && \
 	  python3 -u scripts/test-expand.py --packaged --encrypt && \
 	  python3 -u scripts/test-software.py && \
+	  python3 -u scripts/test-migrate.py && \
+	  python3 -u scripts/test-migrate.py --encrypt && \
 	  python3 -u scripts/test-package-upgrade.py'
 
 # The full thing: boot the image, answer every prompt, verify the disk grew.
