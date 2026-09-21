@@ -593,8 +593,10 @@ def checklist_rows(inventory: Inventory) -> list[tuple[str, str, bool]]:
 
 def checklist_argv(title: str, text: str, rows) -> list[str]:
     flat = [part for tag, label, on in rows for part in (tag, label, "on" if on else "off")]
-    return ["whiptail", "--backtitle", BACKTITLE, "--separate-output", "--title", title,
-            "--checklist", text, "22", "78", "14", *flat]
+    # --notags hides the id column, since the label already says what the id
+    # means; the freed width goes to the label column instead.
+    return ["whiptail", "--backtitle", BACKTITLE, "--separate-output", "--notags", "--title", title,
+            "--checklist", text, "22", "84", "14", *flat]
 
 
 def parse_checklist(output: str) -> list[str]:
@@ -664,10 +666,15 @@ class Gauge:
         if kind == "progress" and rest.isdigit():
             self.percent = int(rest)
         update = gauge_feed(kind, rest, self.percent)
-        if update:
+        if not update:
+            log(line)
+            return
+        try:
             self.feed.write(update)
             self.feed.flush()
-        else:
+        except OSError:
+            # whiptail died mid-run; the copy itself is unaffected, so this
+            # is logged rather than turned into a step failure.
             log(line)
 
     def flush(self) -> None:
@@ -675,13 +682,17 @@ class Gauge:
 
     def close(self) -> None:
         if self.process:
-            self.process.stdin.close()
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
             self.process.wait()
 
 
 def interactive_plan(source_path: str | None, *, firstboot: bool, keep_open: bool, out_path: Path) -> int:
     """Steps 1 to 4 of the console flow: source, passphrase, checklist, confirm."""
     candidate = None
+    written = False
     if source_path and source_path != "auto":
         path = source_path
     else:
@@ -724,9 +735,13 @@ def interactive_plan(source_path: str | None, *, firstboot: bool, keep_open: boo
         if not confirm("Ready", plan_summary(inventory, ids, label, shutil.disk_usage("/").free)):
             return EXIT_FAILED
         write_plan(out_path, source=source, ids=ids, inventory=inventory, firstboot=firstboot, label=label)
+        written = True
         return EXIT_OK
     finally:
-        if source.kind == "stick" and not (keep_open and out_path.exists()):
+        # keep_open only matters once a plan was actually written: a stale
+        # file from an earlier run left at out_path must not fool a declined
+        # or empty run into leaving the source mounted.
+        if source.kind == "stick" and not (keep_open and written):
             close_source()
 
 
@@ -790,14 +805,14 @@ def narrow(inventory: Inventory, ids: list[str], only, skip) -> list[str]:
     return kept
 
 
-def apply_plan(path: Path, *, out, only=None, skip=None) -> tuple[int, str]:
+def apply_plan(path: Path, *, out, only=None, skip=None, passphrase=passphrase_from_stdin) -> tuple[int, str]:
     """Run a plan. Returns the exit code and the text for ::result or a dialog."""
     plan = read_plan(path)
     inventory = from_json(json.dumps(plan["inventory"]))
     ids = narrow(inventory, list(plan["ids"]), only, skip)
     firstboot = bool(plan.get("firstboot"))
     stamp = stamp_now()
-    source = open_source(plan["source"], passphrase=passphrase_from_stdin)
+    source = open_source(plan["source"], passphrase=passphrase)
     try:
         if source.kind == "archive":
             source_inventory(source, firstboot=firstboot)  # fills the listing
@@ -834,11 +849,19 @@ def apply_plan(path: Path, *, out, only=None, skip=None) -> tuple[int, str]:
             close_source()
 
 
+def _ask_unlock() -> str:
+    return ask_password("Unlock the old drive", "\nEnter the passphrase for the old drive:")
+
+
 def cmd_apply(args) -> int:
     if args.gauge:
         gauge = Gauge()
         try:
-            code, text = apply_plan(Path(args.plan), out=gauge)
+            # A gauge dialog is on screen instead of a terminal reading
+            # ordinary input, so the passphrase (if one is still needed) has
+            # to come from its own dialog too, never from raw stdin.
+            code, text = apply_plan(Path(args.plan), out=gauge, only=args.only, skip=args.skip,
+                                     passphrase=_ask_unlock)
         finally:
             gauge.close()
         message("Done" if code == EXIT_OK else "Not finished", "\n" + text)
@@ -855,6 +878,10 @@ def cmd_plan(args) -> int:
     except Cancelled:
         close_source()
         return EXIT_FAILED
+    except SourceError as exc:
+        close_source()
+        message("Could not open the source", "\n" + str(exc))
+        return EXIT_FAILED
 
 
 def cmd_restore(args) -> int:
@@ -864,11 +891,15 @@ def cmd_restore(args) -> int:
     except Cancelled:
         close_source()
         return EXIT_FAILED
+    except SourceError as exc:
+        close_source()
+        message("Could not open the source", "\n" + str(exc))
+        return EXIT_FAILED
     if code != EXIT_OK:
         return code
     gauge = Gauge()
     try:
-        code, text = apply_plan(plan_path, out=gauge)
+        code, text = apply_plan(plan_path, out=gauge, passphrase=_ask_unlock)
     finally:
         gauge.close()
         plan_path.unlink(missing_ok=True)

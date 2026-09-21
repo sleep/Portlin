@@ -419,7 +419,7 @@ class TestChecklist:
     def test_the_checklist_asks_for_one_tag_per_line(self, tool):
         argv = tool.checklist_argv("What to bring over", "Tick what you want.", [("a", "A", True), ("b", "B", False)])
         assert argv[0] == "whiptail"
-        assert "--separate-output" in argv and "--checklist" in argv
+        assert "--separate-output" in argv and "--checklist" in argv and "--notags" in argv
         assert argv[-6:] == ["a", "A", "on", "b", "B", "off"]
 
     def test_parsing_drops_headings_and_blank_lines(self, tool):
@@ -463,7 +463,10 @@ class TestGauge:
         assert tool.gauge_feed("step", "Copying Documents", 42) == "XXX\n42\nCopying Documents\nXXX\n"
         assert tool.gauge_feed("warn", "something", 42) is None
 
-    def test_the_writer_tracks_the_percent_and_feeds_the_process(self, tool):
+    def test_the_writer_tracks_the_percent_and_feeds_the_process(self, tool, monkeypatch, tmp_path):
+        # A non-protocol line is logged, so this must not touch the real
+        # /var/log path the tool defaults to.
+        monkeypatch.setattr(tool, "LOG", tmp_path / "portlin-migrate.log")
         feed = io.StringIO()
         gauge = tool.Gauge(feed)
         gauge.write("::step Copying Documents\n")
@@ -476,3 +479,178 @@ class TestGauge:
             "XXX\n30\nCopying Downloads\nXXX\n"
         )
         assert gauge.percent == 30
+
+    def test_a_dead_gauge_process_does_not_fail_the_write(self, tool, monkeypatch, tmp_path):
+        monkeypatch.setattr(tool, "LOG", tmp_path / "portlin-migrate.log")
+
+        class DeadFeed:
+            def write(self, text):
+                raise BrokenPipeError()
+
+            def flush(self):
+                pass
+
+        gauge = tool.Gauge(DeadFeed())
+        gauge.write("::step Copying Documents\n")  # must not raise
+        assert gauge.percent == 0
+
+    def test_close_tolerates_a_pipe_already_broken(self, tool):
+        gauge = tool.Gauge(io.StringIO())
+
+        class DeadStdin:
+            def close(self):
+                raise BrokenPipeError()
+
+        class FakeProcess:
+            stdin = DeadStdin()
+
+            def wait(self):
+                return 0
+
+        gauge.process = FakeProcess()
+        gauge.close()  # must not raise
+
+
+class TestInteractivePlanCleanup:
+    """keep_open must only outlive interactive_plan when a plan was actually
+    written; a stale file left over from an earlier run must not fool a
+    declined or empty run into leaving the source mounted."""
+
+    @pytest.fixture
+    def stubbed(self, tool, migrate, monkeypatch):
+        monkeypatch.setattr(tool, "open_source", lambda path, passphrase: tool.Source("stick", "/dev/sdb4"))
+        monkeypatch.setattr(tool, "source_inventory",
+                            lambda source, firstboot: migrate.Inventory("0.1.2", "office", "home/x", ()))
+        monkeypatch.setattr(tool, "message", lambda title, text: None)
+        closed = []
+        monkeypatch.setattr(tool, "close_source", lambda: closed.append(True))
+        return closed
+
+    def test_nothing_chosen_releases_a_kept_open_source_despite_a_stale_plan_file(
+        self, tool, stubbed, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(tool, "checklist", lambda title, text, rows: [])
+        out_path = tmp_path / "plan.json"
+        out_path.write_text("stale plan from an earlier run")
+        code = tool.interactive_plan("/dev/sdb4", firstboot=True, keep_open=True, out_path=out_path)
+        assert code == tool.EXIT_FAILED
+        assert stubbed == [True]
+
+    def test_a_declined_confirmation_releases_a_kept_open_source_despite_a_stale_plan_file(
+        self, tool, stubbed, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(tool, "checklist", lambda title, text, rows: ["account.olduser"])
+        monkeypatch.setattr(tool, "confirm", lambda title, text: False)
+        out_path = tmp_path / "plan.json"
+        out_path.write_text("stale plan from an earlier run")
+        code = tool.interactive_plan("/dev/sdb4", firstboot=True, keep_open=True, out_path=out_path)
+        assert code == tool.EXIT_FAILED
+        assert stubbed == [True]
+
+    def test_a_written_plan_leaves_a_kept_open_source_mounted(self, tool, stubbed, monkeypatch, tmp_path):
+        monkeypatch.setattr(tool, "checklist", lambda title, text, rows: ["account.olduser"])
+        monkeypatch.setattr(tool, "confirm", lambda title, text: True)
+        monkeypatch.setattr(tool, "write_plan", lambda *a, **k: None)
+        out_path = tmp_path / "plan.json"
+        code = tool.interactive_plan("/dev/sdb4", firstboot=True, keep_open=True, out_path=out_path)
+        assert code == tool.EXIT_OK
+        assert stubbed == []
+
+    def test_without_keep_open_the_source_is_always_released(self, tool, stubbed, monkeypatch, tmp_path):
+        monkeypatch.setattr(tool, "checklist", lambda title, text, rows: ["account.olduser"])
+        monkeypatch.setattr(tool, "confirm", lambda title, text: True)
+        monkeypatch.setattr(tool, "write_plan", lambda *a, **k: None)
+        out_path = tmp_path / "plan.json"
+        code = tool.interactive_plan("/dev/sdb4", firstboot=True, keep_open=False, out_path=out_path)
+        assert code == tool.EXIT_OK
+        assert stubbed == [True]
+
+
+class TestApplyPlanPassphrase:
+    def test_the_passphrase_callable_reaches_open_source(self, tool, migrate, monkeypatch, tmp_path):
+        from test_migrate import make_source
+        inventory = migrate.build_inventory(make_source(tmp_path / "s").parent.parent)
+        plan_path = tmp_path / "plan.json"
+        tool.write_plan(plan_path, source=tool.Source("stick", "/dev/sdb4"), ids=["identity.hostname"],
+                        inventory=inventory, firstboot=True, label="x")
+        seen = {}
+
+        def fake_open_source(path, passphrase):
+            seen["passphrase"] = passphrase
+            raise tool.SourceError("stop here, the passphrase was already recorded")
+
+        monkeypatch.setattr(tool, "open_source", fake_open_source)
+        sentinel = lambda: "hunter2"
+        with pytest.raises(tool.SourceError):
+            tool.apply_plan(plan_path, out=io.StringIO(), passphrase=sentinel)
+        assert seen["passphrase"] is sentinel
+
+
+class TestApplyGauge:
+    @pytest.fixture
+    def stub_gauge(self, tool, monkeypatch):
+        monkeypatch.setattr(tool, "Gauge", lambda: type("FakeGauge", (), {"close": lambda self: None})())
+        monkeypatch.setattr(tool, "message", lambda title, text: None)
+
+    def test_only_and_skip_still_reach_apply_plan_under_a_gauge(self, tool, stub_gauge, monkeypatch):
+        calls = {}
+
+        def fake_apply_plan(path, *, out, only=None, skip=None, passphrase=None):
+            calls["only"], calls["skip"], calls["passphrase"] = only, skip, passphrase
+            return tool.EXIT_OK, "done"
+
+        monkeypatch.setattr(tool, "apply_plan", fake_apply_plan)
+
+        class Args:
+            plan = "plan.json"
+            gauge = True
+            only = ["home.files"]
+            skip = None
+
+        code = tool.cmd_apply(Args())
+        assert code == tool.EXIT_OK
+        assert calls["only"] == ["home.files"] and calls["skip"] is None
+        # The passphrase must be a dialog, never the raw-stdin reader used by
+        # the plain (non-gauge) path.
+        assert calls["passphrase"] is not tool.passphrase_from_stdin
+
+
+class TestConsoleVerbsSourceError:
+    def test_cmd_plan_shows_a_dialog_and_releases_the_source(self, tool, monkeypatch):
+        def raising(*a, **k):
+            raise tool.SourceError("could not open /dev/sdb4")
+
+        monkeypatch.setattr(tool, "interactive_plan", raising)
+        closed = []
+        monkeypatch.setattr(tool, "close_source", lambda: closed.append(True))
+        shown = []
+        monkeypatch.setattr(tool, "message", lambda title, text: shown.append((title, text)))
+
+        class Args:
+            source = "/dev/sdb4"
+            out = "/tmp/plan.json"
+            firstboot = False
+            keep_open = False
+
+        code = tool.cmd_plan(Args())
+        assert code == tool.EXIT_FAILED
+        assert closed == [True]
+        assert shown and "/dev/sdb4" in shown[0][1]
+
+    def test_cmd_restore_shows_a_dialog_and_releases_the_source(self, tool, monkeypatch):
+        def raising(*a, **k):
+            raise tool.SourceError("could not open /dev/sdb4")
+
+        monkeypatch.setattr(tool, "interactive_plan", raising)
+        closed = []
+        monkeypatch.setattr(tool, "close_source", lambda: closed.append(True))
+        shown = []
+        monkeypatch.setattr(tool, "message", lambda title, text: shown.append((title, text)))
+
+        class Args:
+            source = "/dev/sdb4"
+
+        code = tool.cmd_restore(Args())
+        assert code == tool.EXIT_FAILED
+        assert closed == [True]
+        assert shown and "/dev/sdb4" in shown[0][1]
