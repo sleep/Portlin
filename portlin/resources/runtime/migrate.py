@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from catalog import ENTRIES, installed, parse_dpkg_status
+from catalog import ENTRIES, expand_home, parse_dpkg_status
 
 # Labels write puts on partitions 3 and 4. The boot label is the one that
 # identifies a stick, because it is readable whether or not the root is
@@ -383,6 +383,22 @@ def _home_items(root: Path, home: str) -> list[Item]:
     return items
 
 
+def _installed_on_source(entry, dpkg: set[str], root: Path, home: str) -> bool:
+    """catalog.installed, with every path check rooted at the source.
+
+    catalog.expand_home only prefixes a home onto ~/ paths and leaves an
+    absolute one alone, which is right for the running system and wrong
+    for a mounted one: /opt/palemoon would be this machine's, not the
+    source's.
+    """
+    if entry.check.kind == "dpkg":
+        return any(name in dpkg for name in entry.check.values)
+    return any(
+        (root / str(expand_home(value, Path("/") / home)).lstrip("/")).exists()
+        for value in entry.check.values
+    )
+
+
 def _software_items(root: Path, home: str, entries, dpkg_status: str, firstboot: bool) -> list[Item]:
     recorded = {
         path.stem for path in sorted((root / SOFTWARE_STATE).glob("*.json"))
@@ -390,7 +406,7 @@ def _software_items(root: Path, home: str, entries, dpkg_status: str, firstboot:
     dpkg = parse_dpkg_status(dpkg_status)
     items = []
     for entry in entries:
-        if entry.id not in recorded and not installed(entry, dpkg, root / home):
+        if entry.id not in recorded and not _installed_on_source(entry, dpkg, root, home):
             continue
         driver = entry.category == DRIVERS_CATEGORY
         items.append(

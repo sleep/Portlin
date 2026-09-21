@@ -355,6 +355,30 @@ class TestInventory:
         assert by_id[f"software.{by_dpkg.id}"].value == by_dpkg.id
         assert by_id["software.mullvad"].category == "software"
 
+    def test_software_path_checks_are_rooted_at_the_source_not_this_machine(self, migrate, source):
+        catalog = load_tool("catalog.py")
+        # An absolute path check: catalog.expand_home leaves these alone, so
+        # without rooting at the source this would read this machine's /opt.
+        absolute = next(
+            e for e in catalog.ENTRIES if e.check.kind == "path" and e.check.values[0].startswith("/")
+        )
+        target = source / absolute.check.values[0].lstrip("/")
+        target.parent.mkdir(parents=True)
+        target.write_text("x")
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert f"software.{absolute.id}" in by_id
+
+        # A ~/-relative path check: it must resolve under the source's home,
+        # not this machine's.
+        home_relative = next(
+            e for e in catalog.ENTRIES if e.check.kind == "path" and e.check.values[0].startswith("~/")
+        )
+        home_target = source / "home/olduser" / home_relative.check.values[0][2:]
+        home_target.parent.mkdir(parents=True)
+        home_target.write_text("x")
+        by_id = {item.id: item for item in migrate.build_inventory(source).items}
+        assert f"software.{home_relative.id}" in by_id
+
     def test_first_boot_leaves_software_unticked_because_there_is_no_network(self, migrate, source):
         state = source / migrate.SOFTWARE_STATE
         state.mkdir(parents=True)
