@@ -920,3 +920,23 @@ class TestSoftwareSteps:
             (migrate.INSTALLER, "install", "vlc"),
         ]
         assert all(s.passthrough and s.optional for s in steps)
+
+
+class TestExistingAccount:
+    def test_after_setup_the_account_item_is_off_and_says_why(self, migrate, tmp_path):
+        inventory = migrate.build_inventory(make_source(tmp_path).parent.parent)
+        marked = migrate.mark_existing_account(inventory, "alice")
+        item = next(i for i in marked.items if i.category == "account")
+        assert item.default is False
+        assert "alice" in item.note and "already" in item.note
+        assert migrate.mark_existing_account(inventory, "") == inventory
+
+
+class TestDpkgStatus:
+    def test_the_status_file_becomes_the_lines_the_catalog_check_reads(self, migrate):
+        text = (
+            "Package: vlc\nStatus: install ok installed\nVersion: 3\n\n"
+            "Package: gone\nStatus: deinstall ok config-files\n\n"
+            "Package: half\nStatus: install ok unpacked\n\n"
+        )
+        assert migrate.dpkg_status_lines(text) == "vlc installed\ngone config-files\nhalf unpacked\n"

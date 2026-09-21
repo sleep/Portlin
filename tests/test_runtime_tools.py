@@ -19,7 +19,7 @@ import pytest
 from conftest import load_tool
 
 RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate"]
 
 
 def _load_tool(name: str):
@@ -35,6 +35,10 @@ class TestToolsAreValidPython:
     def test_devices_module_compiles(self):
         source = (RUNTIME / "devices.py").read_text()
         compile(source, str(RUNTIME / "devices.py"), "exec")
+
+    def test_migrate_module_compiles(self):
+        source = (RUNTIME / "migrate.py").read_text()
+        compile(source, str(RUNTIME / "migrate.py"), "exec")
 
     @pytest.mark.parametrize("name", TOOLS)
     def test_imports_without_error(self, name):

@@ -1013,3 +1013,33 @@ def software_steps(ids: list[str]) -> list[Step]:
         Step(f"Installing {entry_id}", argv=(INSTALLER, "install", entry_id), passthrough=True, optional=True)
         for entry_id in ids
     ]
+
+
+def dpkg_status_lines(status_file: str) -> str:
+    """/var/lib/dpkg/status as the "<package> <status>" lines dpkg-query prints.
+
+    The source is not running, so dpkg-query cannot be asked; the file is
+    read instead and rendered the way parse_dpkg_status already expects.
+    """
+    lines = []
+    package = ""
+    for line in status_file.splitlines():
+        if line.startswith("Package: "):
+            package = line[len("Package: "):].strip()
+        elif line.startswith("Status: ") and package:
+            lines.append(f"{package} {line.split()[-1]}")
+            package = ""
+    return "".join(f"{line}\n" for line in lines)
+
+
+def mark_existing_account(inventory: Inventory, local_user: str) -> Inventory:
+    """After setup the account exists, so the item is shown off and says so;
+    the files go into the local account instead."""
+    if not local_user:
+        return inventory
+    items = tuple(
+        dataclasses.replace(item, default=False, note=f"{local_user} already exists here; files go into that account")
+        if item.category == "account" else item
+        for item in inventory.items
+    )
+    return dataclasses.replace(inventory, items=items)

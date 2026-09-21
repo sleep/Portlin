@@ -1,0 +1,657 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""portlin-migrate: bring another portlin's files and settings onto this one.
+
+    portlin-migrate candidates [--json]        portlin drives and archives in reach
+    portlin-migrate inventory SOURCE [--json]  what SOURCE holds, by item, with sizes
+    portlin-migrate plan [SOURCE] --out FILE   choose on the console, write a plan
+    portlin-migrate apply --plan FILE          copy what the plan selects
+    portlin-migrate export FILE                this stick, everything, to an archive
+    portlin-migrate restore [SOURCE]           plan and apply, on the console
+    portlin-migrate close                      release a source plan kept open
+
+SOURCE is a root partition (/dev/sdb4), an archive, or "auto" for the one
+candidate when there is exactly one. A LUKS source's passphrase is read from
+stdin, never from an argument.
+
+The source is never written to. It is mounted read-only and, when encrypted,
+opened read-only, so even a bug here cannot touch it.
+
+apply prints the line protocol portlin-install established, so the Migrate
+window reads it with the same code Software uses:
+
+    ::step <text>            a phase began
+    ::progress <0-100>       bytes copied over bytes planned
+    ::warn <text>            something was skipped and the run went on
+    ::result ok|failed [text]
+
+Everything else is rsync, tar and apt talking, passed through for the log.
+"""
+
+from __future__ import annotations
+
+import argparse
+import grp
+import json
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import (  # noqa: E402
+    backing_disk,
+    backing_partition,
+    command_output,
+    disk_tail_bytes,
+    root_source,
+    unclaimed_bytes,
+)
+from migrate import (  # noqa: E402
+    ARCHIVE_SUFFIX,
+    BACKUP_DIRNAME,
+    EXIT_NO_SPACE,
+    Inventory,
+    Step,
+    Target,
+    account_steps,
+    archive_candidates,
+    build_inventory,
+    checkpoint_bytes,
+    describe,
+    dpkg_status_lines,
+    human,
+    mark_existing_account,
+    identity_steps,
+    lsblk_argv,
+    no_space_message,
+    overall_percent,
+    parse_lsblk,
+    parse_rsync_progress,
+    parse_tar_checkpoint,
+    plan_archive,
+    plan_export,
+    plan_stick,
+    read_accounts,
+    read_manifest,
+    selected,
+    selected_bytes,
+    shortfall,
+    software_steps,
+    tar_list_argv,
+    tar_manifest_argv,
+    theme_steps,
+    to_json,
+    from_json,
+    archive_name,
+    read_release,
+)
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+EXIT_PRIVILEGE = 3
+
+MOUNT = Path("/run/portlin/migrate/source")
+MAPPING = "portlin-migrate-source"
+PLAN_DIR = Path("/run/portlin/migrate")
+LOG = Path("/var/log/portlin-migrate.log")
+MEDIA_ROOTS = ("/media", "/run/media")
+LOCAL_ROOT = Path("/")
+
+# cryptsetup's exit status for a passphrase that does not open the device.
+WRONG_PASSPHRASE = 2
+PASSPHRASE_TRIES = 3
+
+
+class SourceError(Exception):
+    """The source could not be opened or is not a portlin."""
+
+
+@dataclass
+class Source:
+    kind: str  # "stick" or "archive"
+    path: str
+    encrypted: bool = False
+    root: Path | None = None  # where a stick is mounted
+    listing: str = ""  # an archive's member list, once read
+
+
+@dataclass(frozen=True)
+class RunResult:
+    ok: bool
+    warnings: tuple[str, ...]
+    failure: str = ""
+
+
+# -- protocol and log ---------------------------------------------------------
+
+
+def format_event(kind: str, *parts: str) -> str:
+    return " ".join(("::" + kind, *parts)).rstrip()
+
+
+def emit(kind: str, *parts: str, out=None) -> None:
+    out = out or sys.stdout
+    print(format_event(kind, *parts), file=out, flush=True)
+
+
+def log(message: str) -> None:
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except OSError:
+        pass
+
+
+def stamp_now() -> str:
+    return time.strftime("%Y-%m-%d-%H%M%S")
+
+
+# -- finding and opening sources ------------------------------------------------
+
+
+def running_disk() -> str:
+    partition = backing_partition(root_source())
+    return f"/dev/{backing_disk(partition)}" if partition else ""
+
+
+def media_mounts() -> list[Path]:
+    mounts = []
+    for root in MEDIA_ROOTS:
+        try:
+            for owner in Path(root).iterdir():
+                mounts += [p for p in owner.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+    return mounts
+
+
+def list_candidates():
+    sticks = parse_lsblk(command_output(lsblk_argv()), running_disk())
+    return sticks + archive_candidates(media_mounts())
+
+
+def open_argvs(device: str, encrypted: bool) -> list[tuple[str, ...]]:
+    """Read-only at both layers, so nothing here can write to the source."""
+    argvs = []
+    node = device
+    if encrypted:
+        argvs.append(("cryptsetup", "open", "--readonly", "--type", "luks",
+                      "--key-file", "-", device, MAPPING))
+        node = f"/dev/mapper/{MAPPING}"
+    argvs.append(("mount", "-o", "ro,noload", node, str(MOUNT)))
+    return argvs
+
+
+def close_argvs(encrypted: bool) -> list[tuple[str, ...]]:
+    argvs = [("umount", str(MOUNT))]
+    if encrypted:
+        argvs.append(("cryptsetup", "close", MAPPING))
+    return argvs
+
+
+def is_luks(device: str, run=subprocess.run) -> bool:
+    proc = run(["blkid", "-o", "value", "-s", "TYPE", device], capture_output=True, text=True, check=False)
+    return proc.stdout.strip() == "crypto_LUKS"
+
+
+def is_mounted(run=subprocess.run) -> bool:
+    return run(["findmnt", str(MOUNT)], capture_output=True, text=True, check=False).returncode == 0
+
+
+def open_source(path: str, *, passphrase: Callable[[], str], run=subprocess.run) -> Source:
+    """Mount a stick or note an archive. A stick already mounted is reused,
+    which is how a plan kept open by first boot reaches apply."""
+    if path.endswith(ARCHIVE_SUFFIX):
+        if not Path(path).is_file():
+            raise SourceError(f"{path} does not exist")
+        return Source("archive", path)
+    if not path.startswith("/dev/"):
+        raise SourceError(f"{path} is neither a device nor a {ARCHIVE_SUFFIX} archive")
+    disk = running_disk()
+    if disk and path.startswith(disk):
+        raise SourceError(f"{path} is on the drive this system is running from")
+    encrypted = is_luks(path, run)
+    if is_mounted(run):
+        return Source("stick", path, encrypted, MOUNT)
+    MOUNT.mkdir(parents=True, exist_ok=True)
+    argvs = open_argvs(path, encrypted)
+    if encrypted:
+        for _ in range(PASSPHRASE_TRIES):
+            proc = run(list(argvs[0]), input=passphrase(), capture_output=True, text=True, check=False)
+            if proc.returncode == 0:
+                break
+            if proc.returncode != WRONG_PASSPHRASE:
+                raise SourceError(f"could not open {path}: {proc.stderr.strip()}")
+        else:
+            raise SourceError("the passphrase did not open the drive")
+        argvs = argvs[1:]
+    for argv in argvs:
+        proc = run(list(argv), input="", capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            close_source(run)
+            raise SourceError(f"could not mount {path}: {proc.stderr.strip()}")
+    if not read_release(MOUNT):
+        close_source(run)
+        raise SourceError(f"{path} is not a portlin drive")
+    return Source("stick", path, encrypted, MOUNT)
+
+
+def close_source(run=subprocess.run) -> None:
+    """Unmount, close the mapping, remove the directory: exact reverse, always."""
+    for argv in close_argvs(encrypted=True):
+        run(list(argv), input="", capture_output=True, text=True, check=False)
+    try:
+        MOUNT.rmdir()
+    except OSError:
+        pass
+
+
+def source_inventory(source: Source, *, firstboot: bool, run=subprocess.run) -> Inventory:
+    if source.kind == "archive":
+        proc = run(list(tar_manifest_argv(Path(source.path))), capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise SourceError(f"{source.path} has no manifest: {proc.stderr.strip()}")
+        inventory, _ = read_manifest(proc.stdout)
+        listing = run(list(tar_list_argv(Path(source.path))), capture_output=True, text=True, check=False)
+        source.listing = listing.stdout
+        return inventory
+    try:
+        status = (source.root / "var/lib/dpkg/status").read_text()
+    except OSError:
+        status = ""
+    return build_inventory(source.root, dpkg_status=dpkg_status_lines(status), firstboot=firstboot)
+
+
+# -- the running system ---------------------------------------------------------
+
+
+def local_target(environ=os.environ) -> Target:
+    """The account files land in: whoever asked, else the first account here."""
+    for variable in ("PKEXEC_UID", "SUDO_UID"):
+        value = environ.get(variable)
+        if not value:
+            continue
+        try:
+            record = pwd.getpwuid(int(value))
+        except (ValueError, KeyError):
+            continue
+        return Target(Path("/"), record.pw_name, record.pw_uid, record.pw_gid, record.pw_dir.lstrip("/"))
+    accounts = read_accounts(LOCAL_ROOT)
+    if accounts:
+        first = accounts[0]
+        return Target(Path("/"), first.name, first.uid, first.gid, first.home)
+    return Target(Path("/"))
+
+
+def target_for(name: str) -> Target:
+    record = pwd.getpwnam(name)
+    return Target(Path("/"), record.pw_name, record.pw_uid, record.pw_gid, record.pw_dir.lstrip("/"))
+
+
+def uid_in_use(uid: int) -> bool:
+    try:
+        pwd.getpwuid(uid)
+        return True
+    except KeyError:
+        return False
+
+
+def unclaimed_now() -> int:
+    """portlin-info's arithmetic, so the no-space refusal gives the same advice."""
+    partition = backing_partition(root_source())
+    if not partition:
+        return 0
+    disk = backing_disk(partition)
+    partition_out = command_output(["lsblk", "-bdno", "SIZE", f"/dev/{partition}"])
+    if not partition_out.isdigit():
+        return 0
+    return unclaimed_bytes(shutil.disk_usage("/").total, int(partition_out), disk_tail_bytes(disk, partition))
+
+
+# -- running a plan -------------------------------------------------------------
+
+
+def move_aside(existing: str, backup: str) -> None:
+    Path(backup).parent.mkdir(parents=True, exist_ok=True)
+    os.rename(existing, backup)
+    log(f"moved aside {existing} -> {backup}")
+
+
+def _execute(step: Step, on_line: Callable[[str], None]) -> int:
+    """Run one command, feeding stdin if the step has one and reading output
+    a line at a time. rsync ends its progress lines with a carriage return
+    rather than a newline, so both count as line ends."""
+    log(f"run: {' '.join(step.argv)}")
+    proc = subprocess.Popen(
+        list(step.argv),
+        stdin=subprocess.PIPE if step.stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if step.stdin is not None:
+        proc.stdin.write(step.stdin.encode())
+        proc.stdin.close()
+    buffer = b""
+    while True:
+        chunk = proc.stdout.read(4096)
+        if not chunk:
+            break
+        buffer += chunk
+        while True:
+            cut = min((i for i in (buffer.find(b"\n"), buffer.find(b"\r")) if i >= 0), default=-1)
+            if cut < 0:
+                break
+            on_line(buffer[:cut].decode("utf-8", "replace"))
+            buffer = buffer[cut + 1:]
+    if buffer:
+        on_line(buffer.decode("utf-8", "replace"))
+    return proc.wait()
+
+
+def run_steps(steps, *, total: int, out=None, execute=None) -> RunResult:
+    out = out or sys.stdout
+    execute = execute or _execute
+    warnings: list[str] = []
+    done = 0
+    for step in steps:
+        if step.warn:
+            emit("warn", step.warn, out=out)
+            warnings.append(step.warn)
+            continue
+        if step.text:
+            emit("step", step.text, out=out)
+        try:
+            for existing, backup in step.move_aside:
+                move_aside(existing, backup)
+            for directory in step.mkdir:
+                Path(directory).mkdir(parents=True, exist_ok=True)
+            for path, content in step.write:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(content)
+        except OSError as exc:
+            return RunResult(False, tuple(warnings), str(exc))
+        if step.argv:
+            def on_line(line: str, step=step, done=done) -> None:
+                if step.passthrough and line.startswith("::"):
+                    kind, _, rest = line[2:].partition(" ")
+                    if kind == "result":
+                        if rest.startswith("failed"):
+                            warnings.append(f"{step.text} did not finish: {rest[len('failed'):].strip()}")
+                    elif kind != "progress":
+                        print(line, file=out, flush=True)
+                    return
+                if step.progress == "rsync":
+                    percent = parse_rsync_progress(line)
+                    if percent is not None:
+                        emit("progress", str(overall_percent(done, step.weight, percent, total)), out=out)
+                        return
+                elif step.progress == "tar":
+                    records = parse_tar_checkpoint(line)
+                    if records is not None:
+                        percent = min(100, checkpoint_bytes(records) * 100 // max(step.weight, 1))
+                        emit("progress", str(overall_percent(done, step.weight, percent, total)), out=out)
+                        return
+                print(line, file=out, flush=True)
+            code = execute(step, on_line)
+            if code != 0:
+                if step.optional or code in step.tolerate:
+                    text = f"{step.text}: {step.argv[0]} exited with status {code}"
+                    warnings.append(text)
+                    emit("warn", text, out=out)
+                else:
+                    return RunResult(False, tuple(warnings), f"{step.argv[0]} exited with status {code}")
+        done += step.weight
+        emit("progress", str(overall_percent(done, 0, 0, total)), out=out)
+    return RunResult(True, tuple(warnings))
+
+
+def apply_steps(inventory: Inventory, ids: list[str], source: Source, target: Target, stamp: str, *,
+                firstboot: bool, hosts_text: str, icon_theme_installed: Callable[[str], bool]) -> list[Step]:
+    """Everything after the account exists: settings, files, theme, software.
+
+    First boot applies the identity through its own screens, so those steps
+    are left out there. Software goes last because it needs the network and
+    can take a while, and everything else is already in place if it stalls.
+    """
+    steps: list[Step] = []
+    if not firstboot:
+        steps += identity_steps(inventory.identity, ids, hosts_text=hosts_text)
+    if source.kind == "archive":
+        steps += plan_archive(inventory, ids, Path(source.path), source.listing, target, stamp)
+    else:
+        steps += plan_stick(inventory, ids, source.root, target, stamp)
+    for item in selected(inventory, ids):
+        if item.id == "extras.theme":
+            names = json.loads(item.value)
+            steps += theme_steps(names, target, icon_theme_installed=icon_theme_installed(names.get("icons", "")))
+    steps += software_steps([item.value for item in selected(inventory, ids) if item.category == "software"])
+    return steps
+
+
+# -- plan files -----------------------------------------------------------------
+
+
+def write_plan(path: Path, *, source: Source, ids: list[str], inventory: Inventory, firstboot: bool, label: str) -> None:
+    """What the wizard and the window hand to apply. The account and identity
+    are repeated at the top level so the wizard can prefill its screens
+    without understanding the inventory."""
+    account = None
+    for candidate in inventory.accounts:
+        if f"account.{candidate.name}" in ids:
+            account = {
+                "name": candidate.name,
+                "gecos": candidate.gecos.split(",")[0],
+                "sudo_nopasswd": candidate.sudo_nopasswd,
+                "autologin": candidate.autologin,
+            }
+            break
+    data = {
+        "source": source.path,
+        "kind": source.kind,
+        "encrypted": source.encrypted,
+        "ids": ids,
+        "firstboot": firstboot,
+        "label": label,
+        "bytes": selected_bytes(inventory, ids),
+        "account": account,
+        "identity": {
+            key: getattr(inventory.identity, key)
+            for key in ("hostname", "locale", "keyboard", "timezone")
+        },
+        "inventory": json.loads(to_json(inventory)),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    path.chmod(0o600)
+
+
+def read_plan(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+# -- verbs ----------------------------------------------------------------------
+
+
+def passphrase_from_stdin() -> str:
+    return sys.stdin.readline().rstrip("\n")
+
+
+def resolve_source_path(given: str | None) -> str:
+    if given and given != "auto":
+        return given
+    found = list_candidates()
+    if len(found) == 1:
+        return found[0].path
+    if not found:
+        raise SourceError("no portlin drive or archive was found")
+    raise SourceError("more than one candidate; name one: " + ", ".join(c.path for c in found))
+
+
+def cmd_candidates(args) -> int:
+    found = list_candidates()
+    if args.json:
+        print(json.dumps([c.__dict__ for c in found]))
+    else:
+        for candidate in found:
+            print(f"{candidate.path:<20} {describe(candidate)}")
+    return EXIT_OK
+
+
+def cmd_inventory(args) -> int:
+    source = open_source(resolve_source_path(args.source), passphrase=passphrase_from_stdin)
+    try:
+        inventory = source_inventory(source, firstboot=args.firstboot)
+    finally:
+        if source.kind == "stick":
+            close_source()
+    if not args.firstboot:
+        inventory = mark_existing_account(inventory, local_target().user)
+    if args.json:
+        print(to_json(inventory), end="")
+    else:
+        for item in inventory.items:
+            mark = "x" if item.default else " "
+            size = human(item.bytes) if item.bytes else ""
+            print(f"[{mark}] {item.id:<40} {size:>9}  {item.label}")
+    return EXIT_OK
+
+
+def refuse_if_too_big(inventory: Inventory, ids: list[str]) -> int:
+    short = shortfall(selected_bytes(inventory, ids), shutil.disk_usage("/").free)
+    if short:
+        emit("result", "failed", no_space_message(short, unclaimed_now()))
+        return EXIT_NO_SPACE
+    return EXIT_OK
+
+
+def cmd_apply(args) -> int:
+    plan = read_plan(Path(args.plan))
+    inventory = from_json(json.dumps(plan["inventory"]))
+    ids = list(plan["ids"])
+    firstboot = bool(plan.get("firstboot"))
+    stamp = stamp_now()
+    source = open_source(plan["source"], passphrase=passphrase_from_stdin)
+    try:
+        if source.kind == "archive":
+            source_inventory(source, firstboot=firstboot)  # fills the listing
+        code = refuse_if_too_big(inventory, ids)
+        if code:
+            return code
+        target = local_target()
+        warnings: list[str] = []
+        account = next((a for a in inventory.accounts if f"account.{a.name}" in ids), None)
+        if account and not target.user:
+            result = run_steps(
+                account_steps(account, existing_groups={g.gr_name for g in grp.getgrall()},
+                              uid_free=not uid_in_use(account.uid)),
+                total=0,
+            )
+            warnings += result.warnings
+            if not result.ok:
+                emit("result", "failed", result.failure)
+                return EXIT_FAILED
+            target = target_for(account.name)
+        elif account and target.user:
+            emit("warn", f"the account {target.user} already exists here, so {account.name}'s files go into it")
+        steps = apply_steps(
+            inventory, ids, source, target, stamp, firstboot=firstboot,
+            hosts_text=Path("/etc/hosts").read_text() if Path("/etc/hosts").exists() else "",
+            icon_theme_installed=lambda name: Path(f"/usr/share/icons/{name}/index.theme").exists(),
+        )
+        result = run_steps(steps, total=sum(s.weight for s in steps))
+        warnings += result.warnings
+        if not result.ok:
+            emit("result", "failed", result.failure)
+            return EXIT_FAILED
+        emit("result", "ok", summary(len(selected(inventory, ids)), target, stamp, warnings))
+        return EXIT_OK
+    finally:
+        if source.kind == "stick":
+            close_source()
+
+
+def summary(count: int, target: Target, stamp: str, warnings: list[str]) -> str:
+    text = f"Brought over {count} item{'s' if count != 1 else ''}."
+    backup = Path("/") / target.home / BACKUP_DIRNAME / stamp if target.home else None
+    if backup and backup.exists():
+        text += f" Files that were replaced are under {backup}."
+    if warnings:
+        text += f" {len(warnings)} warning{'s' if len(warnings) != 1 else ''}; see {LOG}."
+    return text
+
+
+def cmd_export(args) -> int:
+    target = local_target()
+    inventory = build_inventory(Path("/"), dpkg_status=command_output(
+        ["dpkg-query", "-W", "-f=${Package} ${db:Status-Status}\n"]
+    ))
+    stamp = stamp_now()
+    destination = Path(args.file)
+    if destination.is_dir():
+        destination = destination / archive_name(inventory.hostname, stamp)
+    steps = plan_export(inventory, Path("/"), destination, PLAN_DIR / "export", stamp)
+    result = run_steps(steps, total=sum(s.weight for s in steps))
+    if not result.ok:
+        emit("result", "failed", result.failure)
+        return EXIT_FAILED
+    try:
+        destination.chmod(0o600)
+        if target.user:
+            os.chown(destination, target.uid, target.gid)
+    except OSError:
+        pass
+    emit("result", "ok", f"Wrote {destination}. It holds the password hash and every saved "
+                         "network password, so keep it somewhere only you can read.")
+    return EXIT_OK
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="portlin-migrate")
+    verbs = parser.add_subparsers(dest="verb", required=True)
+    candidates = verbs.add_parser("candidates")
+    candidates.add_argument("--json", action="store_true")
+    inventory = verbs.add_parser("inventory")
+    inventory.add_argument("source", nargs="?")
+    inventory.add_argument("--json", action="store_true")
+    inventory.add_argument("--firstboot", action="store_true")
+    apply = verbs.add_parser("apply")
+    apply.add_argument("--plan", required=True)
+    export = verbs.add_parser("export")
+    export.add_argument("file")
+    return parser
+
+
+VERBS = {
+    "candidates": cmd_candidates,
+    "inventory": cmd_inventory,
+    "apply": cmd_apply,
+    "export": cmd_export,
+}
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if os.geteuid() != 0:
+        print("portlin-migrate must run as root", file=sys.stderr)
+        return EXIT_PRIVILEGE
+    try:
+        return VERBS[args.verb](args)
+    except SourceError as exc:
+        emit("result", "failed", str(exc))
+        return EXIT_FAILED
+
+
+if __name__ == "__main__":
+    sys.exit(main())
