@@ -785,3 +785,138 @@ class TestSafety:
         target = migrate.Target(root=tmp_path / "target", user="alice", uid=1000, gid=1000, home="home/alice")
         steps = migrate.plan_stick(inventory, ["good"], source, target, STAMP)
         assert len(steps) >= 1
+
+
+class TestAccountSteps:
+    def account(self, migrate, **overrides):
+        base = dict(name="olduser", uid=1500, gid=1500, gecos="Old User,,,", shell="/bin/bash",
+                    home="home/olduser", password_hash="$y$j9T$abc$def",
+                    groups=("sudo", "audio", "scanner", "lpadmin"), sudo_nopasswd=True, autologin=False)
+        return migrate.Account(**{**base, **overrides})
+
+    def test_the_account_is_recreated_with_its_ids_and_the_groups_that_exist_here(self, migrate):
+        steps = migrate.account_steps(self.account(migrate), existing_groups={"sudo", "audio", "video"}, uid_free=True)
+        assert steps[0].argv == ("groupadd", "-f", "-g", "1500", "olduser")
+        assert steps[1].argv == (
+            "useradd", "--create-home", "--shell", "/bin/bash", "--comment", "Old User,,,",
+            "--groups", "sudo,audio", "--uid", "1500", "--gid", "1500", "olduser",
+        )
+
+    def test_the_password_moves_as_its_hash_on_stdin(self, migrate):
+        steps = migrate.account_steps(self.account(migrate), existing_groups={"sudo"}, uid_free=True)
+        last = steps[-1]
+        assert last.argv == ("chpasswd", "-e")
+        assert last.stdin == "olduser:$y$j9T$abc$def\n"
+        assert "$y$" not in last.text
+
+    def test_a_taken_uid_lets_useradd_pick_and_says_so(self, migrate):
+        steps = migrate.account_steps(self.account(migrate), existing_groups=set(), uid_free=False)
+        assert steps[0].argv[0] == "useradd"
+        assert "--uid" not in steps[0].argv and "--user-group" in steps[0].argv
+        assert steps[0].warn is None
+        assert any("1500" in (s.warn or "") for s in steps)
+
+    def test_no_hash_means_no_password_step_and_a_warning(self, migrate):
+        steps = migrate.account_steps(self.account(migrate, password_hash=""), existing_groups=set(), uid_free=True)
+        assert not any(s.argv and s.argv[0] == "chpasswd" for s in steps)
+        assert any("password" in (s.warn or "") for s in steps)
+
+
+class TestIdentitySteps:
+    def test_hostname_rewrites_hosts_and_asks_hostnamectl_optionally(self, migrate):
+        hosts = "127.0.0.1\tlocalhost\n127.0.1.1\tportlin\n::1\tlocalhost ip6-localhost\n"
+        steps = migrate.identity_steps(migrate.Identity(hostname="office"), ["identity.hostname"], hosts_text=hosts)
+        step = steps[0]
+        assert ("/etc/hostname", "office\n") in step.write
+        assert ("/etc/hosts", "127.0.0.1\tlocalhost\n127.0.1.1\toffice\n::1\tlocalhost ip6-localhost\n") in step.write
+        assert step.argv == ("hostnamectl", "set-hostname", "office")
+        assert step.optional is True
+
+    def test_locale_generates_then_records(self, migrate):
+        steps = migrate.identity_steps(migrate.Identity(locale="en_GB.UTF-8"), ["identity.locale"], hosts_text="")
+        gen, record = steps
+        assert gen.write == (("/etc/locale.gen", "en_GB.UTF-8 UTF-8\nC.UTF-8 UTF-8\n"),)
+        assert gen.argv == ("locale-gen",)
+        assert record.write == (("/etc/default/locale", 'LANG="en_GB.UTF-8"\n'),)
+        assert record.argv == ("localectl", "set-locale", "LANG=en_GB.UTF-8") and record.optional
+
+    def test_keyboard_and_timezone(self, migrate):
+        steps = migrate.identity_steps(
+            migrate.Identity(keyboard="gb", timezone="Europe/London"),
+            ["identity.keyboard", "identity.timezone"], hosts_text="",
+        )
+        keyboard, setupcon, link, tz = steps
+        assert keyboard.write[0][0] == "/etc/default/keyboard"
+        assert 'XKBLAYOUT="gb"' in keyboard.write[0][1]
+        assert keyboard.argv == ("setupcon", "--save") and keyboard.optional
+        assert setupcon.argv == ("localectl", "set-x11-keymap", "gb") and setupcon.optional
+        assert link.write == (("/etc/timezone", "Europe/London\n"),)
+        assert link.argv == ("ln", "-sf", "/usr/share/zoneinfo/Europe/London", "/etc/localtime")
+        assert tz.argv == ("timedatectl", "set-timezone", "Europe/London") and tz.optional
+
+    def test_only_the_chosen_settings_are_applied(self, migrate):
+        identity = migrate.Identity(hostname="office", locale="en_GB.UTF-8", keyboard="gb", timezone="Europe/London")
+        assert migrate.identity_steps(identity, ["identity.keyboard"], hosts_text="")[0].write[0][0] == "/etc/default/keyboard"
+        assert migrate.identity_steps(identity, [], hosts_text="") == []
+
+
+class TestThemeSteps:
+    def test_targets_match_the_wizards(self, migrate):
+        from test_firstboot import WIZARD, module_constant
+        assert migrate.THEME_TARGETS == module_constant(WIZARD, "THEME_TARGETS")
+        assert migrate.ICON_THEME_TARGETS == module_constant(WIZARD, "ICON_THEME_TARGETS")
+
+    def test_rewrite_returns_none_when_the_file_does_not_take_the_name(self, migrate):
+        pattern, replacement = migrate.THEME_TARGETS["/etc/xdg/xdg-portlin/gtk-3.0/settings.ini"]
+        assert migrate.rewrite_theme("[Settings]\ngtk-theme-name=Numix\n", pattern, replacement, "Greybird-dark") == (
+            "[Settings]\ngtk-theme-name=Greybird-dark\n"
+        )
+        assert migrate.rewrite_theme("[Settings]\n", pattern, replacement, "Greybird-dark") is None
+
+    def test_every_target_file_is_rewritten_or_none_is(self, migrate, tmp_path):
+        for path in {**migrate.THEME_TARGETS, **migrate.ICON_THEME_TARGETS}:
+            file = tmp_path / path.lstrip("/")
+            file.parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml").write_text(
+            '<property name="ThemeName" type="string" value="Numix"/>\n'
+            '<property name="IconThemeName" type="string" value="Papirus-Dark"/>\n'
+        )
+        (tmp_path / "etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml").write_text(
+            '<property name="theme" type="string" value="Numix"/>\n'
+        )
+        (tmp_path / "etc/xdg/xdg-portlin/gtk-3.0/settings.ini").write_text(
+            "gtk-theme-name=Numix\ngtk-icon-theme-name=Papirus-Dark\n"
+        )
+        (tmp_path / "etc/xdg/xdg-portlin/gtk-4.0/settings.ini").write_text("gtk-icon-theme-name=Papirus-Dark\n")
+        (tmp_path / "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf").write_text(
+            "theme-name=Numix\nicon-theme-name=Papirus-Dark\n"
+        )
+        target = migrate.Target(root=tmp_path)
+        steps = migrate.theme_steps({"theme": "Greybird-dark", "icons": "Papirus"}, target, icon_theme_installed=True)
+        written = {path: text for step in steps for path, text in step.write}
+        assert written[str(tmp_path / "etc/xdg/xdg-portlin/gtk-3.0/settings.ini")] == (
+            "gtk-theme-name=Greybird-dark\ngtk-icon-theme-name=Papirus\n"
+        )
+        assert "Greybird-dark" in written[str(tmp_path / "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf")]
+        assert "Papirus\n" in written[str(tmp_path / "etc/xdg/xdg-portlin/gtk-4.0/settings.ini")]
+        # A greeter file that does not take the name means the widget theme is
+        # not applied anywhere: three of four is worse than none.
+        (tmp_path / "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf").write_text("nothing\n")
+        steps = migrate.theme_steps({"theme": "Greybird-dark"}, target, icon_theme_installed=True)
+        assert [s.write for s in steps] == [()]
+        assert "Greybird-dark" in steps[0].warn
+
+    def test_an_icon_theme_not_installed_here_is_left_alone(self, migrate, tmp_path):
+        steps = migrate.theme_steps({"icons": "Numix-Circle"}, migrate.Target(root=tmp_path), icon_theme_installed=False)
+        assert [s.write for s in steps] == [()]
+        assert "Numix-Circle" in steps[0].warn
+
+
+class TestSoftwareSteps:
+    def test_each_entry_is_installed_through_the_installer_and_may_fail(self, migrate):
+        steps = migrate.software_steps(["mullvad", "vlc"])
+        assert [s.argv for s in steps] == [
+            (migrate.INSTALLER, "install", "mullvad"),
+            (migrate.INSTALLER, "install", "vlc"),
+        ]
+        assert all(s.passthrough and s.optional for s in steps)

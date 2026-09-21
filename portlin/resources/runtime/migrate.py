@@ -840,3 +840,176 @@ def plan_archive(inventory: Inventory, ids: list[str], archive: Path, listing: s
                     )
                 )
     return steps
+
+
+INSTALLER = "/usr/bin/portlin-install"
+
+# Copies of the wizard's THEME_TARGETS and ICON_THEME_TARGETS. The wizard is
+# frozen at write time and cannot import this module, so both hold the same
+# tables and a unit test keeps them equal. See the tier rule in the runtime
+# updates design for why that duplication is accepted.
+THEME_TARGETS = {
+    "/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": (
+        r'(<property name="ThemeName" type="string" value=")[^"]*"',
+        r'\g<1>{theme}"',
+    ),
+    "/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml": (
+        r'(<property name="theme" type="string" value=")[^"]*"',
+        r'\g<1>{theme}"',
+    ),
+    "/etc/xdg/xdg-portlin/gtk-3.0/settings.ini": (
+        r"(?m)^(gtk-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    "/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": (
+        r"(?m)^(theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+}
+
+ICON_THEME_TARGETS = {
+    "/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml": (
+        r'(<property name="IconThemeName" type="string" value=")[^"]*"',
+        r'\g<1>{theme}"',
+    ),
+    "/etc/xdg/xdg-portlin/gtk-3.0/settings.ini": (
+        r"(?m)^(gtk-icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    "/etc/xdg/xdg-portlin/gtk-4.0/settings.ini": (
+        r"(?m)^(gtk-icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    "/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": (
+        r"(?m)^(icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+}
+
+
+def account_steps(account: Account, *, existing_groups: set[str], uid_free: bool) -> list[Step]:
+    """Recreate the account. The password travels as its hash through
+    chpasswd -e, so nothing here ever holds or shows it in clear."""
+    groups = [g for g in account.groups if g in existing_groups]
+    steps: list[Step] = []
+    useradd = [
+        "useradd", "--create-home", "--shell", account.shell, "--comment", account.gecos,
+        "--groups", ",".join(groups),
+    ]
+    if uid_free:
+        steps.append(Step(f"Creating the group {account.name}",
+                          argv=("groupadd", "-f", "-g", str(account.gid), account.name)))
+        useradd += ["--uid", str(account.uid), "--gid", str(account.gid)]
+    else:
+        useradd.append("--user-group")
+    steps.append(Step(f"Creating the account {account.name}", argv=(*useradd, account.name)))
+    if not uid_free:
+        steps.append(Step("", warn=f"uid {account.uid} is already in use here, so {account.name} was given a new one"))
+    if account.password_hash:
+        steps.append(Step(f"Setting the password for {account.name}", argv=("chpasswd", "-e"),
+                          stdin=f"{account.name}:{account.password_hash}\n"))
+    else:
+        steps.append(Step("", warn=f"the source's password for {account.name} could not be read; set one with passwd"))
+    return steps
+
+
+def identity_steps(identity: Identity, ids: list[str], *, hosts_text: str) -> list[Step]:
+    """The wizard's apply_hostname, apply_locale, apply_keyboard and
+    apply_timezone as data. The systemd calls are optional because the
+    files are what persist; the calls only make the change take effect now."""
+    steps: list[Step] = []
+    if "identity.hostname" in ids and identity.hostname:
+        lines = [line for line in hosts_text.splitlines() if not line.startswith("127.0.1.1")]
+        lines.insert(min(1, len(lines)), f"127.0.1.1\t{identity.hostname}")
+        steps.append(Step(
+            f"Naming this computer {identity.hostname}",
+            write=(("/etc/hostname", f"{identity.hostname}\n"), ("/etc/hosts", "\n".join(lines) + "\n")),
+            argv=("hostnamectl", "set-hostname", identity.hostname),
+            optional=True,
+        ))
+    if "identity.locale" in ids and identity.locale:
+        steps.append(Step(f"Generating the locale {identity.locale}",
+                          write=(("/etc/locale.gen", f"{identity.locale} UTF-8\nC.UTF-8 UTF-8\n"),),
+                          argv=("locale-gen",)))
+        steps.append(Step("Recording the language",
+                          write=(("/etc/default/locale", f'LANG="{identity.locale}"\n'),),
+                          argv=("localectl", "set-locale", f"LANG={identity.locale}"), optional=True))
+    if "identity.keyboard" in ids and identity.keyboard:
+        keyboard = "\n".join([
+            "XKBMODEL=pc105", f'XKBLAYOUT="{identity.keyboard}"', 'XKBVARIANT=""',
+            'XKBOPTIONS=""', 'BACKSPACE="guess"', "",
+        ])
+        steps.append(Step(f"Setting the keyboard layout to {identity.keyboard}",
+                          write=(("/etc/default/keyboard", keyboard),),
+                          argv=("setupcon", "--save"), optional=True))
+        steps.append(Step("Recording the keyboard layout for X",
+                          argv=("localectl", "set-x11-keymap", identity.keyboard), optional=True))
+    if "identity.timezone" in ids and identity.timezone:
+        steps.append(Step(f"Setting the time zone to {identity.timezone}",
+                          write=(("/etc/timezone", f"{identity.timezone}\n"),),
+                          argv=("ln", "-sf", f"/usr/share/zoneinfo/{identity.timezone}", "/etc/localtime")))
+        steps.append(Step("Telling systemd the time zone",
+                          argv=("timedatectl", "set-timezone", identity.timezone), optional=True))
+    return steps
+
+
+def rewrite_theme(text: str, pattern: str, replacement: str, theme: str) -> str | None:
+    rewritten = re.sub(pattern, replacement.format(theme=theme), text, count=1)
+    return rewritten if theme in rewritten else None
+
+
+def theme_steps(names: dict[str, str], target: Target, *, icon_theme_installed: bool) -> list[Step]:
+    """Rewrite every file that names a theme, or none of them.
+
+    Rewriting three of four is worse than rewriting none: the greeter or the
+    window borders keep the old name and the desktop looks broken. Three of
+    the files name both the widget theme and the icon theme, so both
+    rewrites work on one set of contents and land in one write, rather than
+    the second reading the file from disk and undoing the first.
+    """
+    contents: dict[str, str] = {}
+
+    def rewrite_all(theme: str, targets: dict) -> bool:
+        pending = {}
+        for path, (pattern, replacement) in targets.items():
+            file = target.root / path.lstrip("/")
+            key = str(file)
+            text = contents.get(key)
+            if text is None:
+                try:
+                    text = file.read_text()
+                except OSError:
+                    return False
+            rewritten = rewrite_theme(text, pattern, replacement, theme)
+            if rewritten is None:
+                return False
+            pending[key] = rewritten
+        contents.update(pending)
+        return True
+
+    steps = []
+    applied = []
+    theme = names.get("theme")
+    if theme:
+        if rewrite_all(theme, THEME_TARGETS):
+            applied.append(f"the desktop theme {theme}")
+        else:
+            steps.append(Step("", warn=f"the desktop theme {theme} could not be applied here"))
+    icons = names.get("icons")
+    if icons:
+        if icon_theme_installed and rewrite_all(icons, ICON_THEME_TARGETS):
+            applied.append(f"the icon theme {icons}")
+        else:
+            steps.append(Step("", warn=f"the icon theme {icons} is not installed here, so the default stays"))
+    if applied:
+        steps.append(Step("Applying " + " and ".join(applied), write=tuple(contents.items())))
+    return steps
+
+
+def software_steps(ids: list[str]) -> list[Step]:
+    """One installer run per entry. It speaks the protocol itself, and a
+    failure is a warning: the summary says what to retry from Software."""
+    return [
+        Step(f"Installing {entry_id}", argv=(INSTALLER, "install", entry_id), passthrough=True, optional=True)
+        for entry_id in ids
+    ]
