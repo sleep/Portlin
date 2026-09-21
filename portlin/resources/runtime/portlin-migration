@@ -33,7 +33,7 @@ from gi.repository import GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, "/usr/lib/portlin")
 
-from migrate import CATEGORIES, Candidate, Inventory, describe, from_json, human  # noqa: E402
+from migrate import CATEGORIES, EXIT_NO_SPACE, Candidate, Inventory, describe, from_json, human  # noqa: E402
 
 APP_ID = "org.portlin.Migration"
 TOOL = "/usr/bin/portlin-migrate"
@@ -42,7 +42,6 @@ PLAN_PATH = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "
 
 EXIT_OK = 0
 EXIT_PRIVILEGE = 3
-EXIT_NO_SPACE = 6
 PKEXEC_REFUSED = 126
 PKEXEC_NO_AGENT = 127
 
@@ -120,6 +119,22 @@ def plan_document(candidate: dict, ids: list[str], inventory_data: dict) -> dict
     }
 
 
+def write_plan_file(path: Path, plan: dict) -> None:
+    """Write the plan 0600 from the moment it exists: it carries the old
+    account's password hash by way of the inventory, and a window between
+    creation and a later chmod is a window where the default umask governs
+    a file worth more than that.
+
+    ``touch`` leaves an existing file's mode alone, hence the belt-and-braces
+    ``chmod`` after it: a stale plan from a previous run may already be
+    sitting there with different permissions.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
+    path.write_text(json.dumps(plan, indent=2))
+
+
 def has_passwordless_sudo(run=subprocess.run) -> bool:
     try:
         return run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL, capture_output=True, timeout=3).returncode == 0
@@ -131,7 +146,10 @@ class Job:
     """One portlin-migrate run, read line by line without blocking the window.
 
     ``stdin_text`` is the passphrase for an encrypted source, written and
-    closed before the first line is read, and held nowhere else.
+    closed before the first line is read. It is also held, until the job it
+    unlocks finishes, in ``MigrationWindow.passphrase``, by design: an apply
+    started right after an inventory needs it again, and that field is
+    cleared as soon as the job that was its last user is done.
     """
 
     def __init__(self, argv, *, on_event, on_output, on_done, stdin_text: str | None = None) -> None:
@@ -148,8 +166,14 @@ class Job:
             bufsize=1,
         )
         if stdin_text is not None:
-            self.proc.stdin.write(stdin_text + "\n")
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.write(stdin_text + "\n")
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                # A child that exits before reading its passphrase (a bad
+                # argument, an already-open source) still has to be reaped
+                # and reported, not raised past here as a write error.
+                pass
         GLib.io_add_watch(self.proc.stdout, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self._on_readable)
 
     def _on_readable(self, source, condition) -> bool:
@@ -179,6 +203,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self.passphrase: str | None = None
         self.job: Job | None = None
         self.collected: list[str] = []
+        self.last_failure: str = ""
         self._build()
         self._refresh()
 
@@ -223,9 +248,9 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self.sources_note = Gtk.Label(xalign=0.0)
         page.pack_start(self.sources_note, False, False, 0)
         buttons = Gtk.Box(spacing=6)
-        refresh = Gtk.Button(label="Refresh")
-        refresh.connect("clicked", lambda *_: self._refresh())
-        buttons.pack_start(refresh, False, False, 0)
+        self.refresh_button = Gtk.Button(label="Refresh")
+        self.refresh_button.connect("clicked", lambda *_: self._refresh())
+        buttons.pack_start(self.refresh_button, False, False, 0)
         archive = Gtk.Button(label="Choose archive...")
         archive.connect("clicked", lambda *_: self._choose_archive())
         buttons.pack_start(archive, False, False, 0)
@@ -294,6 +319,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
     # -- page one: where from ----------------------------------------------
 
     def _refresh(self) -> None:
+        if self.job is not None:
+            return
         self.stack.set_visible_child_name("source")
         self.sources_note.set_text("Looking for portlin drives and backup archives...")
         self.collected = []
@@ -304,7 +331,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self.sources.remove(child)
         self.candidates = []
         if code != EXIT_OK:
-            self.sources_note.set_text(explain_exit(code))
+            self.sources_note.set_text(self.last_failure or explain_exit(code))
             return
         try:
             self.candidates = json.loads("\n".join(self.collected))
@@ -329,6 +356,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
             )
 
     def _choose_archive(self) -> None:
+        if self.job is not None:
+            return
         dialog = Gtk.FileChooserDialog(title="Choose a backup archive", parent=self,
                                        action=Gtk.FileChooserAction.OPEN)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Open", Gtk.ResponseType.OK)
@@ -346,6 +375,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def _open_selected(self) -> None:
+        if self.job is not None:
+            return
         row = self.sources.get_selected_row()
         if row is None:
             return
@@ -384,7 +415,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
 
     def _on_inventory(self, code: int) -> None:
         if code != EXIT_OK:
-            self.sources_note.set_text(explain_exit(code) or "The drive could not be read.")
+            self.passphrase = None
+            self.sources_note.set_text(self.last_failure or explain_exit(code))
             return
         try:
             text = "\n".join(self.collected)
@@ -440,13 +472,13 @@ class MigrationWindow(Gtk.ApplicationWindow):
         return ids
 
     def _start_apply(self) -> None:
+        if self.job is not None:
+            return
         ids = self._chosen_ids()
         if not ids:
             self.choose_note.set_text("Nothing is ticked.")
             return
-        PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PLAN_PATH.write_text(json.dumps(plan_document(self.candidate, ids, self.inventory_data), indent=2))
-        PLAN_PATH.chmod(0o600)
+        write_plan_file(PLAN_PATH, plan_document(self.candidate, ids, self.inventory_data))
         self.stack.set_visible_child_name("progress")
         self.progress.set_fraction(0.0)
         self.status.set_text("Starting...")
@@ -457,6 +489,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
 
     def _on_applied(self, code: int) -> None:
         self.passphrase = None
+        PLAN_PATH.unlink(missing_ok=True)
         self.again.set_sensitive(True)
         if code == EXIT_OK:
             self.status.set_text("Done.")
@@ -469,6 +502,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
     # -- backing up --------------------------------------------------------
 
     def _export(self) -> None:
+        if self.job is not None:
+            return
         dialog = Gtk.FileChooserDialog(title="Back up this stick to", parent=self,
                                        action=Gtk.FileChooserAction.SELECT_FOLDER)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Back up here", Gtk.ResponseType.OK)
@@ -489,6 +524,9 @@ class MigrationWindow(Gtk.ApplicationWindow):
 
     def _run(self, argv, *, on_done, stdin_text: str | None = None, show: bool = False) -> None:
         self.collected = []
+        self.last_failure = ""
+        self.next_button.set_sensitive(False)
+        self.refresh_button.set_sensitive(False)
 
         def on_output(line: str) -> None:
             if show:
@@ -496,12 +534,19 @@ class MigrationWindow(Gtk.ApplicationWindow):
             else:
                 self.collected.append(line)
 
+        def done(code: int) -> None:
+            self.job = None
+            self.next_button.set_sensitive(True)
+            self.refresh_button.set_sensitive(True)
+            on_done(code)
+
         try:
             self.job = Job(argv, on_event=self._on_event, on_output=on_output,
-                           on_done=lambda code: (setattr(self, "job", None), on_done(code)),
-                           stdin_text=stdin_text)
+                           on_done=done, stdin_text=stdin_text)
         except OSError as exc:
             self.job = None
+            self.next_button.set_sensitive(True)
+            self.refresh_button.set_sensitive(True)
             self.status.set_text(f"Could not start {argv[0]}: {exc}")
             self.sources_note.set_text(f"Could not start {argv[0]}: {exc}")
 
@@ -525,6 +570,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self._append(rest)
             if rest.startswith("ok "):
                 self.status.set_text(rest[3:])
+            elif rest.startswith("failed"):
+                self.last_failure = rest[len("failed"):].strip()
 
 
 def main() -> int:

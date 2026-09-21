@@ -81,6 +81,38 @@ class TestOpening:
         assert [c[1] for c in tries] == ["bad", "worse", "worst"]
         assert not any(c[0][0] == "mount" for c in calls)
 
+    def test_open_source_gives_up_at_once_on_an_empty_retry_rather_than_spend_its_tries(
+        self, tool, monkeypatch, tmp_path
+    ):
+        # A window feeding the passphrase on stdin has sent its one line
+        # already: a second or third call to a stdin-backed passphrase()
+        # reads EOF and returns "". That is a reason to stop, not a wrong
+        # guess to burn a retry on.
+        monkeypatch.setattr(tool, "MOUNT", tmp_path / "source")
+        monkeypatch.setattr(tool, "running_disk", lambda: "/dev/sda")
+        calls = []
+        answers = iter(["wrong", ""])
+
+        class Result:
+            def __init__(self, code, stdout=""):
+                self.returncode, self.stdout, self.stderr = code, stdout, ""
+
+        def run(argv, **kwargs):
+            calls.append((tuple(argv), kwargs.get("input")))
+            if argv[0] == "blkid":
+                return Result(0, "crypto_LUKS\n")
+            if argv[0] == "cryptsetup":
+                return Result(tool.WRONG_PASSPHRASE)
+            if argv[0] == "findmnt":
+                return Result(1)
+            return Result(0)
+
+        with pytest.raises(tool.SourceError, match="passphrase"):
+            tool.open_source("/dev/sdb4", passphrase=lambda: next(answers), run=run)
+        tries = [c for c in calls if c[0][:2] == ("cryptsetup", "open")]
+        assert len(tries) == 1
+        assert not any(c[0][0] == "mount" for c in calls)
+
     def test_the_passphrase_never_appears_in_an_argument(self, tool):
         for argv in tool.open_argvs("/dev/sdb4", encrypted=True):
             assert "hunter2" not in " ".join(argv)

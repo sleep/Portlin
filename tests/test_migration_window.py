@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -101,6 +102,76 @@ class TestPlan:
         assert plan["firstboot"] is False
         assert plan["label"] == "SanDisk Ultra 57.3G   portlin, encrypted"
         assert "passphrase" not in json.dumps(plan)
+
+    def test_the_plan_file_is_written_0600_from_the_start(self, window, tmp_path):
+        path = tmp_path / "plan.json"
+        plan = {"source": "/dev/sdb4", "kind": "stick"}
+        window.write_plan_file(path, plan)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert json.loads(path.read_text()) == plan
+
+
+class TestBusyGuard:
+    """A job already running must block a second one, the way Software's
+    buttons refuse a click while its own job is in flight."""
+
+    def test_a_refresh_is_refused_while_a_job_runs(self, window):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.job = object()
+        fake._run = lambda *a, **k: pytest.fail("a second job must not start")
+        window.MigrationWindow._refresh(fake)
+
+    def test_starting_apply_is_refused_while_a_job_runs(self, window):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.job = object()
+        fake._chosen_ids = lambda: pytest.fail("the guard must return before this is read")
+        window.MigrationWindow._start_apply(fake)
+
+    def test_opening_a_selection_is_refused_while_a_job_runs(self, window):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.job = object()
+        fake.sources = None  # touched only if the guard fails to return first
+        window.MigrationWindow._open_selected(fake)
+
+    def test_choosing_an_archive_is_refused_while_a_job_runs(self, window, monkeypatch):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.job = object()
+        monkeypatch.setattr(
+            window.Gtk, "FileChooserDialog",
+            lambda *a, **k: pytest.fail("the guard must return before a dialog is built"),
+        )
+        window.MigrationWindow._choose_archive(fake)
+
+    def test_exporting_is_refused_while_a_job_runs(self, window, monkeypatch):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.job = object()
+        monkeypatch.setattr(
+            window.Gtk, "FileChooserDialog",
+            lambda *a, **k: pytest.fail("the guard must return before a dialog is built"),
+        )
+        window.MigrationWindow._export(fake)
+
+
+class TestFailureFeedback:
+    """The reason a candidates or inventory run failed is what portlin-migrate
+    put in its ::result failed line, not a generic exit-code message."""
+
+    def test_a_failed_result_is_captured_as_the_last_failure(self, window):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.last_failure = ""
+        fake._append = lambda line: None
+        window.MigrationWindow._on_event(fake, "result", "failed the passphrase did not open the drive")
+        assert fake.last_failure == "the passphrase did not open the drive"
+
+    def test_the_failure_reason_is_shown_over_the_generic_exit_message(self, window):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.last_failure = "the passphrase did not open the drive"
+        fake.candidates = None
+        fake.sources = type("Sources", (), {"get_children": lambda self: []})()
+        seen = {}
+        fake.sources_note = type("Note", (), {"set_text": lambda self, text: seen.setdefault("text", text)})()
+        window.MigrationWindow._on_candidates(fake, 1)
+        assert seen["text"] == "the passphrase did not open the drive"
 
 
 class TestMenuEntry:

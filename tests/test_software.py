@@ -31,19 +31,30 @@ POLICY = RUNTIME / "org.portlin.install.policy"
 
 def _stub_gi() -> None:
     """A fake gi, so the window's module imports on a machine with no GTK."""
-    if getattr(sys.modules.get("gi"), "_portlin_stub", False):
-        return
-    gi = types.ModuleType("gi")
-    gi._portlin_stub = True
-    gi.require_version = lambda *args, **kwargs: None
-    repository = types.ModuleType("gi.repository")
-    for name in ("Gtk", "Gio", "GLib", "GdkPixbuf", "Gdk"):
-        module = MagicMock(name=name)
-        setattr(repository, name, module)
-        sys.modules[f"gi.repository.{name}"] = module
-    gi.repository = repository
-    sys.modules["gi"] = gi
-    sys.modules["gi.repository"] = repository
+    if not getattr(sys.modules.get("gi"), "_portlin_stub", False):
+        gi = types.ModuleType("gi")
+        gi._portlin_stub = True
+        gi.require_version = lambda *args, **kwargs: None
+        repository = types.ModuleType("gi.repository")
+        for name in ("Gtk", "Gio", "GLib", "GdkPixbuf", "Gdk"):
+            module = MagicMock(name=name)
+            setattr(repository, name, module)
+            sys.modules[f"gi.repository.{name}"] = module
+        gi.repository = repository
+        sys.modules["gi"] = gi
+        sys.modules["gi.repository"] = repository
+    # A real, empty class rather than the auto-generated MagicMock attribute:
+    # "class Window(Gtk.ApplicationWindow)" with a MagicMock instance as the
+    # base has Python pick the mock's own type as the metaclass, so the
+    # "class" it produces is itself a MagicMock with none of the methods the
+    # body defined. A plain class as the base keeps the class statement
+    # ordinary, so a window's methods stay directly callable in tests
+    # (typically via ``Window.__new__(Window)`` to skip GTK construction).
+    # Set unconditionally, on every call: another module's own _stub_gi
+    # (test_caffeine.py keeps a separate copy) may have stubbed gi first and
+    # left this unset, and the "already stubbed" guard above would otherwise
+    # skip straight past it.
+    sys.modules["gi.repository.Gtk"].ApplicationWindow = type("FakeApplicationWindow", (), {})
 
 
 @pytest.fixture(scope="module")

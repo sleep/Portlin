@@ -239,14 +239,24 @@ def open_source(path: str, *, passphrase: Callable[[], str], run=subprocess.run)
     MOUNT.mkdir(parents=True, exist_ok=True)
     argvs = open_argvs(path, encrypted)
     if encrypted:
+        opened = False
         for _ in range(PASSPHRASE_TRIES):
-            proc = run(list(argvs[0]), input=passphrase(), capture_output=True, text=True, check=False)
+            secret = passphrase()
+            if not secret:
+                # A window that already sent its one passphrase down stdin
+                # has nothing left to give a second or third try: further
+                # calls read EOF and return "". Stop asking rather than
+                # spend the remaining tries on cryptsetup runs that can only
+                # ever fail the same way.
+                break
+            proc = run(list(argvs[0]), input=secret, capture_output=True, text=True, check=False)
             if proc.returncode == 0:
+                opened = True
                 break
             if proc.returncode != WRONG_PASSPHRASE:
                 close_source(run)
                 raise SourceError(f"could not open {path}: {proc.stderr.strip()}")
-        else:
+        if not opened:
             close_source(run)
             raise SourceError("the passphrase did not open the drive")
         argvs = argvs[1:]
