@@ -372,18 +372,63 @@ def describe_host() -> str:
     return f"{sys.platform}/{platform.machine()}"
 
 
-def _image_is_cached(image: str) -> bool:
+# How long to wait for dockerd to answer the cache probe. Generous, because a
+# cold Docker Desktop takes several seconds to answer its first call and this
+# is only choosing which of two sentences to print, but finite, because an
+# unbounded wait here is silence before the build has said anything at all.
+DAEMON_PROBE_SECONDS = 10
+
+
+def _image_is_cached(image: str) -> bool | None:
     """Whether docker already holds the image, so the wait can be named.
 
     docker reports its own pull progress, but only once a pull has begun, and
     nothing before that says a pull is what the silence is. On a first run this
     is the longest wait in a build and the least explained.
+
+    Three answers, not two. None means the daemon did not reply within
+    DAEMON_PROBE_SECONDS, which is not the same as "not cached": the image may
+    well be there, and what has actually been learned is that dockerd is not
+    answering. A saturated daemon blocks every call it is given, so this is the
+    first place a build finds out, and the last place it can say so cheaply.
     """
-    return subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        check=False,
-    ).returncode == 0
+    try:
+        return subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            check=False,
+            timeout=DAEMON_PROBE_SECONDS,
+        ).returncode == 0
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _pull_notice(cached: bool | None) -> tuple[str, bool]:
+    """What to say about the image, and whether to go on with the build.
+
+    Returns (message, proceed). The message is printed under the banner; when
+    proceed is False, run_in_container stops instead of handing off to
+    docker run.
+
+    None, the daemon not answering within DAEMON_PROBE_SECONDS, is named and
+    then waited out rather than refused. Refusing would fail a cold Docker
+    Desktop, which routinely takes longer than this to answer its first call,
+    on a build it would have run perfectly well a minute later. What the
+    notice buys is that the wait is no longer silent: docker run will block
+    until the daemon recovers, and now the log says so.
+    """
+    if cached is True:
+        return f"{CONTAINER_IMAGE} is cached locally", True
+    if cached is False:
+        return (
+            f"pulling {CONTAINER_IMAGE}, which can take a few minutes on a first run",
+            True,
+        )
+    return (
+        f"the docker daemon has not answered in {DAEMON_PROBE_SECONDS}s and may "
+        "be saturated; continuing, but docker run will block until it recovers",
+        True,
+    )
 
 
 def _step_helper() -> str:
@@ -470,19 +515,26 @@ def run_in_container(args: argparse.Namespace) -> int:
         command.append("-it")
     command += [CONTAINER_IMAGE, "bash", "-c", inner]
 
-    if _image_is_cached(CONTAINER_IMAGE):
-        pull = f"{CONTAINER_IMAGE} is cached locally"
-    else:
-        pull = f"pulling {CONTAINER_IMAGE}, which can take a few minutes on a first run"
-
+    # Said before the daemon is touched at all. _image_is_cached talks to
+    # dockerd, which blocks for as long as the daemon takes to answer, and on a
+    # saturated machine that is forever. Printed afterwards, this banner never
+    # appears: the build's entire output is swallowed by the one call whose job
+    # is to explain the wait, and a silent hang is exactly what this script
+    # exists to prevent.
+    #
     # flush: stdout is block-buffered when redirected to a log, and a line
     # that only appears when the build ends is no use to whoever is waiting.
     print(
         f"building in a {CONTAINER_IMAGE} linux/amd64 container "
-        f"({describe_host()} cannot build directly)\n"
-        f"  {pull}",
+        f"({describe_host()} cannot build directly)",
         flush=True,
     )
+
+    notice, proceed = _pull_notice(_image_is_cached(CONTAINER_IMAGE))
+    print(f"  {notice}", flush=True)
+    if not proceed:
+        return 2
+
     return subprocess.run(command).returncode
 
 

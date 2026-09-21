@@ -176,6 +176,71 @@ class TestPullAnnouncement:
         assert "cached" in out
         assert "pulling" not in out
 
+    def test_the_banner_is_printed_before_docker_is_probed(
+        self, script, monkeypatch, make_container_command, capsys
+    ):
+        """An unresponsive daemon must not be able to swallow the whole build.
+
+        The probe talks to dockerd, which can block indefinitely when the
+        daemon is saturated. Printing the banner after it means a wedged
+        daemon produces no output at all, which is the one failure this
+        script exists to prevent and the one it is worst at explaining.
+        """
+        printed_before_probe = {}
+
+        def probe(_image):
+            printed_before_probe["out"] = capsys.readouterr().out
+            return True
+
+        monkeypatch.setattr(script, "_image_is_cached", probe)
+        make_container_command()
+        assert "building in a" in printed_before_probe["out"]
+
+    def test_the_probe_is_bounded_rather_than_waiting_for_ever(
+        self, script, monkeypatch
+    ):
+        """dockerd is asked, not trusted to answer.
+
+        This is the build's first contact with the daemon, and a saturated one
+        blocks every call it is given. Unbounded, it swallows the build whole.
+        """
+        seen = {}
+
+        def fake_run(_argv, **kwargs):
+            seen.update(kwargs)
+
+            class Result:
+                returncode = 0
+
+            return Result()
+
+        monkeypatch.setattr(script.subprocess, "run", fake_run)
+        script._image_is_cached("debian:trixie")
+        assert seen.get("timeout")
+
+    def test_a_probe_that_times_out_is_neither_cached_nor_missing(
+        self, script, monkeypatch
+    ):
+        def timed_out(_argv, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="docker", timeout=1)
+
+        monkeypatch.setattr(script.subprocess, "run", timed_out)
+        # Not False. The image may well be cached; what the probe learned is
+        # that the daemon is not replying, which is a different fact.
+        assert script._image_is_cached("debian:trixie") is None
+
+    def test_an_unresponsive_daemon_is_named_and_the_build_goes_on(self, script):
+        """Named, because silence before the first bar is the whole bug.
+
+        Continued, because a cold Docker Desktop takes tens of seconds to
+        answer its first call, and refusing there would fail a build that
+        would have run perfectly well a minute later.
+        """
+        notice, proceed = script._pull_notice(None)
+        assert "daemon" in notice
+        assert str(script.DAEMON_PROBE_SECONDS) in notice
+        assert proceed is True
+
 
 class TestHostDetection:
     def test_a_mac_cannot_build_directly(self, script, monkeypatch):
