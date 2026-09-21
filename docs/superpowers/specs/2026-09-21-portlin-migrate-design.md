@@ -246,10 +246,10 @@ trees follow under the paths they had on the stick: `home/<user>/...`,
 Import reads member 0 alone, with `tar -xO`, to build the checklist without
 unpacking anything, then extracts as described above.
 
-`/etc/shadow` is in the archive, because the account's password is. The file is
-written `0600`, owned by whoever ran the export, and the CLI says so on the way
-out. Exporting to a drive readable by anyone is the user's call, made with that
-line in front of them.
+The manifest carries the account's password hash, because the account is part
+of what an archive restores. The file is written `0600`, owned by whoever ran
+the export, and the CLI says so on the way out. Exporting to a drive readable
+by anyone is the user's call, made with that line in front of them.
 
 ## Errors and logging
 

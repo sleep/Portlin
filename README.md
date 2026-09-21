@@ -141,6 +141,29 @@ Entries that need Debian's `non-free` component get it through a drop-in under
 `/etc/apt/sources.list.d/`, so sticks written before that component was enabled by default are
 not left out. Deleting that file takes it away again.
 
+## Migrating
+
+Plug your old portlin into a machine booted from a new one, and **Migrate** in the
+applications menu brings across what you tick: the account with its password, the
+home directory folder by folder (`Documents` but not `Downloads`, Firefox but not
+`.ssh`), what Software installed, saved wifi passwords, Bluetooth pairings,
+printers and the desktop theme. First boot offers the same thing before it asks
+for an account, so a new stick can start out as the old one. The same verbs work
+from a terminal:
+
+```
+sudo portlin-migrate restore              # pick a source and tick what to bring
+sudo portlin-migrate export /media/me/Backups   # this stick, everything, to an archive
+```
+
+The old drive is opened read-only and never written to. Files already on the new
+stick with the same names are moved aside into `~/.portlin-migrate-backup/<date>`
+rather than deleted, and a directory that exists on both sides is merged. Software
+is brought back by running the installer again rather than by copying files, so it
+needs network and fits the machine the stick is in now. An archive holds the
+password hash and every saved wifi password, so `export` writes it `0600` and
+says so.
+
 ## Updates
 
 The Debian system updates itself: it is a real install, so `apt full-upgrade`
