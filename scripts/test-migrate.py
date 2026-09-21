@@ -160,7 +160,15 @@ def clear_local_accounts() -> None:
     specific one, exactly the range read_accounts() offers from a source.
     test-software.py, which runs earlier in the same container, leaves its
     "scripted" account behind; left alone it would silently steer olduser's
-    files into that account instead of a freshly created olduser."""
+    files into that account instead of a freshly created olduser.
+
+    This deletes real accounts by uid range, so it refuses to run anywhere
+    but inside the disposable container the harness expects: a mistaken
+    invocation on somebody's own machine must not start deleting their
+    logins.
+    """
+    if not Path("/.dockerenv").exists():
+        raise SystemExit("refusing to delete accounts outside the container harness")
     for line in must(["getent", "passwd"]).splitlines():
         fields = line.split(":")
         if len(fields) < 3 or not fields[2].isdigit():
@@ -207,15 +215,24 @@ def source_mtime(root: str, encrypt: bool) -> float:
 def check_stick_to_stick(root: str, encrypt: bool) -> dict:
     stdin = PASSPHRASE + "\n" if encrypt else ""
     listed = tool("candidates", "--json")
-    candidates = json.loads(listed.stdout or "[]")
+    try:
+        candidates = json.loads(listed.stdout or "[]")
+    except ValueError:
+        candidates = []
     found = any(c["path"] == root and c["encrypted"] == encrypt for c in candidates)
     if not found:
-        # candidates comes from lsblk by way of portlin-migrate's own parsing,
-        # so a failure here could be either side: print both raw outputs so
-        # the next run does not need to be reproduced by hand to tell which.
-        print(f"candidates --json said: {listed.stdout!r}", flush=True)
+        # candidates comes from lsblk and blkid by way of portlin-migrate's
+        # own parsing, so a failure here could be any of three places: print
+        # every raw output so the next run does not need to be reproduced by
+        # hand to tell which one is at fault.
+        print(f"candidates --json exited {listed.returncode}", flush=True)
+        print(f"candidates --json stdout: {listed.stdout!r}", flush=True)
+        print(f"candidates --json stderr: {listed.stderr!r}", flush=True)
         raw = run(["lsblk", "--json", "-o", "NAME,PATH,LABEL,FSTYPE,SIZE,MODEL,TRAN,PARTN"])
         print(f"raw lsblk said: {raw.stdout!r}", flush=True)
+        boot = root[:-1] + "3"  # partition 3 is always the boot partition make_old_stick lays out
+        probed = run(["blkid", "-s", "LABEL", "-s", "TYPE", boot, root])
+        print(f"raw blkid said: {probed.stdout!r}", flush=True)
     check(found, f"candidates lists {root} (encrypted={encrypt})")
 
     before = source_mtime(root, encrypt)
@@ -381,10 +398,18 @@ def main() -> int:
     run(["cryptsetup", "close", MAPPING])
     run(["userdel", "-r", USER])
     clear_local_accounts()
+    # make harness runs the plain and --encrypt invocations back to back in
+    # the same container. Without this, the plain run's apply already set
+    # the hostname and wrote the wifi connection, so the --encrypt run's own
+    # checks of those two things would pass even if its apply never touched
+    # them.
+    Path("/etc/hostname").write_text("portlin-harness\n")
+    Path("/etc/NetworkManager/system-connections/cafe.nmconnection").unlink(missing_ok=True)
 
     install_portlin_packages()
-    loop, root = make_old_stick(args.encrypt)
+    loop = ""
     try:
+        loop, root = make_old_stick(args.encrypt)
         inventory = check_stick_to_stick(root, args.encrypt)
         check_archive_round_trip()
         if not args.encrypt:
@@ -393,7 +418,8 @@ def main() -> int:
         run(["umount", str(MOUNT)])
         run(["cryptsetup", "close", "portlin-migrate-source"])
         run(["cryptsetup", "close", MAPPING])
-        run(["losetup", "-d", loop])
+        if loop:
+            run(["losetup", "-d", loop])
         DISK.unlink(missing_ok=True)
         run(["userdel", "-r", USER])
 

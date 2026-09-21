@@ -40,13 +40,13 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The eight that exercise what a unit test structurally cannot see: the
+# The nine that exercise what a unit test structurally cannot see: the
 # shipped scripts and commands against real block devices, portlin's own
 # packages against a real dpkg, the caffeine applet, the Software window and
 # the Migrate window against a real X server, and portlin-install against a
 # real archive, where what is being tested is partly somebody else's promise
 # about a package name or a repository. Each one caught a bug the unit tests
-# could not. Twelve runs: test-expand.py goes four times because the tier
+# could not. Thirteen runs: test-expand.py goes four times because the tier
 # rule keeps the wizard's apply_expand and the packaged portlin-expand as two
 # separate implementations that can drift, so both need real-device coverage,
 # encrypted and not; test-migrate.py goes twice because an encrypted source
