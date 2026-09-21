@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from catalog import ENTRIES, expand_home, parse_dpkg_status
+from devices import UNCLAIMED_ADVICE
 
 # Labels write puts on partitions 3 and 4. The boot label is the one that
 # identifies a stick, because it is readable whether or not the root is
@@ -519,3 +520,145 @@ def selected(inventory: Inventory, ids: list[str]) -> list[Item]:
 
 def selected_bytes(inventory: Inventory, ids: list[str]) -> int:
     return sum(item.bytes for item in selected(inventory, ids))
+
+
+# Replaced system files go here; replaced home files go under the home.
+SYSTEM_BACKUP_ROOT = "var/backups/portlin-migrate"
+
+# rsync's "some files could not be transferred" and "some files vanished".
+# Both leave everything else copied, and a stick that went through a bad
+# shutdown produces one or two. A warning, not a failed migration.
+RSYNC_PARTIAL = (23, 24)
+
+EXIT_NO_SPACE = 6
+# Left free after the copy, so a full root does not stop apt or the desktop.
+SPACE_RESERVE = 512 * 1024**2
+
+_RSYNC_PERCENT = re.compile(r"\s(\d{1,3})%\s")
+
+
+@dataclass(frozen=True)
+class Step:
+    """One thing apply does, in order. Data, so a plan can be asserted whole.
+
+    ``move_aside`` renames happen first, then ``mkdir`` and ``write``, then
+    ``argv``. ``progress`` names the parser that reads argv's output, and
+    ``weight`` is how many of the plan's bytes it accounts for.
+    ``passthrough`` means argv speaks the protocol itself and its lines are
+    forwarded; ``tolerate`` lists exit codes that are a warning rather than
+    a failure, and ``optional`` makes every non-zero exit a warning.
+    """
+
+    text: str
+    argv: tuple[str, ...] | None = None
+    stdin: str | None = None
+    progress: str = ""
+    weight: int = 0
+    move_aside: tuple[tuple[str, str], ...] = ()
+    mkdir: tuple[str, ...] = ()
+    write: tuple[tuple[str, str], ...] = ()
+    passthrough: bool = False
+    tolerate: tuple[int, ...] = ()
+    optional: bool = False
+    warn: str | None = None
+
+
+@dataclass(frozen=True)
+class Target:
+    """The running system, as the planner needs to know it."""
+
+    root: Path = Path("/")
+    user: str = ""
+    uid: int = 0
+    gid: int = 0
+    home: str = ""  # relative: "home/somebody"
+
+
+def is_home(path: str, home: str) -> bool:
+    return bool(home) and (path == home or path.startswith(home + "/"))
+
+
+def target_path(path: str, source_home: str, target_home: str) -> str:
+    """Where a source path lands: the same place, unless it is under the home."""
+    if is_home(path, source_home):
+        return target_home + path[len(source_home):]
+    return path
+
+
+def backup_dir(target: Target, path: str, stamp: str) -> Path:
+    if is_home(path, target.home):
+        relative = path[len(target.home):].lstrip("/")
+        return target.root / target.home / BACKUP_DIRNAME / stamp / relative
+    return target.root / SYSTEM_BACKUP_ROOT / stamp / path
+
+
+def rsync_argv(source: Path, target: Path, *, backup_dir: Path, chown: tuple[int, int] | None) -> tuple[str, ...]:
+    """One item's copy.
+
+    --backup with --backup-dir is the move-aside: rsync renames a file it is
+    about to replace into that tree at the same relative path, which costs
+    no space and no second pass. No --delete, so a file that exists only on
+    the target survives and a directory on both sides is merged. The
+    trailing slashes make rsync copy a directory's contents into the target
+    rather than nesting it one level down; a file or a symlink is named as
+    itself, and -a keeps a symlink a symlink.
+    """
+    argv = [
+        "rsync", "-a", "--backup", f"--backup-dir={backup_dir}",
+        "--info=progress2", "--no-inc-recursive",
+    ]
+    if chown:
+        argv.append(f"--chown={chown[0]}:{chown[1]}")
+    src, dst = str(source), str(target)
+    if source.is_dir() and not source.is_symlink():
+        src += "/"
+        dst += "/"
+    return (*argv, src, dst)
+
+
+def parse_rsync_progress(line: str) -> int | None:
+    match = _RSYNC_PERCENT.search(line)
+    return int(match.group(1)) if match else None
+
+
+def overall_percent(done: int, weight: int, step_percent: int, total: int) -> int:
+    if total <= 0:
+        return 100
+    return min(100, int((done + weight * step_percent / 100) * 100 / total))
+
+
+def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: Target, stamp: str) -> list[Step]:
+    """The rsync per path, in inventory order. Items without paths plan nothing here."""
+    steps = []
+    for item in selected(inventory, ids):
+        for position, path in enumerate(item.paths):
+            destination = target_path(path, inventory.home, target.home)
+            chown = (target.uid, target.gid) if is_home(destination, target.home) else None
+            steps.append(
+                Step(
+                    text=f"Copying {item.label}",
+                    argv=rsync_argv(
+                        source_root / path,
+                        target.root / destination,
+                        backup_dir=backup_dir(target, destination, stamp),
+                        chown=chown,
+                    ),
+                    progress="rsync",
+                    # The item's bytes count once, on its first path.
+                    weight=item.bytes if position == 0 else 0,
+                    mkdir=(str((target.root / destination).parent),),
+                    tolerate=RSYNC_PARTIAL,
+                )
+            )
+    return steps
+
+
+def shortfall(needed: int, free: int) -> int:
+    return max(0, needed + SPACE_RESERVE - free)
+
+
+def no_space_message(short: int, unclaimed: int) -> str:
+    text = f"This selection needs {human(short)} more than the drive has free."
+    if unclaimed:
+        text += " " + UNCLAIMED_ADVICE.format(gb=unclaimed / 1_000_000_000)
+    return text

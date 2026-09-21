@@ -426,3 +426,125 @@ class TestSelection:
     def test_selected_keeps_inventory_order(self, migrate, inventory):
         chosen = migrate.selected(inventory, ["home.files.Downloads", "account.olduser"])
         assert [i.id for i in chosen] == ["account.olduser", "home.files.Downloads"]
+
+
+STAMP = "2026-09-21-101500"
+
+
+class TestPaths:
+    def test_target_path_moves_home_entries_into_the_local_home(self, migrate):
+        assert migrate.target_path("home/olduser/Documents", "home/olduser", "home/alice") == "home/alice/Documents"
+        assert migrate.target_path("home/olduser", "home/olduser", "home/alice") == "home/alice"
+        assert migrate.target_path("etc/NetworkManager/system-connections", "home/olduser", "home/alice") == "etc/NetworkManager/system-connections"
+        # A sibling that merely starts with the same letters is not inside the home.
+        assert migrate.target_path("home/olduser2/x", "home/olduser", "home/alice") == "home/olduser2/x"
+
+    def test_backup_dir_is_under_the_home_for_home_paths_and_var_backups_otherwise(self, migrate, tmp_path):
+        target = migrate.Target(root=tmp_path, user="alice", uid=1000, gid=1000, home="home/alice")
+        assert migrate.backup_dir(target, "home/alice/.config", STAMP) == (
+            tmp_path / "home/alice" / migrate.BACKUP_DIRNAME / STAMP / ".config"
+        )
+        assert migrate.backup_dir(target, "etc/cups/ppd", STAMP) == (
+            tmp_path / migrate.SYSTEM_BACKUP_ROOT / STAMP / "etc/cups/ppd"
+        )
+
+
+class TestRsync:
+    def test_a_directory_is_copied_with_trailing_slashes_and_a_backup_dir(self, migrate, tmp_path):
+        source = tmp_path / "src" / "Documents"
+        source.mkdir(parents=True)
+        argv = migrate.rsync_argv(source, tmp_path / "dst" / "Documents",
+                                  backup_dir=tmp_path / "bak", chown=(1000, 1000))
+        assert argv[:2] == ("rsync", "-a")
+        assert "--backup" in argv
+        assert f"--backup-dir={tmp_path / 'bak'}" in argv
+        assert "--info=progress2" in argv and "--no-inc-recursive" in argv
+        assert "--chown=1000:1000" in argv
+        assert argv[-2:] == (f"{source}/", f"{tmp_path / 'dst' / 'Documents'}/")
+        assert "--delete" not in argv
+
+    def test_a_file_and_a_symlink_are_copied_as_themselves(self, migrate, tmp_path):
+        rc = tmp_path / ".bashrc"
+        rc.write_text("# rc\n")
+        assert migrate.rsync_argv(rc, tmp_path / "out" / ".bashrc", backup_dir=tmp_path / "b", chown=None)[-2:] == (
+            str(rc), str(tmp_path / "out" / ".bashrc")
+        )
+        (tmp_path / "real").mkdir()
+        link = tmp_path / "link"
+        link.symlink_to("real")
+        argv = migrate.rsync_argv(link, tmp_path / "out" / "link", backup_dir=tmp_path / "b", chown=None)
+        assert argv[-2:] == (str(link), str(tmp_path / "out" / "link"))
+        assert not any(a.startswith("--chown") for a in argv)
+
+    @pytest.mark.parametrize("line,percent", [
+        ("      1,234,567  45%   12.34MB/s    0:00:01 (xfr#12, to-chk=34/56)", 45),
+        ("  5,000  100%    4.77MB/s    0:00:00 (xfr#3, to-chk=0/4)", 100),
+        ("sending incremental file list", None),
+        ("rsync: [sender] read errors mapping \"/x\": Permission denied (13)", None),
+    ])
+    def test_progress_is_read_off_rsyncs_summary_line(self, migrate, line, percent):
+        assert migrate.parse_rsync_progress(line) == percent
+
+    def test_overall_percent_weights_the_running_step_by_its_bytes(self, migrate):
+        assert migrate.overall_percent(done=0, weight=1000, step_percent=50, total=4000) == 12
+        assert migrate.overall_percent(done=3000, weight=1000, step_percent=100, total=4000) == 100
+        assert migrate.overall_percent(done=0, weight=0, step_percent=0, total=0) == 100
+
+
+class TestPlanStick:
+    @pytest.fixture
+    def parts(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        home = make_source(source)
+        populate_home(home)
+        connections = source / migrate.CONNECTIONS
+        connections.mkdir(parents=True)
+        (connections / "cafe.nmconnection").write_text("[wifi]\n")
+        inventory = migrate.build_inventory(source)
+        target = migrate.Target(root=tmp_path / "target", user="alice", uid=1000, gid=1000, home="home/alice")
+        return source, inventory, target
+
+    def test_one_rsync_per_selected_path_in_inventory_order(self, migrate, parts):
+        source, inventory, target = parts
+        ids = ["network", "home.files.Documents", "home.settings..config"]
+        steps = migrate.plan_stick(inventory, ids, source, target, STAMP)
+        assert [s.argv[0] for s in steps] == ["rsync", "rsync", "rsync"]
+        assert [s.text for s in steps] == [
+            "Copying Documents", "Copying .config", "Copying Saved network connections",
+        ]
+
+    def test_home_items_land_in_the_local_home_owned_by_the_local_account(self, migrate, parts):
+        source, inventory, target = parts
+        step = migrate.plan_stick(inventory, ["home.files.Documents"], source, target, STAMP)[0]
+        assert step.argv[-2:] == (f"{source}/home/olduser/Documents/", f"{target.root}/home/alice/Documents/")
+        assert "--chown=1000:1000" in step.argv
+        assert f"--backup-dir={target.root}/home/alice/{migrate.BACKUP_DIRNAME}/{STAMP}/Documents" in step.argv
+        assert step.mkdir == (f"{target.root}/home/alice",)
+        assert step.progress == "rsync"
+        assert step.weight == 1000
+        assert step.tolerate == migrate.RSYNC_PARTIAL
+
+    def test_system_items_keep_their_path_and_their_owner(self, migrate, parts):
+        source, inventory, target = parts
+        step = migrate.plan_stick(inventory, ["network"], source, target, STAMP)[0]
+        assert step.argv[-1] == f"{target.root}/etc/NetworkManager/system-connections/"
+        assert not any(a.startswith("--chown") for a in step.argv)
+        assert f"--backup-dir={target.root}/{migrate.SYSTEM_BACKUP_ROOT}/{STAMP}/etc/NetworkManager/system-connections" in step.argv
+
+    def test_items_without_paths_plan_no_rsync(self, migrate, parts):
+        source, inventory, target = parts
+        assert migrate.plan_stick(inventory, ["identity.hostname", "account.olduser"], source, target, STAMP) == []
+
+
+class TestSpace:
+    def test_shortfall_keeps_a_reserve_for_the_system(self, migrate):
+        assert migrate.shortfall(needed=1000, free=1000 + migrate.SPACE_RESERVE) == 0
+        assert migrate.shortfall(needed=1000, free=1000) == migrate.SPACE_RESERVE
+        assert migrate.shortfall(needed=5_000_000_000, free=1_000_000_000) == 4_000_000_000 + migrate.SPACE_RESERVE
+
+    def test_the_refusal_names_the_gap_and_portlin_expand_when_it_would_help(self, migrate):
+        devices = load_tool("devices.py")
+        text = migrate.no_space_message(4_000_000_000, unclaimed=20_000_000_000)
+        assert "4 GB" in text
+        assert devices.UNCLAIMED_ADVICE.format(gb=20.0) in text
+        assert "portlin-expand" not in migrate.no_space_message(4_000_000_000, unclaimed=0)
