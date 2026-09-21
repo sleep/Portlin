@@ -548,3 +548,137 @@ class TestSpace:
         assert "4 GB" in text
         assert devices.UNCLAIMED_ADVICE.format(gb=20.0) in text
         assert "portlin-expand" not in migrate.no_space_message(4_000_000_000, unclaimed=0)
+
+
+class TestArchive:
+    @pytest.fixture
+    def inventory(self, migrate, tmp_path):
+        source = tmp_path / "source"
+        populate_home(make_source(source))
+        return migrate.build_inventory(source)
+
+    def test_the_manifest_carries_the_inventory_and_round_trips(self, migrate, inventory):
+        text = migrate.manifest_text(inventory, STAMP)
+        restored, meta = migrate.read_manifest(text)
+        assert restored == inventory
+        assert meta["exported"] == STAMP
+        assert meta["bytes"] == sum(i.bytes for i in inventory.items)
+
+    def test_the_archive_is_named_for_the_host_and_the_day(self, migrate):
+        assert migrate.archive_name("office", STAMP) == "office-2026-09-21.portlin-backup.tar.zst"
+
+    def test_export_takes_every_path_including_the_unticked_ones(self, migrate, inventory):
+        members = migrate.export_members(inventory)
+        assert "home/olduser/.cache" in members
+        assert "home/olduser/Documents" in members
+        assert all("/" in m for m in members)
+
+    def test_tar_create_writes_the_manifest_first_from_its_own_directory(self, migrate, tmp_path):
+        argv = migrate.tar_create_argv(tmp_path / "a.tar.zst", tmp_path / "m", Path("/"), ["home/x/Documents"])
+        assert argv[:3] == ("tar", "-I", "zstd -T0 -3")
+        assert "--checkpoint-action=echo" in argv
+        first = argv.index("-C")
+        assert argv[first:first + 5] == ("-C", str(tmp_path / "m"), migrate.MANIFEST, "-C", "/")
+        assert argv[-1] == "home/x/Documents"
+
+    def test_plan_export_writes_the_manifest_then_archives(self, migrate, inventory, tmp_path):
+        steps = migrate.plan_export(inventory, Path("/"), tmp_path / "out.tar.zst", tmp_path / "m", STAMP)
+        assert steps[0].write[0][0] == str(tmp_path / "m" / migrate.MANIFEST)
+        assert steps[0].mkdir == (str(tmp_path / "m"),)
+        assert steps[1].argv[0] == "tar" and steps[1].progress == "tar"
+        assert steps[1].weight == sum(i.bytes for i in inventory.items)
+        assert steps[1].tolerate == (1,)
+
+    @pytest.mark.parametrize("line,records", [
+        ("tar: Write checkpoint 2000", 2000),
+        ("tar: Read checkpoint 4000", 4000),
+        ("home/x/Documents/notes.txt", None),
+    ])
+    def test_checkpoints_are_read_as_the_build_reads_them(self, migrate, line, records):
+        assert migrate.parse_tar_checkpoint(line) == records
+        assert migrate.checkpoint_bytes(2000) == 2000 * migrate.TAR_RECORD_BYTES
+
+    def test_reading_the_manifest_extracts_that_member_to_stdout(self, migrate):
+        assert migrate.tar_manifest_argv(Path("/a.tar.zst")) == ("tar", "-I", "zstd", "-xOf", "/a.tar.zst", "manifest.json")
+        assert migrate.tar_list_argv(Path("/a.tar.zst")) == ("tar", "-I", "zstd", "-tf", "/a.tar.zst")
+
+
+LISTING = "\n".join([
+    "manifest.json",
+    "home/olduser/Documents/",
+    "home/olduser/Documents/notes.txt",
+    "home/olduser/Downloads/",
+    "home/olduser/Downloads/big.iso",
+    "home/olduser/.config/",
+    "home/olduser/.config/app.ini",
+    "home/olduser/.bashrc",
+    "etc/NetworkManager/system-connections/",
+    "etc/NetworkManager/system-connections/cafe.nmconnection",
+    "",
+])
+
+
+class TestPlanArchive:
+    def test_chosen_members_are_the_files_under_the_chosen_paths(self, migrate):
+        members = migrate.chosen_members(LISTING, ["home/olduser/Documents", "home/olduser/.bashrc"])
+        assert members == ["home/olduser/Documents/notes.txt", "home/olduser/.bashrc"]
+
+    def test_collisions_are_the_members_that_already_exist_on_the_target(self, migrate, tmp_path):
+        target = migrate.Target(root=tmp_path, user="alice", uid=1000, gid=1000, home="home/alice")
+        (tmp_path / "home/alice/Documents").mkdir(parents=True)
+        (tmp_path / "home/alice/Documents/notes.txt").write_text("mine")
+        (tmp_path / "etc/NetworkManager/system-connections").mkdir(parents=True)
+        (tmp_path / "etc/NetworkManager/system-connections/cafe.nmconnection").write_text("old")
+        members = [
+            "home/olduser/Documents/notes.txt", "home/olduser/.bashrc",
+            "etc/NetworkManager/system-connections/cafe.nmconnection",
+        ]
+        moves = migrate.collisions(members, "home/olduser", target, STAMP)
+        assert moves == [
+            (str(tmp_path / "home/alice/Documents/notes.txt"),
+             str(tmp_path / "home/alice" / migrate.BACKUP_DIRNAME / STAMP / "Documents/notes.txt")),
+            (str(tmp_path / "etc/NetworkManager/system-connections/cafe.nmconnection"),
+             str(tmp_path / migrate.SYSTEM_BACKUP_ROOT / STAMP / "etc/NetworkManager/system-connections/cafe.nmconnection")),
+        ]
+
+    def test_extract_renames_the_home_and_never_keeps_the_archives_owners(self, migrate):
+        argv = migrate.tar_extract_argv(
+            Path("/a.tar.zst"), Path("/"), ["home/olduser/Documents", "etc/NetworkManager/system-connections"],
+            source_home="home/olduser", target_home="home/alice",
+        )
+        assert "--no-same-owner" in argv
+        assert "--transform=s|^home/olduser/|home/alice/|" in argv
+        assert argv[argv.index("-C") + 1] == "/"
+        assert argv[-2:] == ("home/olduser/Documents", "etc/NetworkManager/system-connections")
+        same = migrate.tar_extract_argv(Path("/a.tar.zst"), Path("/"), ["home/x/D"], source_home="home/x", target_home="home/x")
+        assert not any(a.startswith("--transform") for a in same)
+
+    def test_the_plan_moves_aside_then_extracts_then_chowns_each_home_item(self, migrate, tmp_path):
+        inventory, _ = migrate.read_manifest(migrate.manifest_text(
+            migrate.build_inventory(_archive_source(migrate, tmp_path / "source")), STAMP
+        ))
+        target = migrate.Target(root=tmp_path / "t", user="alice", uid=1000, gid=1000, home="home/alice")
+        (tmp_path / "t/home/alice/Documents").mkdir(parents=True)
+        (tmp_path / "t/home/alice/Documents/notes.txt").write_text("mine")
+        steps = migrate.plan_archive(
+            inventory, ["home.files.Documents", "home.settings..bashrc", "network"],
+            tmp_path / "a.tar.zst", LISTING, target, STAMP,
+        )
+        extract, chown_docs, chown_rc = steps
+        assert extract.argv[0] == "tar" and extract.progress == "tar"
+        assert extract.move_aside == (
+            (str(tmp_path / "t/home/alice/Documents/notes.txt"),
+             str(tmp_path / "t/home/alice" / migrate.BACKUP_DIRNAME / STAMP / "Documents/notes.txt")),
+        )
+        assert extract.weight == sum(i.bytes for i in migrate.selected(inventory, ["home.files.Documents", "home.settings..bashrc", "network"]))
+        assert extract.argv[-3:] == ("home/olduser/Documents", "home/olduser/.bashrc", "etc/NetworkManager/system-connections")
+        assert chown_docs.argv == ("chown", "-R", "-h", "1000:1000", str(tmp_path / "t/home/alice/Documents"))
+        assert chown_rc.argv == ("chown", "-R", "-h", "1000:1000", str(tmp_path / "t/home/alice/.bashrc"))
+
+
+def _archive_source(migrate, root: Path) -> Path:
+    populate_home(make_source(root))
+    connections = root / migrate.CONNECTIONS
+    connections.mkdir(parents=True)
+    (connections / "cafe.nmconnection").write_text("[wifi]\n")
+    return root

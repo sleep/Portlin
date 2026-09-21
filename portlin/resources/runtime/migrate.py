@@ -662,3 +662,148 @@ def no_space_message(short: int, unclaimed: int) -> str:
     if unclaimed:
         text += " " + UNCLAIMED_ADVICE.format(gb=unclaimed / 1_000_000_000)
     return text
+
+
+# tar's default blocking factor: 20 records of 512 bytes per checkpoint unit.
+TAR_RECORD_BYTES = 10240
+_TAR_CHECKPOINT = re.compile(r"^tar: (?:Write|Read) checkpoint (\d+)")
+# Every 2000 records is every 20 MB, the cadence build_rootfs uses.
+_TAR_PROGRESS = ("--checkpoint=2000", "--checkpoint-action=echo")
+
+
+def manifest_text(inventory: Inventory, stamp: str) -> str:
+    return json.dumps(
+        {
+            "inventory": dataclasses.asdict(inventory),
+            "exported": stamp,
+            "bytes": sum(item.bytes for item in inventory.items),
+        },
+        indent=2,
+    ) + "\n"
+
+
+def read_manifest(text: str) -> tuple[Inventory, dict]:
+    data = json.loads(text)
+    inventory = from_json(json.dumps(data["inventory"]))
+    return inventory, {"exported": data.get("exported", ""), "bytes": data.get("bytes", 0)}
+
+
+def archive_name(hostname: str, stamp: str) -> str:
+    return f"{hostname or 'portlin'}-{stamp[:10]}{ARCHIVE_SUFFIX}"
+
+
+def export_members(inventory: Inventory) -> list[str]:
+    """Everything with a path. An export is a backup, so nothing is left out."""
+    return [path for item in inventory.items for path in item.paths]
+
+
+def tar_create_argv(archive: Path, manifest_dir: Path, root: Path, members: list[str]) -> tuple[str, ...]:
+    """Level 3 rather than the rootfs's 6: a home is mostly media and documents
+    that are compressed already, where a higher level costs time and saves
+    nothing. The manifest is named first, from its own directory, so it is
+    member 0 and can be read without unpacking the rest."""
+    return (
+        "tar", "-I", "zstd -T0 -3", *_TAR_PROGRESS,
+        "-cf", str(archive),
+        "-C", str(manifest_dir), MANIFEST,
+        "-C", str(root), *members,
+    )
+
+
+def tar_list_argv(archive: Path) -> tuple[str, ...]:
+    return ("tar", "-I", "zstd", "-tf", str(archive))
+
+
+def tar_manifest_argv(archive: Path) -> tuple[str, ...]:
+    return ("tar", "-I", "zstd", "-xOf", str(archive), MANIFEST)
+
+
+def tar_extract_argv(archive: Path, root: Path, paths: list[str], *, source_home: str, target_home: str) -> tuple[str, ...]:
+    """--no-same-owner because the archive's uids belong to another stick;
+    a chown step gives home items to the local account afterwards."""
+    argv = ["tar", "-I", "zstd", *_TAR_PROGRESS, "--no-same-owner", "-xf", str(archive), "-C", str(root)]
+    if source_home and source_home != target_home:
+        argv.append(f"--transform=s|^{source_home}/|{target_home}/|")
+    return (*argv, *paths)
+
+
+def parse_tar_checkpoint(line: str) -> int | None:
+    match = _TAR_CHECKPOINT.match(line.strip())
+    return int(match.group(1)) if match else None
+
+
+def checkpoint_bytes(records: int) -> int:
+    return records * TAR_RECORD_BYTES
+
+
+def chosen_members(listing: str, paths: list[str]) -> list[str]:
+    """The file members under any chosen path. Directories end in a slash in
+    tar's listing and are left out: they merge rather than collide."""
+    members = []
+    for name in listing.splitlines():
+        if not name or name.endswith("/"):
+            continue
+        if any(name == path or name.startswith(path + "/") for path in paths):
+            members.append(name)
+    return members
+
+
+def collisions(members: list[str], source_home: str, target: Target, stamp: str) -> list[tuple[str, str]]:
+    """(existing, backup) for every member that would land on a file already there."""
+    moves = []
+    for member in members:
+        destination = target_path(member, source_home, target.home)
+        existing = target.root / destination
+        if existing.is_symlink() or existing.exists():
+            backup = backup_dir(target, destination, stamp)
+            moves.append((str(existing), str(backup)))
+    return moves
+
+
+def plan_export(inventory: Inventory, root: Path, archive: Path, manifest_dir: Path, stamp: str) -> list[Step]:
+    return [
+        Step(
+            "Writing the manifest",
+            mkdir=(str(manifest_dir),),
+            write=((str(manifest_dir / MANIFEST), manifest_text(inventory, stamp)),),
+        ),
+        Step(
+            f"Archiving to {archive.name}",
+            argv=tar_create_argv(archive, manifest_dir, root, export_members(inventory)),
+            progress="tar",
+            weight=sum(item.bytes for item in inventory.items),
+            # 1 is "some files changed while being read", which on a running
+            # system a browser's cache does constantly. The archive is whole.
+            tolerate=(1,),
+        ),
+    ]
+
+
+def plan_archive(inventory: Inventory, ids: list[str], archive: Path, listing: str, target: Target, stamp: str) -> list[Step]:
+    """Move collisions aside, extract everything chosen in one pass, then
+    give each home item to the local account. Bytes are written once."""
+    items = [item for item in selected(inventory, ids) if item.paths]
+    paths = [path for item in items for path in item.paths]
+    if not paths:
+        return []
+    steps = [
+        Step(
+            "Restoring from the archive",
+            argv=tar_extract_argv(archive, target.root, paths,
+                                  source_home=inventory.home, target_home=target.home),
+            progress="tar",
+            weight=sum(item.bytes for item in items),
+            move_aside=tuple(collisions(chosen_members(listing, paths), inventory.home, target, stamp)),
+        )
+    ]
+    for item in items:
+        for path in item.paths:
+            destination = target_path(path, inventory.home, target.home)
+            if is_home(destination, target.home):
+                steps.append(
+                    Step(
+                        f"Setting the owner of {item.label}",
+                        argv=("chown", "-R", "-h", f"{target.uid}:{target.gid}", str(target.root / destination)),
+                    )
+                )
+    return steps
