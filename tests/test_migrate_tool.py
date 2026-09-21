@@ -735,6 +735,68 @@ class TestHostileSourceAtRun:
         )
         assert tool.move_roots(migrate.Target(Path("/"))) == (Path("/etc"), Path("/var"))
 
+    def test_a_private_write_is_created_unreadable_to_others(self, tool, migrate, tmp_path):
+        path = tmp_path / "export/manifest.json"
+        step = migrate.Step("Writing", write=((str(path), "{}\n"),), private=True)
+        assert tool.run_steps([step], total=0, out=io.StringIO()).ok
+        assert path.read_text() == "{}\n"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        # Rewritten in place, the mode is set again rather than inherited.
+        path.chmod(0o644)
+        assert tool.run_steps([step], total=0, out=io.StringIO()).ok
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_the_export_manifest_is_private_and_removed_afterwards(self, tool, migrate, monkeypatch, tmp_path):
+        from test_migrate import make_source, populate_home
+        source = tmp_path / "s"
+        populate_home(make_source(source))
+        inventory = migrate.build_inventory(source)
+        monkeypatch.setattr(tool, "PLAN_DIR", tmp_path / "run")
+        monkeypatch.setattr(tool, "build_inventory", lambda root, **kw: inventory)
+        monkeypatch.setattr(tool, "command_output", lambda argv: "")
+        monkeypatch.setattr(tool, "local_target", lambda: migrate.Target(Path("/")))
+        real_run_steps = tool.run_steps
+        seen = {}
+
+        def run_steps(steps, *, total, out=None, **kwargs):
+            manifest, archive = steps
+            assert manifest.private
+            # Only the manifest's own write happens, so its mode can be
+            # checked while it exists; tar itself is not run here.
+            result = real_run_steps([manifest], total=0, out=io.StringIO())
+            written = Path(manifest.write[0][0])
+            seen["mode"] = stat.S_IMODE(written.stat().st_mode)
+            seen["dir"] = written.parent
+            return result
+
+        monkeypatch.setattr(tool, "run_steps", run_steps)
+        monkeypatch.setattr(tool, "emit", lambda *a, **k: None)
+        args = type("Args", (), {"file": str(tmp_path / "out.tar.zst")})()
+        assert tool.cmd_export(args) == tool.EXIT_OK
+        export_dir = tmp_path / "run/export"
+        assert seen == {"mode": 0o600, "dir": export_dir}
+        assert export_dir.is_dir() and stat.S_IMODE(export_dir.stat().st_mode) == 0o700
+        assert not (export_dir / "manifest.json").exists()
+
+    def test_the_export_manifest_is_removed_even_when_the_archive_fails(self, tool, migrate, monkeypatch, tmp_path):
+        from test_migrate import make_source
+        inventory = migrate.build_inventory(make_source(tmp_path / "s").parent.parent)
+        monkeypatch.setattr(tool, "PLAN_DIR", tmp_path / "run")
+        monkeypatch.setattr(tool, "build_inventory", lambda root, **kw: inventory)
+        monkeypatch.setattr(tool, "command_output", lambda argv: "")
+        monkeypatch.setattr(tool, "local_target", lambda: migrate.Target(Path("/")))
+        monkeypatch.setattr(tool, "emit", lambda *a, **k: None)
+        real_run_steps = tool.run_steps
+
+        def run_steps(steps, *, total, out=None, **kwargs):
+            real_run_steps([steps[0]], total=0, out=io.StringIO())
+            return tool.RunResult(False, (), "tar exited with status 2")
+
+        monkeypatch.setattr(tool, "run_steps", run_steps)
+        args = type("Args", (), {"file": str(tmp_path / "out.tar.zst")})()
+        assert tool.cmd_export(args) == tool.EXIT_FAILED
+        assert not (tmp_path / "run/export/manifest.json").exists()
+
     def test_software_not_in_the_catalog_is_warned_about_and_not_installed(self, tool, migrate, tmp_path):
         from test_migrate import make_source
         source_root = tmp_path / "source"

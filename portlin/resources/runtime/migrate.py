@@ -631,6 +631,7 @@ class Step:
     ``passthrough`` means argv speaks the protocol itself and its lines are
     forwarded; ``tolerate`` lists exit codes that are a warning rather than
     a failure, and ``optional`` makes every non-zero exit a warning.
+    ``private`` creates every ``write`` readable by its owner alone.
     """
 
     text: str
@@ -645,6 +646,7 @@ class Step:
     tolerate: tuple[int, ...] = ()
     optional: bool = False
     warn: str | None = None
+    private: bool = False
 
 
 @dataclass(frozen=True)
@@ -949,6 +951,8 @@ def plan_export(inventory: Inventory, root: Path, archive: Path, manifest_dir: P
             "Writing the manifest",
             mkdir=(str(manifest_dir),),
             write=((str(manifest_dir / MANIFEST), manifest_text(inventory, stamp)),),
+            # It carries the password hash, like the archive it goes into.
+            private=True,
         ),
         Step(
             f"Archiving to {archive.name}",
