@@ -18,6 +18,7 @@ thing guaranteed to work.
 from __future__ import annotations
 
 import grp
+import json
 import os
 import re
 import signal
@@ -44,6 +45,14 @@ LOG = Path("/var/log/portlin-firstboot.log")
 SUDOERS_DROPIN = Path("/etc/sudoers.d/50-portlin-nopasswd")
 SUDOERS_NOPASSWD_RULE = "{username} ALL=(ALL) NOPASSWD: ALL\n"
 BACKTITLE = "Portlin first-boot setup"
+
+# The packaged migration tool. Probed rather than assumed, for the reason
+# GNOME_KEYRING_DAEMON is: this wizard is frozen at write time, and the tool
+# comes from a package that a stick written before it existed does not have.
+# It is spoken to over argv and JSON and never imported, because that is the
+# boundary that survives the two moving at different speeds.
+MIGRATE_TOOL = "/usr/bin/portlin-migrate"
+MIGRATION_PLAN = Path("/run/portlin/migrate/plan.json")
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
@@ -305,15 +314,17 @@ def ask_password(title: str, text: str) -> str:
     return _whiptail(["--title", title, "--passwordbox", text, "12", "72"], capture=True)
 
 
-def choose(title: str, text: str, entries: list[tuple[str, str]], height: int = 20) -> str:
+def choose(title: str, text: str, entries: list[tuple[str, str]], height: int = 20, default: str = "") -> str:
     rows: list[str] = []
     for tag, label in entries:
         rows += [tag, label]
     listsize = min(len(entries), max(height - 8, 4))
-    return _whiptail(
-        ["--title", title, "--menu", text, str(height), "72", str(listsize), *rows],
-        capture=True,
-    )
+    args = ["--title", title, "--menu", text, str(height), "72", str(listsize), *rows]
+    if default:
+        # Prefilled from another portlin, so the answer is the same one
+        # keypress away as a fresh answer would be.
+        args = ["--default-item", default, *args]
+    return _whiptail(args, capture=True)
 
 
 def confirm(title: str, text: str, *, default_yes: bool = True) -> bool:
@@ -337,26 +348,97 @@ def step_welcome() -> None:
     )
 
 
-def step_keyboard() -> tuple[str, str]:
+def migration_candidates() -> list[dict]:
+    """What portlin-migrate can see, or nothing when it is absent or confused.
+
+    Nothing here may stop setup. A tool that is missing, that fails, or that
+    prints something other than a list of candidates means there is simply
+    no restore screen, and the wizard goes on as it did before the tool
+    existed.
+    """
+    if not Path(MIGRATE_TOOL).exists():
+        return []
+    try:
+        proc = subprocess.run(
+            [MIGRATE_TOOL, "candidates", "--json"], input="", capture_output=True, text=True, timeout=60
+        )
+        found = json.loads(proc.stdout) if proc.returncode == 0 else []
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if not isinstance(found, list) or not all(isinstance(c, dict) and "path" in c for c in found):
+        return []
+    return found
+
+
+def step_migration(candidates: list[dict]) -> dict | None:
+    """Offer a restore, and hand the choosing to the tool's own screens.
+
+    The tool is run with the console rather than through run(): its screens
+    are whiptail too, and they need tty1 the way this wizard's do. It keeps
+    the old drive open afterwards so apply can copy from it without asking
+    for the passphrase twice.
+    """
+    names = "\n".join(
+        f"  {c.get('model') or Path(c['path']).name} {c.get('size', '')}".rstrip() for c in candidates
+    )
+    if not confirm(
+        "Restore from another portlin",
+        f"\nAnother portlin was found:\n\n{names}\n\n"
+        "Bring its account, files and settings over to this stick?\n\n"
+        "You choose exactly what to bring on the next screen.",
+    ):
+        return None
+    proc = subprocess.run([MIGRATE_TOOL, "plan", "--firstboot", "--keep-open", "--out", str(MIGRATION_PLAN)])
+    if proc.returncode != 0:
+        return None
+    try:
+        plan = json.loads(MIGRATION_PLAN.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(plan, dict) or not isinstance(plan.get("ids"), list):
+        return None
+    log(f"migration planned from {plan.get('source')}: {len(plan['ids'])} items")
+    return plan
+
+
+def apply_migration() -> bool:
+    """The copy, drawn by the tool's own gauge on the console."""
+    return subprocess.run([MIGRATE_TOOL, "apply", "--plan", str(MIGRATION_PLAN), "--gauge"]).returncode == 0
+
+
+def close_migration() -> None:
+    """Release the old drive and the plan, on every way out of setup."""
+    if not MIGRATION_PLAN.exists():
+        return
+    if Path(MIGRATE_TOOL).exists():
+        subprocess.run([MIGRATE_TOOL, "close"], input="", capture_output=True, text=True)
+    MIGRATION_PLAN.unlink(missing_ok=True)
+
+
+def step_keyboard(default: str = "") -> tuple[str, str]:
+    known = dict(COMMON_KEYMAPS)
     layout = choose(
         "Keyboard layout",
         "Which keyboard layout does this machine have?\n"
         "You can pick a different one later from the Xfce settings.",
         COMMON_KEYMAPS + [("other", "Something else (type the code)")],
+        default=default if default in known else ("other" if default else ""),
     )
     if layout == "other":
-        layout = ask("Keyboard layout", "Enter an X11 layout code, for example 'cz' or 'br':", "us")
-    return layout, dict(COMMON_KEYMAPS).get(layout, layout)
+        layout = ask("Keyboard layout", "Enter an X11 layout code, for example 'cz' or 'br':", default or "us")
+    return layout, known.get(layout, layout)
 
 
-def step_locale() -> str:
+def step_locale(default: str = "") -> str:
+    known = dict(COMMON_LOCALES)
     locale = choose(
         "Language",
         "Which language and regional formats should the desktop use?",
         COMMON_LOCALES + [("other", "Something else (type the name)")],
+        default=default if default in known else ("other" if default else ""),
     )
     if locale == "other":
-        locale = ask("Language", "Enter a locale name, for example 'cs_CZ.UTF-8':", "en_US.UTF-8")
+        locale = ask("Language", "Enter a locale name, for example 'cs_CZ.UTF-8':", default or "en_US.UTF-8")
     return locale
 
 
@@ -375,7 +457,7 @@ def _timezones() -> list[str]:
     return sorted(zones)
 
 
-def step_timezone() -> str:
+def step_timezone(default: str = "") -> str:
     zones = _timezones()
     if not zones:
         return "UTC"
@@ -384,6 +466,7 @@ def step_timezone() -> str:
         "Time zone",
         "Which region are you in?",
         [(r, r.replace("_", " ")) for r in regions],
+        default=default.split("/", 1)[0],
     )
     cities = sorted(z for z in zones if z.split("/", 1)[0] == region)
     if len(cities) <= 1:
@@ -392,15 +475,16 @@ def step_timezone() -> str:
         "Time zone",
         f"Which city in {region} shares your time zone?",
         [(c, c.split("/", 1)[1].replace("_", " ")) for c in cities],
+        default=default,
     )
 
 
-def step_hostname() -> str:
+def step_hostname(default: str = "portlin") -> str:
     while True:
         hostname = ask(
             "Computer name",
             "What should this stick call itself on a network?",
-            "portlin",
+            default,
         )
         if HOSTNAME_RE.match(hostname):
             return hostname
@@ -829,7 +913,7 @@ def finalise_encryption() -> bool:
     return Path("/run/portlin/finalised").exists()
 
 
-def step_autologin(username: str, *, encrypted: bool) -> bool:
+def step_autologin(username: str, *, encrypted: bool, default_yes: bool = False) -> bool:
     warning = (
         "Convenient on a stick you carry, but anyone who boots it reaches your "
         "desktop without typing anything."
@@ -845,11 +929,11 @@ def step_autologin(username: str, *, encrypted: bool) -> bool:
     return confirm(
         "Automatic login",
         f"\nLog in as '{username}' automatically when this stick boots?\n\n{warning}",
-        default_yes=False,
+        default_yes=default_yes,
     )
 
 
-def step_sudo_password(username: str, *, encrypted: bool, autologin: bool) -> bool:
+def step_sudo_password(username: str, *, encrypted: bool, autologin: bool, default_yes: bool = True) -> bool:
     warning = (
         "Saying no lets any command run as root without asking, so anyone who "
         "reaches this desktop owns the whole system."
@@ -865,6 +949,7 @@ def step_sudo_password(username: str, *, encrypted: bool, autologin: bool) -> bo
     return confirm(
         "Administrator password",
         f"\nRequire a password when '{username}' runs sudo?\n\n{warning}",
+        default_yes=default_yes,
     )
 
 
@@ -1114,22 +1199,45 @@ def refresh_initramfs_for_keymap(encrypted: bool) -> None:
 
 def wizard() -> None:
     step_welcome()
-    layout, _ = step_keyboard()
+
+    migration = None
+    candidates = migration_candidates()
+    if candidates:
+        migration = step_migration(candidates)
+    prefill = (migration or {}).get("identity") or {}
+    account_plan = (migration or {}).get("account")
+    migrated_ids = set((migration or {}).get("ids") or [])
+
+    layout, _ = step_keyboard(default=prefill.get("keyboard", ""))
     apply_keyboard(layout)
 
-    locale = step_locale()
-    timezone = step_timezone()
-    hostname = step_hostname()
-    username, full_name, password = step_account()
+    locale = step_locale(default=prefill.get("locale", ""))
+    timezone = step_timezone(default=prefill.get("timezone", ""))
+    hostname = step_hostname(default=prefill.get("hostname") or "portlin")
+    if account_plan:
+        # The tool recreates the account with its password hash, so there is
+        # no password to ask for and none to hold here.
+        username, full_name, password = account_plan["name"], account_plan.get("gecos", ""), None
+        message(
+            "Your account",
+            f"\nThe account '{username}' comes over from the old drive, with its password.",
+        )
+    else:
+        username, full_name, password = step_account()
 
     luks_device = _luks_device()
-    autologin = step_autologin(username, encrypted=luks_device is not None)
+    autologin = step_autologin(
+        username, encrypted=luks_device is not None,
+        default_yes=bool(account_plan and account_plan.get("autologin")),
+    )
     sudo_password = step_sudo_password(
-        username, encrypted=luks_device is not None, autologin=autologin
+        username, encrypted=luks_device is not None, autologin=autologin,
+        default_yes=not (account_plan and account_plan.get("sudo_nopasswd")),
     )
     has_desktop = _desktop_installed()
-    theme = step_theme() if has_desktop else ""
-    icon_theme = step_icon_theme() if has_desktop else ""
+    # A migrated theme is applied by the tool; asking here would override it.
+    theme = step_theme() if has_desktop and "extras.theme" not in migrated_ids else ""
+    icon_theme = step_icon_theme() if has_desktop and "extras.theme" not in migrated_ids else ""
     expand = step_expand()
 
     if not confirm(
@@ -1143,6 +1251,7 @@ def wizard() -> None:
         f"Sudo:      {'asks for a password' if sudo_password else 'no password'}\n"
         + (f"Theme:     {theme}\n" if theme else "")
         + (f"Icons:     {icon_theme}\n" if icon_theme else "")
+        + (f"Restore:   {len(migrated_ids)} items from {migration['label']}\n" if migration else "")
         + f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
         "Apply these settings now?",
     ):
@@ -1171,7 +1280,20 @@ def wizard() -> None:
     apply_locale(locale)
     apply_timezone(timezone)
     apply_hostname(hostname)
-    apply_account(username, full_name, password)
+    if password is not None:
+        apply_account(username, full_name, password)
+    if migration:
+        # Right after the account exists, so files land under the right uid,
+        # and before anything that reads the home directory.
+        if not apply_migration():
+            message(
+                "Restore",
+                "\nNot everything could be brought over. The details are in "
+                "/var/log/portlin-migrate.log.\n\nSetup continues. You can try again "
+                "later from Migrate in the applications menu.",
+            )
+        if password is None and not _user_exists(username):
+            raise RuntimeError(f"the account {username} was not created by the restore")
     if not apply_sudo_password(username, sudo_password):
         message(
             "Administrator password",
@@ -1232,6 +1354,9 @@ def main() -> int:
         )
         return 1
     finally:
+        # Always release the tool's hold on the source drive, including on the
+        # failure paths above, so a crash mid-setup does not leave it open.
+        close_migration()
         # Always hand the console back, including on the failure paths above.
         claim_console(False)
     return 0

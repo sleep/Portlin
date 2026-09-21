@@ -8,6 +8,7 @@ the directives the design depends on.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -92,7 +93,7 @@ class TestWizardScript:
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 imported.add(node.module.split(".")[0])
         allowed = {
-            "__future__", "grp", "os", "re", "signal", "subprocess", "sys",
+            "__future__", "grp", "json", "os", "re", "signal", "subprocess", "sys",
             "traceback", "pathlib",
         }
         assert imported <= allowed, f"unexpected imports: {imported - allowed}"
@@ -355,6 +356,101 @@ class TestWizardScript:
         assert not compiled.match("-leading")
         assert not compiled.match("trailing-")
         assert not compiled.match("has space")
+
+    def test_it_asks_the_packaged_tool_for_candidates_and_survives_its_absence(self):
+        seen = []
+
+        class Proc:
+            returncode = 0
+            stdout = json.dumps([{"kind": "stick", "path": "/dev/sdb4", "model": "SanDisk", "size": "57.3G"}])
+
+        class FakeSubprocess:
+            SubprocessError = Exception
+
+            @staticmethod
+            def run(argv, **kwargs):
+                seen.append((argv, kwargs.get("input")))
+                return Proc()
+
+        class Exists:
+            def __init__(self, path):
+                self.path = path
+
+            def exists(self):
+                return self.path == "/usr/bin/portlin-migrate"
+
+        namespace = {"Path": Exists, "subprocess": FakeSubprocess, "json": json,
+                     "MIGRATE_TOOL": "/usr/bin/portlin-migrate"}
+        candidates = load_function(WIZARD, "migration_candidates", namespace)
+        assert candidates() == [{"kind": "stick", "path": "/dev/sdb4", "model": "SanDisk", "size": "57.3G"}]
+        assert seen[0][0] == ["/usr/bin/portlin-migrate", "candidates", "--json"]
+        # stdin is a pipe, as for every other command: tty1 is not to be handed out.
+        assert seen[0][1] == ""
+
+        namespace["MIGRATE_TOOL"] = "/usr/bin/absent"
+        assert load_function(WIZARD, "migration_candidates", namespace)() == []
+
+    def test_nonsense_from_the_tool_is_no_candidates(self):
+        class Proc:
+            returncode = 0
+            stdout = '{"not": "a list"}'
+
+        class FakeSubprocess:
+            SubprocessError = Exception
+
+            @staticmethod
+            def run(argv, **kwargs):
+                return Proc()
+
+        class Exists:
+            def __init__(self, path):
+                pass
+
+            def exists(self):
+                return True
+
+        namespace = {"Path": Exists, "subprocess": FakeSubprocess, "json": json,
+                     "MIGRATE_TOOL": "/usr/bin/portlin-migrate"}
+        assert load_function(WIZARD, "migration_candidates", namespace)() == []
+        Proc.stdout = "garbage"
+        assert load_function(WIZARD, "migration_candidates", namespace)() == []
+
+    def test_choose_preselects_a_default_when_given_one(self):
+        calls = []
+        namespace = {"_whiptail": lambda args, capture=False: calls.append(args) or "gb"}
+        choose = load_function(WIZARD, "choose", namespace)
+        choose("Keyboard", "Which?", [("us", "US"), ("gb", "UK")], default="gb")
+        assert "--default-item" in calls[0] and calls[0][calls[0].index("--default-item") + 1] == "gb"
+        choose("Keyboard", "Which?", [("us", "US"), ("gb", "UK")])
+        assert "--default-item" not in calls[1]
+
+    def test_the_migration_screen_comes_after_welcome_and_before_the_keyboard(self):
+        body = WIZARD.read_text()
+        wizard = body[body.index("def wizard("):body.index("def main(")]
+        assert wizard.index("step_welcome()") < wizard.index("migration_candidates()") < wizard.index("step_keyboard(")
+
+    def test_the_copy_runs_right_after_the_account_exists(self):
+        body = WIZARD.read_text()
+        wizard = body[body.index("def wizard("):body.index("def main(")]
+        assert wizard.index("apply_account(") < wizard.index("apply_migration()") < wizard.index("apply_sudo_password(")
+
+    def test_a_migrated_account_is_not_asked_for_a_password(self):
+        body = WIZARD.read_text()
+        wizard = body[body.index("def wizard("):body.index("def main(")]
+        assert wizard.index("account_plan") < wizard.index("step_account()")
+        assert "if password is not None:" in wizard
+
+    def test_the_tools_source_is_released_on_every_exit(self):
+        body = WIZARD.read_text()
+        main = body[body.index("def main("):]
+        finally_block = main[main.index("finally:"):]
+        assert "close_migration()" in finally_block
+
+    def test_the_wizard_never_imports_the_tools_module(self):
+        # The wizard is frozen; the package moves. The subprocess boundary is
+        # what lets them drift, and an import would quietly undo it.
+        assert "from migrate import" not in WIZARD.read_text()
+        assert "import migrate" not in WIZARD.read_text()
 
 
 class TestEncryptOnFirstBoot:
