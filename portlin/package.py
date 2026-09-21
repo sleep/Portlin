@@ -57,6 +57,7 @@ DESKTOP_TOOLS = [
     "portlin-about",
     "portlin-caffeine",
     "portlin-software",
+    "portlin-migration",
     # The only one of these that is not a GTK program. It is here rather than
     # in TOOLS because it is useless without a panel to print into, and a
     # --minimal stick has none.
@@ -71,6 +72,7 @@ MENU_ENTRIES = {
     "portlin-about.desktop": "usr/share/applications/portlin-about.desktop",
     "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
     "portlin-software.desktop": "usr/share/applications/portlin-software.desktop",
+    "portlin-migration.desktop": "usr/share/applications/portlin-migration.desktop",
 }
 
 # X-Xfce-Toplevel (see portlin-about.desktop) only keeps About Portlin out of

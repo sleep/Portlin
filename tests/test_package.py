@@ -576,6 +576,14 @@ def test_desktop_ships_the_software_app_and_its_menu_entry():
     assert "usr/share/applications/portlin-software.desktop" in files
 
 
+def test_desktop_ships_the_migration_app_and_its_menu_entry():
+    files = package.text_files("portlin-desktop")
+    assert "usr/bin/portlin-migration" in files
+    assert "usr/bin/portlin-migration" in package.executable_paths("portlin-desktop")
+    assert "usr/share/applications/portlin-migration.desktop" in files
+    assert "usr/bin/portlin-migration" not in package.text_files("portlin-runtime")
+
+
 def test_desktop_depends_on_what_the_software_app_elevates_through():
     # pkexec is a separate package from polkitd in trixie, and it is the
     # whole of how the app acts as root. Without it the window opens, lists

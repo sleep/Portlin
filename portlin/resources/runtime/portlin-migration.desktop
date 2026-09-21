@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Migrate
+GenericName=Migration from another portlin
+Comment=Bring files and settings over from another portlin drive or a backup
+Exec=portlin-migration
+Icon=portlin
+Terminal=false
+StartupNotify=true
+# System, beside Software: it is a program that changes the system, and the
+# menu files Settings entries away where nobody looks for a program to run.
+Categories=System;
+Keywords=migrate;restore;backup;transfer;move;old drive;
