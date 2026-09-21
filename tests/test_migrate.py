@@ -682,3 +682,106 @@ def _archive_source(migrate, root: Path) -> Path:
     connections.mkdir(parents=True)
     (connections / "cafe.nmconnection").write_text("[wifi]\n")
     return root
+
+
+class TestSafety:
+    def test_tar_create_argv_puts_a_double_dash_before_members(self, migrate, tmp_path):
+        argv = migrate.tar_create_argv(tmp_path / "a.tar.zst", tmp_path / "m", Path("/"), ["home/x/Documents"])
+        assert argv[-2:] == ("--", "home/x/Documents")
+
+    def test_tar_extract_argv_puts_a_double_dash_before_paths(self, migrate):
+        argv = migrate.tar_extract_argv(
+            Path("/a.tar.zst"), Path("/"), ["home/olduser/Documents", "etc/NetworkManager/system-connections"],
+            source_home="home/olduser", target_home="home/alice",
+        )
+        dd_index = argv.index("--")
+        assert argv[dd_index + 1:dd_index + 3] == ("home/olduser/Documents", "etc/NetworkManager/system-connections")
+
+    def test_tar_extract_argv_rejects_sed_metacharacters_in_source_home(self, migrate):
+        with pytest.raises(ValueError, match="unsafe home path"):
+            migrate.tar_extract_argv(
+                Path("/a.tar.zst"), Path("/"), ["home/x/D"],
+                source_home="home/x|y", target_home="home/alice",
+            )
+
+    def test_tar_extract_argv_rejects_sed_metacharacters_in_target_home(self, migrate):
+        with pytest.raises(ValueError, match="unsafe home path"):
+            migrate.tar_extract_argv(
+                Path("/a.tar.zst"), Path("/"), ["home/x/D"],
+                source_home="home/olduser", target_home="home/alice&bob",
+            )
+
+    def test_unsafe_paths_identifies_options_absolute_paths_traversals_and_system_files(self, migrate):
+        items = [
+            migrate.Item("bad1", "category", "option", paths=("--checkpoint-action=exec=sh",)),
+            migrate.Item("bad2", "category", "system", paths=("etc/sudoers",)),
+            migrate.Item("bad3", "category", "traversal", paths=("home/olduser/../../etc/shadow",)),
+            migrate.Item("bad4", "category", "absolute", paths=("/etc/hosts",)),
+            migrate.Item("good1", "home.files", "docs", paths=("home/olduser/Documents",)),
+            migrate.Item("good2", "network", "network", paths=(migrate.CONNECTIONS,)),
+        ]
+        inventory = migrate.Inventory(
+            version="0.1.2", hostname="office", home="home/olduser",
+            items=tuple(items),
+        )
+        bad = migrate.unsafe_paths(inventory, ["bad1", "bad2", "bad3", "bad4", "good1", "good2"])
+        assert bad == [
+            "--checkpoint-action=exec=sh", "etc/sudoers", "home/olduser/../../etc/shadow", "/etc/hosts",
+        ]
+
+    def test_plan_archive_raises_when_any_selected_path_is_unsafe(self, migrate, tmp_path):
+        items = [
+            migrate.Item("bad", "category", "bad", paths=("--option",)),
+            migrate.Item("good", "home.files", "good", paths=("home/olduser/Documents",)),
+        ]
+        inventory = migrate.Inventory(
+            version="0.1.2", hostname="office", home="home/olduser",
+            items=tuple(items),
+        )
+        target = migrate.Target(root=tmp_path / "t", user="alice", uid=1000, gid=1000, home="home/alice")
+        with pytest.raises(ValueError, match="refusing to touch"):
+            migrate.plan_archive(inventory, ["bad"], tmp_path / "a.tar.zst", LISTING, target, STAMP)
+
+    def test_plan_archive_succeeds_when_only_safe_paths_are_selected(self, migrate, tmp_path):
+        items = [
+            migrate.Item("bad", "category", "bad", paths=("--option",)),
+            migrate.Item("good", "home.files", "good", paths=("home/olduser/Documents", "home/olduser/.bashrc")),
+        ]
+        inventory = migrate.Inventory(
+            version="0.1.2", hostname="office", home="home/olduser",
+            items=tuple(items),
+        )
+        target = migrate.Target(root=tmp_path / "t", user="alice", uid=1000, gid=1000, home="home/alice")
+        steps = migrate.plan_archive(inventory, ["good"], tmp_path / "a.tar.zst", LISTING, target, STAMP)
+        assert len(steps) >= 1
+
+    def test_plan_stick_raises_when_any_selected_path_is_unsafe(self, migrate, tmp_path):
+        items = [
+            migrate.Item("bad", "category", "bad", paths=("etc/sudoers",)),
+            migrate.Item("good", "home.files", "good", paths=("home/olduser/Documents",)),
+        ]
+        inventory = migrate.Inventory(
+            version="0.1.2", hostname="office", home="home/olduser",
+            items=tuple(items),
+        )
+        source = tmp_path / "source"
+        source.mkdir()
+        target = migrate.Target(root=tmp_path / "target")
+        with pytest.raises(ValueError, match="refusing to touch"):
+            migrate.plan_stick(inventory, ["bad"], source, target, STAMP)
+
+    def test_plan_stick_succeeds_when_only_safe_paths_are_selected(self, migrate, tmp_path):
+        items = [
+            migrate.Item("bad", "category", "bad", paths=("etc/sudoers",)),
+            migrate.Item("good", "home.files", "good", paths=("home/olduser/Documents",)),
+        ]
+        inventory = migrate.Inventory(
+            version="0.1.2", hostname="office", home="home/olduser",
+            items=tuple(items),
+        )
+        source = tmp_path / "source"
+        make_source(source)
+        populate_home(source / "home/olduser")
+        target = migrate.Target(root=tmp_path / "target", user="alice", uid=1000, gid=1000, home="home/alice")
+        steps = migrate.plan_stick(inventory, ["good"], source, target, STAMP)
+        assert len(steps) >= 1

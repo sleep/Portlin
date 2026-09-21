@@ -627,8 +627,33 @@ def overall_percent(done: int, weight: int, step_percent: int, total: int) -> in
     return min(100, int((done + weight * step_percent / 100) * 100 / total))
 
 
+def unsafe_paths(inventory: Inventory, ids: list[str]) -> list[str]:
+    """Paths a plan may touch: the source home, and the fixed system paths the
+    inventory knows about. A manifest is read from an archive somebody
+    handed us and the plan runs as root, so anything else is refused by
+    name rather than extracted."""
+    allowed = (CONNECTIONS, BLUETOOTH, *CUPS_PATHS)
+    bad = []
+    for item in selected(inventory, ids):
+        for path in item.paths:
+            parts = path.split("/")
+            if (
+                not path
+                or path.startswith("/")
+                or path.startswith("-")
+                or ".." in parts
+                or "" in parts
+                or not (is_home(path, inventory.home) or path in allowed)
+            ):
+                bad.append(path)
+    return bad
+
+
 def plan_stick(inventory: Inventory, ids: list[str], source_root: Path, target: Target, stamp: str) -> list[Step]:
     """The rsync per path, in inventory order. Items without paths plan nothing here."""
+    bad = unsafe_paths(inventory, ids)
+    if bad:
+        raise ValueError("refusing to touch " + ", ".join(bad))
     steps = []
     for item in selected(inventory, ids):
         for position, path in enumerate(item.paths):
@@ -706,7 +731,7 @@ def tar_create_argv(archive: Path, manifest_dir: Path, root: Path, members: list
         "tar", "-I", "zstd -T0 -3", *_TAR_PROGRESS,
         "-cf", str(archive),
         "-C", str(manifest_dir), MANIFEST,
-        "-C", str(root), *members,
+        "-C", str(root), "--", *members,
     )
 
 
@@ -721,10 +746,15 @@ def tar_manifest_argv(archive: Path) -> tuple[str, ...]:
 def tar_extract_argv(archive: Path, root: Path, paths: list[str], *, source_home: str, target_home: str) -> tuple[str, ...]:
     """--no-same-owner because the archive's uids belong to another stick;
     a chown step gives home items to the local account afterwards."""
+    if source_home and source_home != target_home:
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", source_home):
+            raise ValueError(f"unsafe home path: {source_home!r}")
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", target_home):
+            raise ValueError(f"unsafe home path: {target_home!r}")
     argv = ["tar", "-I", "zstd", *_TAR_PROGRESS, "--no-same-owner", "-xf", str(archive), "-C", str(root)]
     if source_home and source_home != target_home:
         argv.append(f"--transform=s|^{source_home}/|{target_home}/|")
-    return (*argv, *paths)
+    return (*argv, "--", *paths)
 
 
 def parse_tar_checkpoint(line: str) -> int | None:
@@ -782,6 +812,9 @@ def plan_export(inventory: Inventory, root: Path, archive: Path, manifest_dir: P
 def plan_archive(inventory: Inventory, ids: list[str], archive: Path, listing: str, target: Target, stamp: str) -> list[Step]:
     """Move collisions aside, extract everything chosen in one pass, then
     give each home item to the local account. Bytes are written once."""
+    bad = unsafe_paths(inventory, ids)
+    if bad:
+        raise ValueError("refusing to touch " + ", ".join(bad))
     items = [item for item in selected(inventory, ids) if item.paths]
     paths = [path for item in items for path in item.paths]
     if not paths:
