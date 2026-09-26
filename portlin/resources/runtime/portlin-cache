@@ -1,0 +1,8 @@
+#!/bin/sh
+# Sourced by Xsession after PAM created XDG_RUNTIME_DIR.  This affects every
+# desktop application, including Firefox and thumbnailers, without moving
+# settings or documents off the persistent drive.
+if { [ ! -e /etc/portlin/wear.conf ] || grep -qx 'ram_cache=1' /etc/portlin/wear.conf; } && [ -n "$XDG_RUNTIME_DIR" ]; then
+    export XDG_CACHE_HOME="$XDG_RUNTIME_DIR/portlin-cache"
+    mkdir -p "$XDG_CACHE_HOME"
+fi

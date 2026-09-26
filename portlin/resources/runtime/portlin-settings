@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""The small, deliberately focused Portlin Settings window."""
+from __future__ import annotations
+
+import json
+import subprocess
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+
+ROWS = (
+    ("journal", "Keep system logs after restart", "System logs otherwise stay in memory for this boot only."),
+    ("portlin_logs", "Keep Portlin operation logs", "Migration and setup logs are otherwise not saved to the drive."),
+    ("maintenance", "Run automatic maintenance", "Allow daily package and manual-page maintenance."),
+    ("ram_cache", "Keep desktop and browser caches in RAM", "Takes effect when you next log in; cached data is discarded at logout."),
+    ("downloads", "Keep downloaded package files", "Retains APT downloads for reinstalling without downloading again."),
+)
+
+
+def status():
+    try:
+        return json.loads(subprocess.check_output(["portlin-wear", "status"], text=True))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+
+
+class Window(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Portlin Settings")
+        self.set_border_width(18); self.set_default_size(540, -1)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.add(box)
+        intro = Gtk.Label(label="Storage wear", xalign=0)
+        intro.get_style_context().add_class("title-2")
+        box.pack_start(intro, False, False, 0)
+        box.pack_start(Gtk.Label(label="Choose what Portlin keeps on the USB drive.", xalign=0), False, False, 0)
+        current = status()
+        for key, title, detail in ROWS:
+            row = Gtk.Box(spacing=12)
+            labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            labels.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+            labels.pack_start(Gtk.Label(label=detail, xalign=0), False, False, 0)
+            toggle = Gtk.Switch(active=bool(current.get(key)))
+            toggle.connect("state-set", self.changed, key)
+            row.pack_start(labels, True, True, 0); row.pack_end(toggle, False, False, 0)
+            box.pack_start(row, False, False, 0)
+        self.connect("destroy", Gtk.main_quit)
+
+    def changed(self, toggle, active, key):
+        result = subprocess.run(["pkexec", "portlin-wear", "set", key, "1" if active else "0"])
+        # Returning True cancels Gtk's state change, so a cancelled password
+        # prompt leaves the switch showing the setting that is still in force.
+        return result.returncode != 0
+
+
+window = Window(); window.show_all(); Gtk.main()

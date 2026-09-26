@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Portlin Settings
+Comment=Choose what Portlin keeps on this USB drive
+Exec=portlin-settings
+Icon=portlin
+Terminal=false
+StartupNotify=true
+Categories=Settings;X-XFCE-SettingsDialog;
+Keywords=portlin;settings;storage;wear;logs;cache;downloads;

@@ -114,6 +114,7 @@ MOUNT = Path("/run/portlin/migrate/source")
 MAPPING = "portlin-migrate-source"
 PLAN_DIR = Path("/run/portlin/migrate")
 LOG = Path("/var/log/portlin-migrate.log")
+WEAR_CONFIG = Path("/etc/portlin/wear.conf")
 MEDIA_ROOTS = ("/media", "/run/media")
 LOCAL_ROOT = Path("/")
 SHELLS = Path("/etc/shells")
@@ -156,6 +157,11 @@ def emit(kind: str, *parts: str, out=None) -> None:
 
 
 def log(message: str) -> None:
+    try:
+        if "portlin_logs=1" not in WEAR_CONFIG.read_text().splitlines():
+            return
+    except OSError:
+        return
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         with LOG.open("a") as handle:

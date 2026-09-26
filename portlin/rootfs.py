@@ -112,6 +112,19 @@ def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
     chroot.write_file("etc/cryptsetup-initramfs/conf-hook", templates.render_cryptsetup_hook_conf())
     chroot.write_file("etc/default/grub", templates.render_default_grub())
     chroot.write_file("etc/default/zramswap", templates.render_zram_conf())
+    # Defaults favor a long-lived flash drive.  portlin-settings owns this
+    # small public file thereafter; the Xsession hook and runtime tools read it
+    # without needing a privileged daemon.
+    chroot.write_file(
+        "etc/portlin/wear.conf",
+        "journal=0\nportlin_logs=0\nmaintenance=0\nram_cache=1\ndownloads=0\n",
+    )
+    chroot.write_file(
+        "etc/systemd/journald.conf.d/90-portlin-wear.conf", "[Journal]\nStorage=volatile\n"
+    )
+    chroot.write_file(
+        "etc/apt/apt.conf.d/90portlin-wear", 'Binary::apt::APT::Keep-Downloaded-Packages "false";\n'
+    )
 
     chroot.write_file("etc/hostname", f"{cfg.hostname}\n")
     chroot.write_file(
@@ -157,6 +170,8 @@ def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
 
     chroot.run(["systemctl", "enable", "zramswap.service"], check=False)
     chroot.run(["systemctl", "enable", "NetworkManager.service"], check=False)
+    for timer in ("apt-daily.timer", "apt-daily-upgrade.timer", "man-db.timer"):
+        chroot.run(["systemctl", "disable", timer], check=False)
 
 
 def _anonymise(runner: Runner, chroot: Chroot) -> None:

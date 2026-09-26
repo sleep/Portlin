@@ -33,7 +33,7 @@ KEYRING_PATH = "/usr/share/keyrings/portlin-archive-keyring.gpg"
 # in one apt transaction that has to resolve.
 PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate", "portlin-wear"]
 
 # Python modules the tools import from /usr/lib/portlin rather than carrying
 # a copy of. catalog.py is here rather than inside portlin-install because
@@ -48,6 +48,7 @@ SHARED_MODULES = ["devices.py", "catalog.py", "hostinfo.py", "migrate.py"]
 POLKIT_ACTIONS = {
     "org.portlin.install.policy": "usr/share/polkit-1/actions/org.portlin.install.policy",
     "org.portlin.migrate.policy": "usr/share/polkit-1/actions/org.portlin.migrate.policy",
+    "org.portlin.wear.policy": "usr/share/polkit-1/actions/org.portlin.wear.policy",
 }
 
 # The graphical half, kept out of TOOLS on purpose: portlin-runtime is what
@@ -58,6 +59,7 @@ DESKTOP_TOOLS = [
     "portlin-caffeine",
     "portlin-software",
     "portlin-migration",
+    "portlin-settings",
     # The only one of these that is not a GTK program. It is here rather than
     # in TOOLS because it is useless without a panel to print into, and a
     # --minimal stick has none.
@@ -73,6 +75,7 @@ MENU_ENTRIES = {
     "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
     "portlin-software.desktop": "usr/share/applications/portlin-software.desktop",
     "portlin-migration.desktop": "usr/share/applications/portlin-migration.desktop",
+    "portlin-settings.desktop": "usr/share/applications/portlin-settings.desktop",
 }
 
 # X-Xfce-Toplevel (see portlin-about.desktop) only keeps About Portlin out of
@@ -96,6 +99,10 @@ MENU_LAYOUT_ENTRIES = {
 AUTOSTART_ENTRIES = {
     "portlin-caffeine-autostart.desktop": "etc/xdg/autostart/portlin-caffeine.desktop",
 }
+
+# This runs in the X session, where XDG_RUNTIME_DIR is available.  It is a
+# conffile because it is an ordinary /etc Xsession hook.
+CACHE_SESSION_HOOK = "etc/X11/Xsession.d/41portlin-cache"
 
 # The two states of the caffeine applet's panel icon. Both ship, because the
 # icon is the only thing that says whether the machine is being kept awake.
@@ -432,6 +439,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         )
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
+        files[CACHE_SESSION_HOOK] = (RESOURCES / "runtime" / "portlin-cache").read_text()
         for source, destination in {
             **MENU_ENTRIES,
             **AUTOSTART_ENTRIES,

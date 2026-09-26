@@ -94,6 +94,7 @@ def test_runtime_ships_every_tool_as_an_executable():
         "usr/bin/portlin-encrypt",
         "usr/bin/portlin-install",
         "usr/bin/portlin-migrate",
+        "usr/bin/portlin-wear",
     }
 
 
@@ -448,7 +449,8 @@ def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
         for destination in (
             *package.THEME_FILES,
             *package.AUTOSTART_ENTRIES.values(),
-            *package.MENU_LAYOUT_ENTRIES.values(),
+                *package.MENU_LAYOUT_ENTRIES.values(),
+                package.CACHE_SESSION_HOOK,
         )
     }
     assert set(conffiles) == expected

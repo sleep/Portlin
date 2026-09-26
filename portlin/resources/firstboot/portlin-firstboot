@@ -38,6 +38,7 @@ STASH_KEYSCRIPT_OPTION = "keyscript=/lib/cryptsetup/scripts/portlin-stash-passph
 # the two files agree on the claim being made and not on its punctuation.
 CRYPTTAB_BOOT_MARKER = "after boot-time encryption"
 LOG = Path("/var/log/portlin-firstboot.log")
+WEAR_CONFIG = Path("/etc/portlin/wear.conf")
 # Where a waiver of the sudo password prompt is written, and the rule it holds.
 # The name carries no dot on purpose: sudo ignores files in sudoers.d whose
 # names contain one, which is also what keeps the draft in apply_sudo_password
@@ -235,6 +236,11 @@ def claim_console(quiet: bool) -> None:
 
 
 def log(message: str) -> None:
+    try:
+        if "portlin_logs=1" not in WEAR_CONFIG.read_text().splitlines():
+            return
+    except OSError:
+        return
     try:
         with LOG.open("a") as handle:
             handle.write(message.rstrip() + "\n")
