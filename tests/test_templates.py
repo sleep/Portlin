@@ -184,3 +184,59 @@ class TestSourcesList:
             components="main contrib non-free-firmware",
         )
         assert "non-free-firmware" in rendered
+
+
+class TestBashrc:
+    """The themed interactive shell, shipped to /etc/skel and to /root.
+
+    Asserted as text because the failure that matters is the file a stick
+    receives, not how it got rendered: a broken rc can strand every account
+    the wizard creates without completion or a usable prompt.
+    """
+
+    def test_the_user_rc_never_uses_the_accent(self):
+        # The brand rule: 31 (the accent) marks root and nothing else.
+        assert "\\[\\e[31" not in templates.render_bashrc()
+
+    def test_the_root_rc_marks_root_with_the_accent_glyph(self):
+        root = templates.render_bashrc(root=True)
+        user = templates.render_bashrc()
+        assert "\\[\\e[31;1m\\]" in root
+        assert root != user
+
+    def test_the_prompt_is_the_classic_shape_in_brand_colors(self):
+        rc = templates.render_bashrc()
+        ps1 = next(line for line in rc.splitlines() if line.startswith("PS1="))
+        # user @ host : path, in that order, on one line.
+        assert ps1.index("\\u") < ps1.index("@") < ps1.index("\\h") < ps1.index(":\\w")
+        assert "\\n" not in ps1
+        # The two-line partition prompt is variant material, not the default.
+        assert "▂▄▆" not in rc
+
+    def test_the_non_interactive_early_return_is_first(self):
+        # Everything below the guard assumes an interactive shell; a broken
+        # guard turns every script spawning bash into a theme install.
+        rc = templates.render_bashrc()
+        guard = rc.index("case $- in")
+        assert guard < rc.index("PS1=")
+
+    def test_the_welcome_banner_runs_once_per_terminal(self):
+        rc = templates.render_bashrc()
+        assert '"${SHLVL:-1}" = "1"' in rc
+        assert "/usr/bin/portlin-welcome" in rc
+
+    def test_completion_and_debian_aliases_survive_the_theme(self):
+        rc = templates.render_bashrc()
+        assert "bash_completion" in rc
+        assert "alias ll=" in rc
+
+    def test_the_window_title_escape_is_kept(self):
+        # xfce4-terminal's tab titles come from this Debian-stock escape.
+        assert "\\[\\e]0;\\u@\\h: \\w\\a\\]" in templates.render_bashrc()
+
+
+class TestRootProfile:
+    def test_login_shells_are_pointed_at_the_themed_rc(self):
+        profile = templates.render_root_profile()
+        assert '. ~/.bashrc' in profile
+        assert 'if [ -n "$BASH" ]' in profile

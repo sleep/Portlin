@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from portlin import __version__, package, packages
+from portlin import __version__, package, packages, templates
 
 
 def test_local_builds_are_suffixed_so_they_sort_below_a_release():
@@ -449,8 +449,9 @@ def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
         for destination in (
             *package.THEME_FILES,
             *package.AUTOSTART_ENTRIES.values(),
-                *package.MENU_LAYOUT_ENTRIES.values(),
-                package.CACHE_SESSION_HOOK,
+            *package.MENU_LAYOUT_ENTRIES.values(),
+            package.CACHE_SESSION_HOOK,
+            package.SKEL_BASHRC,
         )
     }
     assert set(conffiles) == expected
@@ -520,19 +521,80 @@ def test_desktop_takes_over_the_backdrop_xfdesktop_falls_back_to():
     assert destinations[package.DEFAULT_BACKDROP].exists()
 
 
-def test_desktop_diverts_the_default_backdrop_symmetrically():
+def test_desktop_diverts_every_owned_path_symmetrically():
     # dpkg matches a diversion by the whole triple of owning package, divert-to
     # path and original path. Added under one triple and removed under another,
-    # it is never removed at all, and xfdesktop's own file stays displaced for
-    # the life of the machine.
+    # it is never removed at all, and the owning package's file stays displaced
+    # for the life of the machine. Iterating the same table the scripts render
+    # from means a newly diverted path cannot be added to the preinst without
+    # the postrm learning to remove it.
     files = package.text_files("portlin-desktop")
     preinst, postrm = files["DEBIAN/preinst"], files["DEBIAN/postrm"]
-    for script in (preinst, postrm):
-        assert f"/{package.DEFAULT_BACKDROP}" in script
-        assert package.DIVERTED_BACKDROP in script
-        assert "--package portlin-desktop" in script
+    for original, diverted in package.DIVERSIONS:
+        for script in (preinst, postrm):
+            assert original in script
+            assert diverted in script
+            assert "--package portlin-desktop" in script
     assert "--add" in preinst and "--remove" not in preinst
     assert "--remove" in postrm and "--add" not in postrm
+
+
+def test_desktop_diverts_the_stock_skel_bashrc():
+    # base-files owns /etc/skel/.bashrc, and dpkg lets exactly one package own
+    # a path. The theme has to be the skel file because useradd --create-home
+    # copies /etc/skel into every account the wizard makes; the diversion is
+    # what keeps base-files upgrades from colliding with it.
+    assert package.SKEL_BASHRC == "etc/skel/.bashrc"
+    assert (f"/{package.SKEL_BASHRC}", package.DIVERTED_SKEL_BASHRC) in package.DIVERSIONS
+    assert package.DIVERTED_SKEL_BASHRC.endswith(".distrib")
+
+
+def test_desktop_ships_the_themed_shell_files():
+    files = package.text_files("portlin-desktop")
+    assert files[package.SKEL_BASHRC] == templates.render_bashrc()
+    assert files[package.ROOT_BASHRC] == templates.render_bashrc(root=True)
+    assert files[package.ROOT_PROFILE] == templates.render_root_profile()
+    # Root's copies live outside /etc, so they are ordinary package files:
+    # overwritten on upgrade, which is right for a file nobody should hand-edit.
+    assert f"/{package.ROOT_BASHRC}" not in files["DEBIAN/conffiles"]
+    # The skel copy is the one a user may have re-themed: it is a conffile.
+    assert f"/{package.SKEL_BASHRC}" in files["DEBIAN/conffiles"].splitlines()
+
+
+def test_the_skel_and_root_bashrc_differ_only_where_root_must():
+    skel = package.text_files("portlin-desktop")[package.SKEL_BASHRC]
+    root = package.text_files("portlin-desktop")[package.ROOT_BASHRC]
+    # The accent glyph is the whole difference: same aliases, same
+    # completion, same banner call.
+    assert skel.replace("\\[\\e[97;1m\\]\\$", "\\[\\e[31;1m\\]\\$") == root
+
+
+def test_desktop_ships_the_welcome_banner_and_its_runner():
+    files = package.text_files("portlin-desktop")
+    welcome = files["usr/bin/portlin-welcome"]
+    assert welcome.startswith("#!/usr/bin/env python3")
+    assert "usr/bin/portlin-welcome" in package.executable_paths("portlin-desktop")
+    # It is a desktop concern: the runtime tier a --minimal stick installs
+    # carries no theme, and no GTK-free exception is made for this tool.
+    assert "usr/bin/portlin-welcome" not in package.text_files("portlin-runtime")
+    # The rc the same package ships is the only thing that runs it.
+    assert "/usr/bin/portlin-welcome" in files[package.SKEL_BASHRC]
+    assert "/usr/bin/portlin-welcome" in files[package.ROOT_BASHRC]
+
+
+def test_desktop_ships_the_branded_fastfetch_face():
+    files = package.text_files("portlin-desktop")
+    config = files["etc/skel/.config/fastfetch/config.jsonc"]
+    logo = files["etc/skel/.config/fastfetch/portlin.txt"]
+    assert '"source": "~/.config/fastfetch/portlin.txt"' in config
+    # The disk module reports the root filesystem: that is the free space a
+    # portable stick actually cares about.
+    assert '"folders": "/"' in config
+    # The logo is the mark: four bars in partition-map rank order, accent only
+    # on the last, via fastfetch's {1}/{2} color placeholders.
+    assert "{1}" in logo and "{2}" in logo
+    for width in (2, 5, 7, 12):
+        assert "█" * width in logo
 
 
 def test_maintainer_scripts_are_executable():

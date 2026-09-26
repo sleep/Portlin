@@ -84,7 +84,7 @@ their tier before they are written.
 | | Frozen | Updatable |
 |---|---|---|
 | Written by | `write`, once | `portlin-runtime` and `portlin-desktop`, by apt |
-| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, icon theme, panel layout, wallpaper, branding, the software catalog and the Software app, the `portlin-*` commands |
+| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, icon theme, panel layout, wallpaper, branding, the shell theme and welcome banner, the software catalog and the Software app, the `portlin-*` commands |
 | Failure mode | a stick that will not boot or will not unlock | a desktop that looks wrong, or a command that refuses to run |
 
 **The test.** If a broken version of a file can stop a stick booting or
@@ -120,7 +120,7 @@ Each module has one job and a testable surface.
 |---|---|
 | `runner.py` | Single subprocess chokepoint. Records every command, supports dry-run, redacts secret stdin |
 | `layout.py` | Pure: target size -> partition plan, sgdisk argv, partition device paths |
-| `templates.py` | Pure: renders fstab, crypttab, `/etc/default/grub`, initramfs conf, sources.list |
+| `templates.py` | Pure: renders fstab, crypttab, `/etc/default/grub`, initramfs conf, sources.list, the themed bashrc/profile |
 | `devices.py` | Enumerates block devices from `lsblk -J`, evaluates target safety |
 | `target.py` | Uniform interface over a block device and a loop-mounted image file |
 | `chroot.py` | Bind-mount lifecycle, `policy-rc.d`, resolv.conf, command execution |

@@ -15,7 +15,9 @@ The rendered PNGs are what ship; these are the files they are rendered from. Run
 | accent | `#FF3355` | Reserved for the encrypted root partition and `--encrypt` |
 
 Futura for the wordmark, Menlo for every technical label. The accent colour means one
-thing only. If it appears on something that is not the LUKS2 root, it is wrong.
+thing only. If it appears on something that is not the LUKS2 root, it is wrong. The
+terminal theme keeps this rule: the accent appears only as the mark's last bar, the
+root prompt glyph, and the encrypted-root line of the welcome banner.
 
 ## The mark
 
@@ -70,6 +72,8 @@ wallpaper behind portlin's boot log.
 | Applications menu button | `portlin/resources/runtime/logo.svg` | An icon theme that answers to `org.xfce.panel.applicationsmenu` |
 | About Portlin, window list, appfinder | same SVG | Installed into hicolor as `portlin`, named by `Icon=` and `set_default_icon_name` |
 | About dialog | same SVG | `/usr/share/portlin/logo.svg`, drawn by `set_logo` |
+| Terminal welcome banner | drawn by `portlin-welcome` | Four-bar mark in character cells, same geometry as the fastfetch logo |
+| `fastfetch` | `portlin/resources/runtime/theme/fastfetch-logo.txt` | `{1}`/`{2}` color placeholders, via `~/.config/fastfetch/` in `/etc/skel` |
 
 The boot menu is the one place the mark cannot be an SVG: GRUB has no SVG renderer, so
 `grub-logo.html` rasterises it at exactly the size the theme draws it, at 1x and onto

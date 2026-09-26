@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import __version__
 from . import packages
+from . import templates
 
 RESOURCES = Path(__file__).parent / "resources"
 
@@ -64,6 +65,10 @@ DESKTOP_TOOLS = [
     # in TOOLS because it is useless without a panel to print into, and a
     # --minimal stick has none.
     "portlin-stats",
+    # The welcome banner the themed bashrc runs once per terminal. Not a GTK
+    # program either; it is here because the prompt and banner only exist
+    # where the desktop theme this package ships does.
+    "portlin-welcome",
 ]
 
 # The panel id genmon is given, which is also the id in the filename genmon
@@ -175,10 +180,18 @@ PANEL_VERSION_PLACEHOLDER = "@PORTLIN_VERSION@"
 # configuration stays outside the overlay because it is not an XDG path:
 # lightdm reads its own directory, and the greeter runs before any session has
 # set XDG_CONFIG_DIRS.
+#
+# The fastfetch pair is the portlin-branded fastfetch (variant 3 of
+# bash-theme-variants/): the logo and config land in /etc/skel so every
+# account the wizard creates gets them; running `fastfetch` is themed out of
+# the box, while the bashrc banner itself stays the dependency-free
+# portlin-welcome.
 THEME_FILES = {
     **{f"{XDG_OVERLAY}/{relative}": source for relative, source in XDG_DEFAULTS.items()},
     "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": "50-portlin.conf",
     XSESSION_SNIPPET: "xdg-config-dirs.sh",
+    "etc/skel/.config/fastfetch/config.jsonc": "fastfetch-config.jsonc",
+    "etc/skel/.config/fastfetch/portlin.txt": "fastfetch-logo.txt",
 }
 
 KEYRING_FILE = RESOURCES / "keyring" / "portlin-archive-keyring.gpg"
@@ -198,6 +211,18 @@ DEFAULT_BACKDROP = "usr/share/backgrounds/xfce/xfce-x.svg"
 # moving aside, and .distrib is the suffix dpkg-divert's own documentation
 # uses for taking over a distribution's copy of a path.
 DIVERTED_BACKDROP = f"/{DEFAULT_BACKDROP}.distrib"
+
+# base-files ships /etc/skel/.bashrc, and dpkg lets exactly one package own a
+# path. The themed bashrc has to live at that path: useradd --create-home
+# copies /etc/skel into every account the first-boot wizard makes. A diversion
+# rather than an overwrite is what survives base-files upgrades.
+SKEL_BASHRC = "etc/skel/.bashrc"
+DIVERTED_SKEL_BASHRC = f"/{SKEL_BASHRC}.distrib"
+
+# Root's dotfiles ship directly: /root exists when the package installs and no
+# other package owns these paths. Not conffiles -- only /etc paths can be.
+ROOT_BASHRC = "root/.bashrc"
+ROOT_PROFILE = "root/.profile"
 
 # The render that becomes that default. xfdesktop scales whatever it finds
 # there to each monitor, so one size has to stand in for all of them until
@@ -284,49 +309,67 @@ def render_sources_entry() -> str:
     )
 
 
-# The dpkg actions each half of the diversion has to cover. A failed upgrade
+# The dpkg actions each half of a diversion has to cover. A failed upgrade
 # rolls back to the old portlin-desktop, which is still installed and still
 # serving the file, so abort-upgrade belongs with the additions: dropping the
-# diversion there would hand the path back to xfdesktop4-data underneath a
-# package that is still shipping its own copy of it.
+# diversion there would hand the path back to the owning package underneath
+# one that is still shipping its own copy of it.
 DIVERSION_ACTIONS = {
     "add": ["install", "upgrade", "abort-upgrade"],
     "remove": ["remove", "abort-install", "disappear"],
 }
 
 
-def render_diversion_script(action: str) -> str:
-    """Render the maintainer script that adds or removes the backdrop diversion.
+# The (original path, divert-to path) pairs portlin-desktop takes over. Both
+# live in DIVERSION_ACTIONS maintainer scripts; one table, so the preinst and
+# postrm can never drift apart about which paths they add and remove.
+DIVERSIONS = (
+    (f"/{DEFAULT_BACKDROP}", DIVERTED_BACKDROP),
+    (f"/{SKEL_BASHRC}", DIVERTED_SKEL_BASHRC),
+)
 
-    Both halves are rendered by one function, from one path constant, because
+
+def render_diversion_script(action: str) -> str:
+    """Render the maintainer script that adds or removes portlin's diversions.
+
     dpkg matches a diversion on the whole triple of owning package, divert-to
-    path and original path. Written out twice by hand, a later edit to one
+    path and original path. Both halves are rendered by this one function,
+    from one path table, because written out twice by hand a later edit to one
     could leave the two naming different paths, and the mismatch is silent:
-    dpkg-divert finds nothing to remove, reports success, and xfdesktop's own
+    dpkg-divert finds nothing to remove, reports success, and the original
     file stays displaced for the life of the machine.
+
+    Two paths are diverted. The backdrop is the one xfdesktop draws when no
+    xfconf property matches the monitor, owned by xfdesktop4-data. The skel
+    bashrc belongs to base-files: useradd --create-home copies /etc/skel into
+    every account the first-boot wizard makes, so the themed shell has to be
+    the skel shell, and a diversion rather than an overwrite is what survives
+    base-files upgrades.
     """
-    return "\n".join(
-        [
-            "#!/bin/sh",
-            "# Generated by portlin. Part of portlin-desktop.",
-            "#",
-            "# The path below is the backdrop xfdesktop draws when no xfconf property",
-            "# matches the monitor, and it belongs to xfdesktop4-data. A diversion is",
-            "# how one package may serve a file another package owns: dpkg moves the",
-            "# original aside and keeps it there, including when xfdesktop4-data is",
-            "# upgraded, which is exactly what overwriting the file would not survive.",
-            "set -e",
-            "",
-            'case "$1" in',
-            f"    {'|'.join(DIVERSION_ACTIONS[action])})",
+    lines = [
+        "#!/bin/sh",
+        "# Generated by portlin. Part of portlin-desktop.",
+        "#",
+        "# Diversions rather than overwrites, so both files survive upgrades of",
+        "# the packages that own them: dpkg keeps each original aside under its",
+        "# .distrib name and this package serves the path.",
+        "set -e",
+        "",
+        'case "$1" in',
+        f"    {'|'.join(DIVERSION_ACTIONS[action])})",
+    ]
+    for original, diverted in DIVERSIONS:
+        lines += [
             f"        dpkg-divert --package portlin-desktop --{action} --rename \\",
-            f"            --divert {DIVERTED_BACKDROP} \\",
-            f"            /{DEFAULT_BACKDROP}",
-            "        ;;",
-            "esac",
-            "",
+            f"            --divert {diverted} \\",
+            f"            {original}",
         ]
-    )
+    lines += [
+        "        ;;",
+        "esac",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
@@ -438,6 +481,12 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         files[PANEL_DEFAULTS_FILE] = files[PANEL_DEFAULTS_FILE].replace(
             PANEL_VERSION_PLACEHOLDER, __version__
         )
+        # The themed shell: skel for every account the wizard creates, root's
+        # own copies for root. The skel path is diverted above; root's home
+        # exists at install time and no package owns these paths.
+        files[SKEL_BASHRC] = templates.render_bashrc()
+        files[ROOT_BASHRC] = templates.render_bashrc(root=True)
+        files[ROOT_PROFILE] = templates.render_root_profile()
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
         files[CACHE_SESSION_HOOK] = (RESOURCES / "runtime" / "portlin-cache").read_text()

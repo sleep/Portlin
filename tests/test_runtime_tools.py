@@ -170,3 +170,106 @@ class TestReleaseParsing:
         )
         monkeypatch.setattr(info, "OS_RELEASE", path)
         assert info._debian_description() == "Debian GNU/Linux 13 (trixie)"
+
+
+class TestWelcomeBanner:
+    """The terminal welcome banner: the mark beside live system data.
+
+    Same import coverage as the other tools -- a syntax error here reaches a
+    stick undetected otherwise -- plus the pure layout functions, since the
+    banner's shape is the brand's.
+    """
+
+    def test_compiles(self):
+        source = (RUNTIME / "portlin-welcome").read_text()
+        compile(source, str(RUNTIME / "portlin-welcome"), "exec")
+
+    @pytest.fixture(scope="class")
+    def welcome(self):
+        return _load_tool("portlin-welcome")
+
+    def _data(self, welcome, **overrides):
+        data = {
+            "version": "0.1.2",
+            "encrypted": True,
+            "os": "Debian GNU/Linux 13 (trixie)",
+            "machine": "ThinkPad X270",
+            "firmware": "UEFI, 64-bit",
+            "cpu": "Intel Core i5-7300U",
+            "threads": "4",
+            "memory": "3.2G of 15.5G",
+            "disk_free": "41.2G",
+            "disk_total": "58.0G",
+            "uptime": "2 hours, 14 mins",
+            "shell": "bash 5.2.37",
+        }
+        data.update(overrides)
+        return data
+
+    def test_uptime_is_fastfetch_shaped(self, welcome):
+        assert welcome.format_uptime(0) == "0 mins"
+        assert welcome.format_uptime(5 * 60) == "5 mins"
+        assert welcome.format_uptime(62 * 60) == "1 hour, 2 mins"
+        assert welcome.format_uptime((2 * 3600) + (14 * 60)) == "2 hours, 14 mins"
+        assert welcome.format_uptime(3 * 86400 + 2 * 3600) == "3 days, 2 hours"
+
+    def test_every_mark_row_is_the_same_width(self, welcome):
+        for colored in (True, False):
+            for unicode_glyphs in (True, False):
+                rows = welcome.mark_lines(colored=colored, unicode_glyphs=unicode_glyphs)
+                widths = {sum(len(run[0]) for run in row) for row in rows}
+                assert len(widths) == 1, (colored, unicode_glyphs)
+
+    def test_the_ascii_fallback_draws_the_same_geometry(self, welcome):
+        art = "\n".join(
+            "".join(run[0] for run in row)
+            for row in welcome.mark_lines(colored=False, unicode_glyphs=False)
+        )
+        assert "+" in art and "#" in art
+        assert "╭" not in art and "█" not in art
+
+    def test_the_fastfetch_logo_is_the_same_mark(self, welcome):
+        # One geometry in two places: the banner's art and the logo fastfetch
+        # substitutes colors into. A hand-edit to either fails here.
+        import re
+
+        logo = (RUNTIME / "theme" / "fastfetch-logo.txt").read_text()
+        logo = re.sub(r"\{[12]\}", "", logo)
+        art = "\n".join(
+            "".join(run[0] for run in row)
+            for row in welcome.mark_lines(colored=False, unicode_glyphs=True)
+        )
+        assert logo.rstrip("\n") == art
+
+    def test_plain_output_carries_no_escape_codes(self, welcome):
+        banner = welcome.render(self._data(welcome), colored=False, columns=100)
+        assert "\033[" not in banner
+        assert "╭" in banner  # NO_COLOR keeps the box-drawing art.
+        assert "portlin 0.1.2" in banner
+
+    def test_the_accent_only_appears_for_the_encrypted_root(self, welcome):
+        encrypted = welcome.render(self._data(welcome), colored=True, columns=100)
+        plain = welcome.render(
+            self._data(welcome, encrypted=False), colored=True, columns=100
+        )
+        assert welcome.ACCENT in encrypted
+        assert "LUKS2 encrypted" in encrypted
+        assert welcome.ACCENT not in plain
+        assert "not encrypted" in plain
+
+    def test_the_disk_row_leads_with_free_space(self, welcome):
+        rows = welcome.info_rows(self._data(welcome))
+        disk = next(value for key, value in rows if key == "disk")
+        first_text, first_color = disk[0]
+        assert first_text == "41.2G "
+        assert first_color == "green-bold"
+
+    def test_narrow_terminals_get_one_line(self, welcome):
+        banner = welcome.render(self._data(welcome), colored=False, columns=60)
+        assert "\n" not in banner
+        assert "41.2G free of 58.0G" in banner
+        assert "LUKS2 encrypted" in banner
+
+    def test_the_footer_points_at_the_full_report(self, welcome):
+        banner = welcome.render(self._data(welcome), colored=False, columns=100)
+        assert "portlin-info" in banner

@@ -223,3 +223,104 @@ def render_os_release_extra(version: str) -> str:
             "",
         ]
     )
+
+
+def render_bashrc(*, root: bool = False) -> str:
+    """Render the themed interactive ~/.bashrc for root and for /etc/skel.
+
+    Colors are indexes into the shipped 16-color terminal palette
+    (portlin/resources/runtime/theme/terminalrc): 36 cyan user, 37 muted,
+    97 paper host, 34 blue paths, 31 the accent -- which marks root and
+    nothing else. Plain SGR codes rather than truecolor, because the
+    linux VT and every minimal terminal understand these.
+
+    The prompt is the classic user@host:path shape. ``root`` changes only
+    the glyph color: \\$ renders # for root, and it alone is drawn in the
+    accent -- the same reserved meaning the mark gives the encrypted root
+    bar.
+    """
+    glyph = r"\[\e[31;1m\]" if root else r"\[\e[97;1m\]"
+    ps1 = (
+        r"\[\e]0;\u@\h: \w\a\]"  # window/tab title, as Debian's own skel ships.
+        r"\[\e[36;1m\]\u\[\e[0;37m\]@\[\e[97;1m\]\h"
+        r"\[\e[0;34m\]:\w"
+        + glyph + r"\$ \[\e[0m\]"
+    )
+    lines = [
+        "# ~/.bashrc -- the portlin interactive shell theme.",
+        "#",
+        "# Ships in portlin-desktop: this content lands at /etc/skel/.bashrc (for",
+        "# every account the first-boot wizard creates) and at /root/.bashrc.",
+        "# It is a conffile, so local edits survive upgrades.",
+        "",
+        "# If not running interactively, don't do anything.",
+        "case $- in",
+        "    *i*) ;;",
+        "      *) return;;",
+        "esac",
+        "",
+        "# History: Debian's stock behaviour.",
+        "HISTCONTROL=ignoreboth",
+        "HISTSIZE=1000",
+        "HISTFILESIZE=2000",
+        "shopt -s histappend",
+        "shopt -s checkwinsize",
+        "",
+        "# Make less more friendly for non-text input files, see lesspipe(1).",
+        "[ -x /usr/bin/lesspipe ] && eval \"$(SHELL=/bin/sh lesspipe)\"",
+        "",
+        "# Color ls output from the shipped terminal palette: directories blue,",
+        "# links cyan, executables green.",
+        "if [ -x /usr/bin/dircolors ]; then",
+        "    test -r ~/.dircolors && eval \"$(dircolors -b ~/.dircolors)\" || eval \"$(dircolors -b)\"",
+        "fi",
+        "alias ll='ls -alF'",
+        "alias la='ls -A'",
+        "alias l='ls -CF'",
+        "",
+        "# Enable programmable completion features.",
+        "if ! shopt -oq posix; then",
+        "  if [ -f /usr/share/bash-completion/bash_completion ]; then",
+        "    . /usr/share/bash-completion/bash_completion",
+        "  elif [ -f /etc/bash_completion ]; then",
+        "    . /etc/bash_completion",
+        "  fi",
+        "fi",
+        "",
+        "# The prompt: the classic user@host:path shape in the brand palette.",
+        "# For root alone the glyph is the accent, where \\$ also renders #.",
+        "# PS2 continues with the enclosure bar.",
+        f"PS1='{ps1}'",
+        "PS2='\\[\\e[37m\\]│ \\[\\e[0m\\]'",
+        "",
+        "# The welcome banner, once per terminal: SHLVL 1 means this shell owns",
+        "# the window, so nested bash calls stay quiet. portlin-welcome ships in",
+        "# this package; the guard keeps a hand-removed welcome silent.",
+        "if [ \"${SHLVL:-1}\" = \"1\" ] && [ -t 1 ] && [ -x /usr/bin/portlin-welcome ]; then",
+        "    /usr/bin/portlin-welcome 2>/dev/null || :",
+        "fi",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_root_profile() -> str:
+    """Render /root/.profile.
+
+    Login shells (``su -``, ``ssh root@…``) read this and never ~/.bashrc, so
+    an interactive root bash is pointed at the themed rc the same package
+    ships. Nothing here sets PATH or environment: root's login environment is
+    Debian's defaults, the theme only styles interactive use.
+    """
+    return "\n".join(
+        [
+            "# ~/.profile for root, shipped by portlin-desktop.",
+            "",
+            "# Interactive bash: pick up the themed ~/.bashrc this package also",
+            "# ships, which login shells would otherwise never read.",
+            "if [ -n \"$BASH\" ] && [ -f ~/.bashrc ]; then",
+            "    . ~/.bashrc",
+            "fi",
+            "",
+        ]
+    )

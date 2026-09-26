@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""The welcome banner every themed terminal opens with.
+
+The mark beside a fastfetch-like summary of what the stick is plugged into
+right now: OS, machine, CPU, memory, disk free, LUKS state, uptime. Read-only,
+like portlin-info -- everything is asked of the running system because a stick
+moves between machines. The themed ~/.bashrc runs this once per terminal
+(SHLVL 1); it never writes state and never fails loudly enough to matter: a
+banner is allowed to be missing, never to break shell startup.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import root_source  # noqa: E402
+from hostinfo import format_bytes, read_host, read_memory  # noqa: E402
+
+RELEASE = Path("/etc/portlin-release")
+OS_RELEASE = Path("/etc/os-release")
+PROC_UPTIME = Path("/proc/uptime")
+
+# The mark's four bars in character cells, widths carrying the partition-map
+# rank order of the drawn mark (1 MiB EF02, 512 MiB ESP, 1 GiB /boot, root).
+# The fastfetch logo at ~/.config/fastfetch/portlin.txt is the same geometry
+# with {1}/{2} color placeholders, and a test holds the two in agreement.
+BAR_WIDTHS = (2, 5, 7, 12)
+
+# SGR codes, indexed to the shipped 16-color terminal palette
+# (portlin/resources/runtime/theme/terminalrc). Plain codes, not truecolor:
+# the linux VT and minimal terminals understand exactly these.
+MUTED = "\033[37m"
+PAPER = "\033[97m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+ACCENT = "\033[31m"  # Reserved for root: the last bar, the #, the LUKS state.
+RESET = "\033[0m"
+
+
+def parse_env_file(text: str) -> dict[str, str]:
+    """Parse KEY=value lines, tolerating os-release's double-quoted values."""
+    values = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"')
+    return values
+
+
+def format_uptime(seconds: float) -> str:
+    """Fastfetch's shape: "5 mins", "2 hours, 14 mins", "3 days, 2 hours"."""
+    minutes = int(seconds // 60)
+    days, minutes = divmod(minutes, 60 * 24)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day" + ("s" if days != 1 else ""))
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if minutes or not parts:
+        parts.append(f"{minutes} min" + ("s" if minutes != 1 else ""))
+    return ", ".join(parts[:2])
+
+
+def shell_description() -> str:
+    """The user's shell and, when it answers --version like GNU tools, its version."""
+    shell = os.environ.get("SHELL", "/bin/bash")
+    name = os.path.basename(shell) or shell
+    try:
+        result = subprocess.run(
+            [shell, "--version"], capture_output=True, text=True,
+            check=False, timeout=2,
+        )
+        match = re.search(r"version ([0-9][0-9.]*)", result.stdout)
+        if match:
+            return f"{name} {match.group(1)}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return name
+
+
+def gather() -> dict[str, str]:
+    """Every answer the banner needs, asked of the running system."""
+    release = parse_env_file(RELEASE.read_text()) if RELEASE.exists() else {}
+    os_release = parse_env_file(OS_RELEASE.read_text()) if OS_RELEASE.exists() else {}
+    host = read_host()
+    memory = read_memory()
+    disk = shutil.disk_usage("/")
+    try:
+        uptime = float(PROC_UPTIME.read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = 0.0
+    return {
+        "version": release.get("PORTLIN_VERSION", "unknown"),
+        "encrypted": root_source().startswith("/dev/mapper/"),
+        "os": os_release.get("PRETTY_NAME", "unknown"),
+        "machine": host.model,
+        "firmware": host.firmware,
+        "cpu": host.cpu,
+        "threads": str(host.threads or ""),
+        "memory": f"{format_bytes(memory.used_bytes)} of {format_bytes(memory.total_bytes)}",
+        "disk_free": format_bytes(disk.total - disk.used),
+        "disk_total": format_bytes(disk.total),
+        "uptime": format_uptime(uptime),
+        "shell": shell_description(),
+    }
+
+
+def info_rows(data: dict[str, str]) -> list[tuple[str, list[tuple[str, str]]]]:
+    """The banner's key/value column. Keys muted; the accent carries LUKS state."""
+    rows: list[tuple[str, list[tuple[str, str]]]] = [
+        # The wordmark stands alone in the value column, aligned with the keys.
+        ("", [(f"portlin ", "bold-paper"), (data["version"], "muted")]),
+        ("os", [(data["os"], "paper")]),
+    ]
+    machine = [(data["machine"], "paper")]
+    if data["firmware"]:
+        machine += [("   ", "plain"), (data["firmware"], "muted")]
+    rows.append(("machine", machine))
+    if data["cpu"]:
+        cpu = [(data["cpu"], "paper")]
+        if data["threads"]:
+            cpu += [(f" ({data['threads']} threads)", "muted")]
+        rows.append(("cpu", cpu))
+    rows += [
+        ("memory", [(data["memory"], "paper")]),
+        # The row the banner exists to show: free space first, in green.
+        ("disk", [(data["disk_free"] + " ", "green-bold"),
+                  ("free of ", "muted"), (data["disk_total"], "paper")]),
+    ]
+    rows.append((
+        "root",
+        [("LUKS2 encrypted" if data["encrypted"] else "not encrypted",
+          "accent" if data["encrypted"] else "muted")],
+    ))
+    rows += [
+        ("uptime", [(data["uptime"], "paper")]),
+        ("shell", [(data["shell"], "paper")]),
+    ]
+    return rows
+
+
+def mark_lines(*, colored: bool, unicode_glyphs: bool) -> list[list[tuple[str, str]]]:
+    """The mark as text rows: enclosure around four bottom-anchored bars.
+
+    ``colored`` and ``unicode_glyphs`` are separate axes: NO_COLOR drops the
+    ANSI but keeps the box-drawing art, while a non-UTF-8 locale swaps in the
+    ASCII fallback the build TUI uses the same way.
+    """
+    stroke = MUTED if colored else ""
+    accent = ACCENT if colored else ""
+    bar_colors = [stroke, stroke, stroke, accent]
+    box = "─" if unicode_glyphs else "-"
+    vertical = "│" if unicode_glyphs else "|"
+    top_left, top_right = ("╭", "╮") if unicode_glyphs else ("+", "+")
+    bot_left, bot_right = ("╰", "╯") if unicode_glyphs else ("+", "+")
+    block = "█" if unicode_glyphs else "#"
+    gap = "   "
+
+    inner_width = sum(BAR_WIDTHS) + len(gap) * (len(BAR_WIDTHS) - 1)
+    bar_runs = []
+    for width, color in zip(BAR_WIDTHS, bar_colors):
+        bar_runs.append((block * width, color))
+        bar_runs.append((gap, ""))
+    bar_runs.pop()
+
+    def bar_row() -> list[tuple[str, str]]:
+        return ([(vertical, stroke), (" ", "")] + bar_runs
+                + [(" " * (inner_width - sum(len(r[0]) for r in bar_runs)) + " ", ""),
+                   (vertical, stroke)])
+
+    empty = [(vertical, stroke), (" " * (inner_width + 2), ""), (vertical, stroke)]
+    return [
+        [(top_left + box * (inner_width + 2) + top_right, stroke)],
+        empty,
+        bar_row(),
+        bar_row(),
+        bar_row(),
+        [(bot_left + box * (inner_width + 2) + bot_right, stroke)],
+    ]
+
+
+def paint(text: str, color: str, colored: bool) -> str:
+    """One run of banner text in its palette color, or nothing when plain."""
+    if not colored or color == "plain":
+        return text
+    codes = {
+        "muted": MUTED, "paper": PAPER, "green": GREEN, "accent": ACCENT,
+        "bold-paper": PAPER + BOLD, "green-bold": GREEN + BOLD,
+    }
+    return f"{codes[color]}{text}{RESET}"
+
+
+def render(data: dict[str, str], *, colored: bool, columns: int) -> str:
+    """The full banner: mark beside the info column, or one line when narrow."""
+    if columns < 78:
+        root = ("LUKS2 encrypted" if data["encrypted"] else "not encrypted")
+        line = (f"portlin {data['version']} · {data['os']} · "
+                f"{data['disk_free']} free of {data['disk_total']} · root: {root}")
+        if not colored:
+            return line
+        root_color = ACCENT if data["encrypted"] else MUTED
+        return f"{MUTED}portlin{RESET} {PAPER}{data['version']}{RESET}{MUTED} · " \
+            f"{data['os']} · {RESET}{data['disk']}{MUTED} · root: {RESET}{root_color}{root}{RESET}"
+
+    art = mark_lines(colored=colored, unicode_glyphs=True)
+    rows = info_rows(data)
+    art_width = max(sum(len(run[0]) for run in row) for row in art)
+    offset = max(0, (len(rows) - len(art)) // 2)
+
+    lines = []
+    for i in range(max(len(rows), offset + len(art))):
+        left = art[i - offset] if offset <= i < offset + len(art) else []
+        right = rows[i] if i < len(rows) else None
+        text = "".join(run[0] for run in left)
+        if right is not None:
+            key, value = right
+            text += " " * (art_width + 6 - len(text))
+            text += paint(f"{key:<8} ", "muted", colored)
+            text += "".join(paint(part, color, colored) for part, color in value)
+        lines.append(text.rstrip())
+    lines.append("")
+    lines.append(
+        paint("run ", "muted", colored)
+        + paint("portlin-info", "paper", colored)
+        + paint(" for the full report", "muted", colored)
+    )
+    return "\n".join(lines)
+
+
+def main() -> int:
+    if not sys.stdout.isatty():
+        return 0
+    colored = (
+        "NO_COLOR" not in os.environ
+        and os.environ.get("TERM") != "dumb"
+    )
+    unicode_glyphs = (sys.stdout.encoding or "").lower().startswith("utf-8")
+    if not unicode_glyphs:
+        colored = False  # the ASCII fallback is for VTs; keep them plain.
+    columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+    try:
+        banner = render(gather(), colored=colored, columns=columns)
+    except Exception:
+        # A missing banner is fine; a broken shell startup is not.
+        return 0
+    sys.stdout.write(banner + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
