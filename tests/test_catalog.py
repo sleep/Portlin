@@ -28,6 +28,8 @@ REQUESTED = [
     "vscode", "docker", "tailscale", "syncthing", "wireshark",
     "vlc", "libreoffice", "gimp", "obs-studio", "thunderbird", "keepassxc",
     "signal", "telegram", "discord",
+    "yt-dlp", "gallery-dl", "handbrake", "kleopatra", "veracrypt", "php", "jd-gui", "ghidra",
+    "btop", "terminal-tools", "konsole", "sqlitebrowser", "wireguard-tools", "virt-manager", "virtualbox",
     "nvidia-driver", "intel-graphics", "amd-graphics", "broadcom-wifi", "printing",
 ]
 

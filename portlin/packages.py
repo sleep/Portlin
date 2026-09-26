@@ -67,6 +67,9 @@ SYSTEM = [
     # pciutils: a --minimal stick has the tool and must be able to run it.
     "rsync",
     "zstd",
+    # Ghidra's official GitHub release is a ZIP. portlin-runtime unpacks it
+    # under /opt, including on a --minimal stick written without a network.
+    "unzip",
     "zram-tools",
     "bash-completion",
     "less",

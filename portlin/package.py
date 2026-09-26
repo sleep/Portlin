@@ -372,6 +372,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     # zstd. Neither shows in the file list.
                     "rsync",
                     "zstd",
+                    "unzip",
                 ],
                 recommends=["portlin-desktop"],
             ),

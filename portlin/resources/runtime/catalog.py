@@ -16,6 +16,7 @@ apt          packages from the Debian archive, possibly from a component the
 apt-repo     a vendor apt repository: a signing key, a sources entry, then apt
 deb-url      a .deb the vendor publishes at a fixed URL
 github-deb   a .deb attached to the latest release of a GitHub repository
+github-zip-opt a ZIP attached to the latest GitHub release, unpacked under /opt
 tarball-opt  a tarball unpacked under /opt, with a generated menu entry
 user-script  the vendor's installer script, run as the user, into their home
 
@@ -30,8 +31,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-KINDS = ("apt", "apt-repo", "deb-url", "github-deb", "tarball-opt", "user-script")
-PRIVILEGED_KINDS = frozenset({"apt", "apt-repo", "deb-url", "github-deb", "tarball-opt"})
+KINDS = ("apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "tarball-opt", "user-script")
+PRIVILEGED_KINDS = frozenset({"apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "tarball-opt"})
 USER_KINDS = frozenset({"user-script"})
 
 # Display order. Drivers last: it is the page that talks about this machine
@@ -307,6 +308,36 @@ ENTRIES: tuple[Entry, ...] = (
         check=dpkg("audacity"),
         homepage="https://www.audacityteam.org/",
     ),
+    Entry(
+        id="yt-dlp",
+        name="yt-dlp",
+        summary="Download video and audio from supported websites",
+        category="Media",
+        kind="apt",
+        packages=("yt-dlp", "ffmpeg"),
+        check=dpkg("yt-dlp"),
+        homepage="https://github.com/yt-dlp/yt-dlp",
+    ),
+    Entry(
+        id="gallery-dl",
+        name="gallery-dl",
+        summary="Download image galleries and media collections",
+        category="Media",
+        kind="apt",
+        packages=("gallery-dl",),
+        check=dpkg("gallery-dl"),
+        homepage="https://gdl-org.github.io/",
+    ),
+    Entry(
+        id="handbrake",
+        name="HandBrake",
+        summary="Convert and compress video files",
+        category="Media",
+        kind="apt",
+        packages=("handbrake",),
+        check=dpkg("handbrake"),
+        homepage="https://handbrake.fr/",
+    ),
     # -- Office and graphics -----------------------------------------------
     Entry(
         id="libreoffice",
@@ -348,6 +379,27 @@ ENTRIES: tuple[Entry, ...] = (
         packages=("keepassxc",),
         check=dpkg("keepassxc"),
         homepage="https://keepassxc.org/",
+    ),
+    Entry(
+        id="kleopatra",
+        name="Kleopatra",
+        summary="Manage OpenPGP certificates and encrypt files",
+        category="Security and privacy",
+        kind="apt",
+        packages=("kleopatra",),
+        check=dpkg("kleopatra"),
+        homepage="https://apps.kde.org/kleopatra/",
+    ),
+    Entry(
+        id="veracrypt",
+        name="VeraCrypt",
+        summary="Create and open encrypted volumes",
+        category="Security and privacy",
+        kind="github-deb",
+        github_repo="veracrypt/VeraCrypt",
+        asset_pattern=r"^veracrypt-\d+\.\d+\.\d+-Debian-13-amd64\.deb$",
+        check=dpkg("veracrypt"),
+        homepage="https://www.veracrypt.fr/",
     ),
     Entry(
         id="mullvad",
@@ -518,6 +570,41 @@ ENTRIES: tuple[Entry, ...] = (
         check=dpkg("build-essential"),
         homepage="https://www.debian.org/",
     ),
+    Entry(
+        id="php",
+        name="PHP development tools",
+        summary="PHP command line, common extensions and ImageMagick",
+        category="Development",
+        kind="apt",
+        packages=("php-cli", "php-curl", "php-gd", "php-mbstring", "php-mysql", "php-xml", "php-zip", "imagemagick"),
+        check=dpkg("php-cli"),
+        homepage="https://www.php.net/",
+        notes="Installs Debian's supported PHP version and the common web-development extensions.",
+    ),
+    Entry(
+        id="jd-gui",
+        name="JD-GUI",
+        summary="Browse and decompile Java class files",
+        category="Development",
+        kind="github-deb",
+        github_repo="java-decompiler/jd-gui",
+        asset_pattern=r"^jd-gui-\d+\.\d+\.\d+\.deb$",
+        check=dpkg("jd-gui"),
+        homepage="https://java-decompiler.github.io/",
+    ),
+    Entry(
+        id="ghidra",
+        name="Ghidra",
+        summary="Software reverse engineering suite",
+        category="Development",
+        kind="github-zip-opt",
+        github_repo="NationalSecurityAgency/ghidra",
+        asset_pattern=r"^ghidra_.*_PUBLIC_.*\.zip$",
+        opt_dir="/opt/ghidra",
+        launcher="ghidraRun",
+        check=path("/opt/ghidra/ghidraRun"),
+        homepage="https://ghidra-sre.org/",
+    ),
     # -- AI tools ----------------------------------------------------------
     Entry(
         id="claude-desktop",
@@ -657,6 +744,89 @@ ENTRIES: tuple[Entry, ...] = (
         packages=("tmux",),
         check=dpkg("tmux"),
         homepage="https://github.com/tmux/tmux",
+    ),
+    Entry(
+        id="btop",
+        name="btop",
+        summary="Interactive CPU, memory, disk and process monitor",
+        category="System tools",
+        kind="apt",
+        packages=("btop",),
+        check=dpkg("btop"),
+        homepage="https://github.com/aristocratos/btop",
+    ),
+    Entry(
+        id="terminal-tools",
+        name="Terminal monitoring tools",
+        summary="nload, nmon and Byobu for network and system monitoring",
+        category="System tools",
+        kind="apt",
+        packages=("nload", "nmon", "byobu"),
+        check=dpkg("nload", "nmon", "byobu"),
+        homepage="https://www.debian.org/",
+    ),
+    Entry(
+        id="konsole",
+        name="Konsole",
+        summary="KDE's tabbed terminal emulator",
+        category="System tools",
+        kind="apt",
+        packages=("konsole",),
+        check=dpkg("konsole"),
+        homepage="https://konsole.kde.org/",
+    ),
+    Entry(
+        id="sqlitebrowser",
+        name="DB Browser for SQLite",
+        summary="Browse and edit SQLite databases",
+        category="System tools",
+        kind="apt",
+        packages=("sqlitebrowser",),
+        check=dpkg("sqlitebrowser"),
+        homepage="https://sqlitebrowser.org/",
+    ),
+    Entry(
+        id="wireguard-tools",
+        name="WireGuard tools",
+        summary="Create and manage WireGuard VPN connections",
+        category="System tools",
+        kind="apt",
+        packages=("wireguard-tools",),
+        check=dpkg("wireguard-tools"),
+        homepage="https://www.wireguard.com/",
+    ),
+    Entry(
+        id="virt-manager",
+        name="Virtual Machine Manager",
+        summary="Create and run virtual machines with libvirt and QEMU",
+        category="System tools",
+        kind="apt",
+        packages=("virt-manager", "libvirt-daemon-system", "qemu-system-x86"),
+        add_groups=("libvirt",),
+        check=dpkg("virt-manager"),
+        homepage="https://virt-manager.org/",
+        notes="Your account is added to the libvirt group. Log out and in before using it.",
+    ),
+    Entry(
+        id="virtualbox",
+        name="VirtualBox",
+        summary="Desktop virtual machines from Oracle's apt repository",
+        category="System tools",
+        kind="apt-repo",
+        packages=("virtualbox-7.2",),
+        repo=Repo(
+            key_url="https://www.virtualbox.org/download/oracle_vbox_2016.asc",
+            keyring_path="/usr/share/keyrings/oracle-virtualbox-2016.asc",
+            sources_line=(
+                "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-virtualbox-2016.asc] "
+                "https://download.virtualbox.org/virtualbox/debian {codename} contrib"
+            ),
+            sources_path="/etc/apt/sources.list.d/oracle-virtualbox.list",
+        ),
+        add_groups=("vboxusers",),
+        check=dpkg("virtualbox-7.2"),
+        homepage="https://www.virtualbox.org/",
+        notes="Your account is added to the vboxusers group. Log out and in before using it.",
     ),
     # -- Drivers -----------------------------------------------------------
     Entry(
@@ -914,6 +1084,20 @@ def validate(entries: tuple[Entry, ...] = ENTRIES) -> list[str]:
                     re.compile(entry.asset_pattern)
                 except re.error as exc:
                     problem(entry, f"asset_pattern does not compile: {exc}")
+        elif entry.kind == "github-zip-opt":
+            if not entry.github_repo or entry.github_repo.count("/") != 1:
+                problem(entry, "github-zip-opt entries name owner/repo")
+            if not entry.asset_pattern:
+                problem(entry, "github-zip-opt entries carry an asset_pattern")
+            else:
+                try:
+                    re.compile(entry.asset_pattern)
+                except re.error as exc:
+                    problem(entry, f"asset_pattern does not compile: {exc}")
+            if not entry.opt_dir or not entry.opt_dir.startswith("/opt/"):
+                problem(entry, "github-zip-opt entries unpack under /opt")
+            if not entry.launcher:
+                problem(entry, "github-zip-opt entries name their launcher")
         elif entry.kind == "tarball-opt":
             if not entry.url:
                 problem(entry, "tarball-opt entries carry a url")

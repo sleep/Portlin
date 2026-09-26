@@ -479,6 +479,27 @@ def plan_user_script(entry: Entry, ctx: Context) -> list[Step]:
     ] + _plan_after(entry, ctx)
 
 
+def plan_github_zip(entry: Entry, ctx: Context, url: str) -> list[Step]:
+    """Install a release ZIP whose sole top-level directory is the app."""
+    archive = f"{ctx.download_dir}/{entry.id}.zip"
+    staging = f"{entry.opt_dir}/.portlin-unpack"
+    script = (
+        'set -eu; archive="$1"; destination="$2"; staging="$3"; '
+        'rm -rf "$staging"; mkdir -p "$staging"; unzip -q "$archive" -d "$staging"; '
+        'set -- "$staging"/*; test "$#" = 1; test -d "$1"; '
+        'mv "$1"/* "$destination"/; rmdir "$1" "$staging"'
+    )
+    return [
+        Step(f"Downloading {entry.name}", mkdir=ctx.download_dir,
+             argv=curl_argv(url, archive), check_file=archive),
+        Step(f"Unpacking {entry.name}", mkdir=entry.opt_dir,
+             argv=("sh", "-ec", script, "portlin-unpack", archive, entry.opt_dir, staging),
+             remove=(archive,)),
+        Step("Adding it to the applications menu",
+             write=(tarball_desktop_path(entry), render_desktop_entry(entry))),
+    ] + _plan_after(entry, ctx)
+
+
 def plan_install(
     entry: Entry, ctx: Context, *, resolved_packages=None, asset_url: str | None = None
 ) -> list[Step]:
@@ -490,6 +511,8 @@ def plan_install(
         return plan_deb(entry, ctx, entry.url)
     if entry.kind == "github-deb":
         return plan_deb(entry, ctx, asset_url or "<latest release asset>")
+    if entry.kind == "github-zip-opt":
+        return plan_github_zip(entry, ctx, asset_url or "<latest release asset>")
     if entry.kind == "tarball-opt":
         return plan_tarball(entry, ctx)
     if entry.kind == "user-script":
@@ -548,7 +571,7 @@ def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
         if paths:
             steps.append(Step(f"Removing {entry.name}'s apt repository", remove=tuple(paths)))
         return steps
-    if entry.kind == "tarball-opt":
+    if entry.kind in ("tarball-opt", "github-zip-opt"):
         paths = record.get("paths") if record else None
         return [
             Step(f"Removing {entry.name}",
@@ -627,7 +650,7 @@ def record_for(entry: Entry, ctx: Context, steps, resolved_packages=None) -> dic
     paths: list[str] = []
     if entry.repo:
         paths += [entry.repo.sources_path, entry.repo.keyring_path]
-    if entry.kind == "tarball-opt":
+    if entry.kind in ("tarball-opt", "github-zip-opt"):
         paths += [entry.opt_dir, tarball_desktop_path(entry)]
     if entry.kind == "user-script":
         paths += [str(expand_home(p, Path(ctx.home))) for p in entry.remove_paths]
@@ -1133,7 +1156,7 @@ def _finish(result: PlanResult, entry: Entry, steps) -> int:
 def install_one(entry: Entry, ctx: Context, *, dry_run: bool) -> int:
     resolved = None
     asset_url = None
-    if entry.kind == "github-deb" and not dry_run:
+    if entry.kind in ("github-deb", "github-zip-opt") and not dry_run:
         try:
             asset_url = latest_release_asset(entry)
         except (OSError, ValueError, KeyError) as exc:
