@@ -115,6 +115,7 @@ def write_stick(cfg: WriteConfig, runner: Runner) -> None:
         log.info("generating the initramfs and installing GRUB")
         with Chroot(mountpoint, runner, network=False) as chroot:
             _remove_boot_splash(chroot)
+            _remove_nvidia_firmware(chroot)
             _install_runtime(chroot)
             chroot.run(["update-initramfs", "-u", "-k", "all"])
             _install_grub(chroot, target.device)
@@ -443,6 +444,24 @@ def _remove_boot_splash(chroot: Chroot) -> None:
     """
     chroot.run(
         ["apt-get", "purge", "-y", "plymouth", "plymouth-label"],
+        check=False,
+        env={"DEBIAN_FRONTEND": "noninteractive"},
+    )
+
+
+def _remove_nvidia_firmware(chroot: Chroot) -> None:
+    """Remove firmware-nvidia-graphics.
+
+    firmware-misc-nonfree recommends it, and NEVER_INSTALL in packages.py
+    cannot stop a recommend, so a built rootfs carries 63 MB of NVIDIA GPU
+    blobs that only make sense on the machines whose owners opt into the
+    proprietary driver through the Software app. That entry installs the
+    firmware itself; until then it is dead weight on every other stick.
+    Purging needs no network, so it happens at write time and applies to any
+    cached rootfs, the way plymouth's purge does.
+    """
+    chroot.run(
+        ["apt-get", "purge", "-y", "firmware-nvidia-graphics"],
         check=False,
         env={"DEBIAN_FRONTEND": "noninteractive"},
     )

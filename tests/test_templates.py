@@ -229,6 +229,9 @@ class TestBashrc:
         rc = templates.render_bashrc()
         assert "bash_completion" in rc
         assert "alias ll=" in rc
+        # neofetch is muscle memory from every other distro; it must keep
+        # working now that fastfetch is the themed info display.
+        assert "alias neofetch='fastfetch'" in rc
 
     def test_the_window_title_escape_is_kept(self):
         # xfce4-terminal's tab titles come from this Debian-stock escape.

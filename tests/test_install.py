@@ -119,6 +119,14 @@ class TestUnencryptedWrite:
         # hid the boot log, which on unfamiliar hardware is worth seeing.
         assert self.t.has("apt-get", "purge", "plymouth")
 
+    def test_removes_the_nvidia_firmware(self):
+        # firmware-misc-nonfree recommends it, and NEVER_INSTALL cannot stop a
+        # recommend, so a built rootfs carries it; the write stage is the
+        # earliest offline point where it can come back off. The Software
+        # app's nvidia-driver entry installs it again on the machines that
+        # opt in.
+        assert self.t.has("apt-get", "purge", "firmware-nvidia-graphics")
+
     def test_the_splash_goes_before_the_initramfs_is_rebuilt(self):
         # Otherwise plymouth's initramfs hook survives into the new initramfs.
         assert self.t.before(("apt-get", "purge", "plymouth"), ("update-initramfs",))

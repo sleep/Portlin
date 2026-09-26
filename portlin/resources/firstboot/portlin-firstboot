@@ -114,15 +114,12 @@ THEME_TARGETS = {
 # for the software the Software app installs, and because it is drawn
 # light-on-dark for a dark panel.
 #
-# elementary-xfce rather than the elementary-xfce-dark that a dark desktop
-# invites picking: that name is a deprecated alias, and says so in its own
-# Comment. It ships three files and no icon directories, inheriting
-# elementary-xfce for everything, so offering it would add a level of
-# indirection and change nothing anyone could see.
+# The picker only offers what the image installs: first boot runs with no
+# network. The elementary-xfce and Numix sets used to be here, at 138 MB for
+# two entries; they are in the Software app now, which can fetch them onto a
+# networked stick. Adwaita stays because libgtk-3 pulls it in anyway.
 ICON_THEMES = [
     ("Papirus-Dark", "Full colour, best app coverage"),
-    ("elementary-xfce", "Soft and quiet, Xfce's own"),
-    ("Numix-Circle", "Vivid circles"),
     ("Papirus", "Full colour, light panel icons"),
     ("Adwaita", "GNOME stock"),
 ]

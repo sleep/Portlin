@@ -70,13 +70,14 @@ The image ships at 8 GB no matter how big the stick is, so one image fits every 
 is fast. On first boot it offers to expand into the rest.
 
 The Xfce desktop is dark out of the box: Numix across GTK, window decorations, the LightDM greeter
-and the terminal, with Papirus-Dark icons over it. First boot offers three widget themes and five
-icon sets, all of them installed in the image, because first boot has no network. The defaults live
-in `/etc/xdg/xdg-portlin`, which the session adds to `XDG_CONFIG_DIRS`, so Settings > Appearance
-still changes them and the change sticks -- including a change made by the wizard, since everything
-that names a theme is a conffile. They sit in a directory of their own because dpkg lets only one
-installed package own a path, and Xfce's own packages already own the canonical `/etc/xdg`
-locations.
+and the terminal, with Papirus-Dark icons over it. First boot offers three widget themes and three
+icon sets, all of them installed in the image, because first boot has no network. (Two further icon
+sets, elementary-xfce and Numix, live in the Software app instead -- 138 MB is a lot to carry for a
+menu entry.) The defaults live in `/etc/xdg/xdg-portlin`, which the session adds to `XDG_CONFIG_DIRS`,
+so Settings > Appearance still changes them and the change sticks -- including a change made by the
+wizard, since everything that names a theme is a conffile. They sit in a directory of their own
+because dpkg lets only one installed package own a path, and Xfce's own packages already own the
+canonical `/etc/xdg` locations.
 
 One panel, along the top, with a searchable applications menu under the portlin mark. At the right
 end sits a readout of what the machine is doing:

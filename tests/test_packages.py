@@ -139,3 +139,25 @@ def test_every_stick_carries_the_migration_tools():
     # the system group rather than in TOOLS, the way pciutils does.
     assert "rsync" in packages.SYSTEM
     assert "zstd" in packages.SYSTEM
+
+
+class TestWhatTheImageSkips:
+    def test_the_dropped_icon_themes_are_not_in_any_default_group(self):
+        # 138 MB for two picker entries. The Software app carries them now;
+        # test_catalog holds the other side, that they are installable there.
+        resolved = packages.resolve()
+        assert "elementary-xfce-icon-theme" not in resolved
+        assert "numix-icon-theme" not in resolved
+        assert "numix-icon-theme-circle" not in resolved
+
+    def test_git_is_a_software_app_install(self):
+        # 48 MB plus the perl stack it drags in; the catalog's build-tools
+        # entry already installs it, with build-essential and pkg-config.
+        assert "git" not in packages.TOOLS
+        assert "git" not in packages.resolve()
+
+    def test_nvidia_firmware_is_purged_at_write_time(self):
+        # NEVER_INSTALL alone cannot stop the Recommends of
+        # firmware-misc-nonfree that pulls it in; install.py purges it in the
+        # write chroot. The catalog's nvidia-driver entry reinstalls it.
+        assert "firmware-nvidia-graphics" in packages.NEVER_INSTALL

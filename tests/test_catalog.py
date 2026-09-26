@@ -30,6 +30,7 @@ REQUESTED = [
     "signal", "telegram", "discord",
     "yt-dlp", "gallery-dl", "handbrake", "kleopatra", "veracrypt", "php", "jd-gui", "ghidra",
     "btop", "terminal-tools", "konsole", "sqlitebrowser", "wireguard-tools", "virt-manager", "virtualbox",
+    "elementary-xfce-icons", "numix-circle-icons",
     "nvidia-driver", "intel-graphics", "amd-graphics", "broadcom-wifi", "printing",
 ]
 
@@ -81,6 +82,39 @@ class TestTheShippedCatalog:
         for entry in catalog.ENTRIES:
             if any(name.endswith("-dkms") for name in entry.packages) or entry.resolver:
                 assert entry.warning and "Secure Boot" in entry.warning, entry.id
+
+
+class TestWhatMovedFromTheImage:
+    """Entries the default image deliberately leaves out.
+
+    Each one is a package portlin.packages stopped installing to save space;
+    the catalog is where a user gets it back. The tests here face the other
+    way from tests/test_packages.py: that file proves the image skips them,
+    these prove the app offers them, and that the driver entry carries what
+    the purge removes.
+    """
+
+    def test_the_dropped_icon_themes_are_installable(self, catalog):
+        from portlin import packages
+
+        resolved = set(packages.resolve())
+        for entry in catalog.ENTRIES:
+            if entry.id in ("elementary-xfce-icons", "numix-circle-icons"):
+                assert entry.packages, entry.id
+                assert not any(name in resolved for name in entry.packages), (
+                    f"{entry.id} installs something the image already has"
+                )
+
+    def test_the_nvidia_driver_brings_its_own_firmware(self, catalog):
+        from portlin import packages
+
+        # install.py purges firmware-nvidia-graphics at write time, so the
+        # opt-in driver has to reinstall it: an NVIDIA machine whose driver
+        # lands without firmware depends on the free firmware covering the
+        # card, which is exactly what the proprietary driver exists for.
+        assert "firmware-nvidia-graphics" in packages.NEVER_INSTALL
+        entry = catalog.by_id("nvidia-driver")
+        assert "firmware-nvidia-graphics" in entry.packages
 
 
 class TestValidationRules:

@@ -1342,7 +1342,7 @@ class TestIconThemePicker:
         # easier to get wrong: icon-theme-name= contains theme-name=, so a
         # pattern anchored on the shorter key matches inside the longer one.
         targets = module_constant(WIZARD, "ICON_THEME_TARGETS")
-        chosen = "Numix-Circle"
+        chosen = "Papirus"
         assert chosen in packages.ICON_THEME_PACKAGES
         for destination, (pattern, replacement) in targets.items():
             body = (
@@ -1362,7 +1362,7 @@ class TestIconThemePicker:
         # matches the wrong key once the other picker has been through it.
         widget = module_constant(WIZARD, "THEME_TARGETS")
         icons = module_constant(WIZARD, "ICON_THEME_TARGETS")
-        theme, icon_theme = "Blackbird", "Numix-Circle"
+        theme, icon_theme = "Blackbird", "Papirus"
         for destination in set(widget) & set(icons):
             body = (
                 self.THEME_RESOURCES

@@ -48,6 +48,7 @@ CATEGORIES = (
     "AI tools",
     "Remote access",
     "System tools",
+    "Look and feel",
     "Drivers",
 )
 
@@ -828,6 +829,35 @@ ENTRIES: tuple[Entry, ...] = (
         homepage="https://www.virtualbox.org/",
         notes="Your account is added to the vboxusers group. Log out and in before using it.",
     ),
+    # -- Look and feel -----------------------------------------------------
+    # Icon themes the first-boot wizard once shipped and the image no longer
+    # carries. The wizard's picker cannot offer them - it runs with no
+    # network, which is why the three defaults still live in the image - but
+    # a networked stick can have them back in one step here.
+    Entry(
+        id="elementary-xfce-icons",
+        name="elementary-xfce icon theme",
+        summary="Soft and quiet, Xfce's own icon set",
+        category="Look and feel",
+        kind="apt",
+        packages=("elementary-xfce-icon-theme",),
+        check=dpkg("elementary-xfce-icon-theme"),
+        homepage="https://docs.xfce.org/xfce/xfce4-settings/start",
+        notes="After installing, pick it in Settings, or run: xfconf-query -c "
+        "xsettings -p /Net/IconThemeName -s elementary-xfce",
+    ),
+    Entry(
+        id="numix-circle-icons",
+        name="Numix Circle icon themes",
+        summary="Vivid circle icon themes, Numix and Numix-Circle",
+        category="Look and feel",
+        kind="apt",
+        packages=("numix-icon-theme", "numix-icon-theme-circle"),
+        check=dpkg("numix-icon-theme-circle"),
+        homepage="https://numixproject.github.io/",
+        notes="After installing, pick one in Settings, or run: xfconf-query -c "
+        "xsettings -p /Net/IconThemeName -s Numix-Circle",
+    ),
     # -- Drivers -----------------------------------------------------------
     Entry(
         id="nvidia-driver",
@@ -835,12 +865,14 @@ ENTRIES: tuple[Entry, ...] = (
         summary="NVIDIA's own driver, chosen for this card by nvidia-detect",
         category="Drivers",
         kind="apt",
-        packages=("linux-headers-amd64",),
+        packages=("linux-headers-amd64", "firmware-nvidia-graphics"),
         resolver="nvidia-detect",
         needs_components=("non-free",),
         check=dpkg("nvidia-driver", "nvidia-tesla-535-driver"),
         warning=NVIDIA_WARNING,
         homepage="https://wiki.debian.org/NvidiaGraphicsDrivers",
+        notes="The firmware the card needs is installed with the driver; the "
+        "base image deliberately leaves it out.",
     ),
     Entry(
         id="intel-graphics",

@@ -526,11 +526,12 @@ def installed_packages(entry: Entry, record: dict | None) -> list[str]:
     The fallback is the catalog's packages *and* the names its check looks
     for, because for some entries those are different sets and neither alone
     is the whole install. nvidia-driver is the one that matters: it lists
-    only the kernel headers, because which driver gets installed is
-    nvidia-detect's answer rather than the catalog's, and that answer is what
-    the check knows about. Purging the headers and leaving the driver would
-    fail exactly the person following the entry's own recovery instructions
-    from a text console.
+    only what every install of it shares - the kernel headers and the
+    firmware - because which driver gets installed is nvidia-detect's
+    answer rather than the catalog's, and that answer is what the check
+    knows about. Purging the headers and firmware and leaving the driver
+    would fail exactly the person following the entry's own recovery
+    instructions from a text console.
     """
     if record and record.get("packages"):
         return list(record["packages"])

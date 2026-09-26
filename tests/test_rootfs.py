@@ -146,6 +146,25 @@ class TestPackageSelection:
         build_rootfs(cfg, runner)
         assert "tmux" in trace(runner).command_at("apt-get", "install")
 
+    def test_the_terminal_seed_is_marked_first(self, tmp_path, runner, trace):
+        # apt marks command-line packages in order, and the recommends of
+        # xdg-utils' libfile-desktopentry-perl and of xinit name the
+        # x-terminal-emulator virtual before any terminal is marked. Whatever
+        # provider happens to sort first in the index would win that tiebreak
+        # inside apt and a second, surprise terminal would land on the
+        # desktop. Seeding xterm first is what makes it deterministic; see
+        # packages.SEED_FIRST.
+        cfg = BuildConfig(
+            output=tmp_path / "r.tar.zst",
+            work_dir=tmp_path / "w",
+            groups=["boot", "system"],
+        )
+        build_rootfs(cfg, runner)
+        install = trace(runner).command_at("apt-get", "install")
+        argv = install[install.index("install") + 1 :]
+        assert argv[0] == "xterm"
+        assert argv[1:] == sorted(set(argv[1:]))
+
 
 class TestProgressSignals:
     """The build has to be able to say how far along it is.

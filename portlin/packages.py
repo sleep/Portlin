@@ -141,10 +141,15 @@ DEFAULT_THEME = "Numix"
 # icon theme the wizard offers but the image never installed is not a menu
 # entry that falls back to the stock set. It is a desktop with a wallpaper and
 # blank space where every icon was.
+#
+# Only the three defaults-adjacent sets ship: Papirus (the default, and the
+# only archive set covering the software the Software app installs),
+# Papirus's light-panel face, and Adwaita (the GTK fallback libgtk-3 pulls
+# in anyway). The elementary-xfce and Numix sets used to ship too, 138 MB for
+# two picker entries; they moved to the Software app, which can fetch them
+# onto a networked stick in one step.
 ICON_THEME_PACKAGES = {
     "Papirus-Dark": "papirus-icon-theme",
-    "elementary-xfce": "elementary-xfce-icon-theme",
-    "Numix-Circle": "numix-icon-theme-circle",
     "Papirus": "papirus-icon-theme",
     "Adwaita": "adwaita-icon-theme",
 }
@@ -241,18 +246,41 @@ TOOLS = [
     "nano",
     "vim-tiny",
     "htop",
-    "git",
+    # git is the one deliberate omission: 48 MB of program plus the perl stack
+    # it drags in, and the Software app's "Build tools" entry already installs
+    # git (with build-essential and pkg-config) on a networked stick.
     "usbutils",
     "lshw",
     "file",
     "tree",
+    # The system-info display the portlin-branded ~/.config/fastfetch face
+    # (shipped by portlin-desktop) runs on. Not a dependency of that package
+    # because a --minimal rootfs can be written without it and the bashrc
+    # banner uses portlin-welcome, which needs nothing.
+    "fastfetch",
 ]
+
+# Installed before everything else, and not part of any group: xterm's only
+# job here is to be the x-terminal-emulator provider apt finds first. Two
+# recommends (xdg-utils' libfile-desktopentry-perl, xinit) name that virtual,
+# and apt marks command-line packages in order, so whichever terminal happens
+# to sort first in the index would otherwise win a tiebreak inside apt and
+# land on the desktop as a second, surprise terminal. Explicit is not just
+# cheaper (xterm is a couple of MB) - it is deterministic.
+SEED_FIRST = ["xterm"]
 
 # Never wanted. plymouth is a boot splash whose entire job is hiding the boot
 # log, and it fights the first-boot wizard for the console while
 # plymouth-quit-wait can deadlock against the display manager. Purged at write
 # time too, so a cached rootfs built before this also loses it.
-NEVER_INSTALL = ["plymouth", "plymouth-label"]
+#
+# firmware-nvidia-graphics arrives not by any list but as a Recommends of
+# firmware-misc-nonfree: 63 MB of NVIDIA GPU blobs on a stick whose NVIDIA
+# users are exactly the ones opting in through the Software app's nvidia-driver
+# entry, which installs the firmware itself. NEVER_INSTALL alone cannot stop a
+# recommend, so it is purged at write time as well, and removal needs no
+# network, which is the same plymouth argument.
+NEVER_INSTALL = ["plymouth", "plymouth-label", "firmware-nvidia-graphics"]
 
 GROUPS: dict[str, list[str]] = {
     "boot": BOOT,

@@ -100,11 +100,13 @@ def _configure_apt(cfg: BuildConfig, runner: Runner, root: Path) -> None:
 
 
 def _install_packages(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
-    packages = cfg.package_list()
-    log.info("installing %d packages", len(packages))
+    # SEED_FIRST goes before the sorted list because apt marks command-line
+    # packages in that order; see packages.SEED_FIRST for why that matters.
+    to_install = packages.SEED_FIRST + cfg.package_list()
+    log.info("installing %d packages", len(to_install))
     chroot.apt(["update"])
     chroot.apt(["dist-upgrade"])
-    chroot.apt(["install", *packages])
+    chroot.apt(["install", *to_install])
 
 
 def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
