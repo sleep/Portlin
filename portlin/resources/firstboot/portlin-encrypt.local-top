@@ -16,7 +16,14 @@
 # has run. That keeps the decision out of any file this script would have to
 # mount something to read.
 
-PREREQ="cryptroot"
+# No prereqs, and in particular not cryptroot. Debian's cryptroot names every
+# other local-top script as its own prereq so that it always runs last, so
+# naming it here is a cycle: tsort complains on every initramfs rebuild and
+# picks an order arbitrarily. Running first is also the order this needs. It
+# has to see the raw partition to encrypt or recover it, and when cryptroot
+# follows it finds portlin_root already open and leaves it alone. Run after an
+# unlock instead, it would see a plain filesystem and offer to encrypt it again.
+PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case "$1" in
     prereqs) prereqs; exit 0 ;;

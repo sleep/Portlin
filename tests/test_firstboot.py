@@ -514,6 +514,12 @@ class TestEncryptOnFirstBoot:
             assert "prereqs)" in body
             assert "exit 0" in body
 
+    def test_local_top_does_not_wait_for_cryptroot(self):
+        # cryptroot lists every other local-top script as its prereq so that it
+        # runs last. Listing it back is a cycle that tsort reports on every
+        # kernel install and resolves in whatever order it likes.
+        assert 'PREREQ=""' in self.LOCAL_TOP.read_text()
+
     def test_encryption_only_runs_when_explicitly_asked(self):
         # The flag rides the kernel command line, so the initramfs does not have
         # to mount a filesystem just to find out whether to ask.
