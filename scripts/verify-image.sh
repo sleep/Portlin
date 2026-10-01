@@ -14,6 +14,12 @@ FAILURES=0
 pass() { printf '  \033[32mok\033[0m   %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 
+# Under set -e a check that errors, rather than fails, ends the script with no
+# FAIL line and no summary, and the build reports a failed verification with
+# nothing to say which check it was. This names the line, and says plainly that
+# the image was not judged past it.
+trap 'printf "  \033[31mERROR\033[0m verify-image.sh stopped at line %s; later checks did not run\n" "$LINENO"' ERR
+
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "verify-image.sh needs Linux (loop devices and mounts)" >&2
     exit 2
@@ -458,15 +464,25 @@ if test -x "$MNT/usr/bin/startxfce4"; then
 
     # Every set the first-boot picker offers, not only the default. First boot
     # runs with no network, so a name it offers but the image never installed
-    # is a menu entry that cannot be honoured.
-    for THEME in Papirus-Dark Papirus elementary-xfce Numix-Circle Adwaita; do
+    # is a menu entry that cannot be honoured. The names are read out of the
+    # wizard on the image rather than repeated here, so that moving a set out
+    # of the image and out of the picker cannot leave this list behind.
+    PICKER_ICON_THEMES="$(sed -n '/^ICON_THEMES = \[/,/^\]/s/^ *("\([^"]*\)".*/\1/p' \
+        "$MNT/usr/local/sbin/portlin-firstboot" 2>/dev/null || true)"
+    test -n "$PICKER_ICON_THEMES" \
+        && pass "the first-boot wizard lists the icon sets it offers" \
+        || fail "no ICON_THEMES list in portlin-firstboot (the picker's sets go unchecked)"
+
+    for THEME in $PICKER_ICON_THEMES; do
         # Counted rather than merely present. An icon theme can be a deprecated
         # alias -- elementary-xfce-dark is one, and says so in its own Comment
         # -- which ships an index.theme, a Directories line and no icon
         # directories at all, inheriting a real set for everything. That is
         # indistinguishable from a real theme by any check of the index alone,
         # and offering one in the picker would be a choice that changes nothing.
-        ICON_DIRS="$(find "$MNT/usr/share/icons/$THEME" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+        # A set that is not there at all makes find fail, which must count as
+        # zero directories and not end the script under pipefail.
+        ICON_DIRS="$(find "$MNT/usr/share/icons/$THEME" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)" || true
         test "$ICON_DIRS" -gt 0 \
             && pass "the $THEME icon set carries icons of its own" \
             || fail "$THEME has no icon directories (the picker offers an alias or an empty set)"
