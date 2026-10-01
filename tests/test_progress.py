@@ -67,6 +67,32 @@ class TestAptStatus:
         for line in ("Setting up libc6:amd64 (2.41-12) ...", "", "Reading database", "::"):
             assert progress.parse_apt_status(line) is None
 
+    def test_says_which_of_the_two_runs_a_line_is_from(self):
+        assert progress.parse_apt_status("dlstatus:1:12.5:Retrieving file 1 of 8").kind == "dlstatus"
+        assert progress.parse_apt_status("pmstatus:x:41.7:Unpacking x").kind == "pmstatus"
+
+
+class TestInstallFraction:
+    """One apt-get install is a download and then dpkg, each counted 0-100%."""
+
+    def fraction(self, line):
+        return progress.apt_install_fraction(progress.parse_apt_status(line))
+
+    def test_the_bar_does_not_empty_when_dpkg_starts(self):
+        # Taken raw, a finished download read as a finished install, and dpkg's
+        # first line then sent the bar back to nothing and the ETA to hours.
+        downloaded = self.fraction("dlstatus:927:100:Retrieving file 927 of 927")
+        started = self.fraction("pmstatus:dpkg-exec:0:Running dpkg")
+        assert started >= downloaded
+
+    def test_the_download_moves_the_bar(self):
+        halfway = self.fraction("dlstatus:449:50:Retrieving file 449 of 927")
+        assert 0 < halfway < self.fraction("pmstatus:dpkg-exec:0:Running dpkg")
+
+    def test_runs_from_empty_to_full(self):
+        assert self.fraction("dlstatus:1:0:Retrieving file 1 of 927") == 0.0
+        assert self.fraction("pmstatus:x:100:Installed x") == pytest.approx(1.0)
+
 
 class TestDebootstrapStatus:
     def test_reads_the_verb_and_the_package(self):
@@ -232,6 +258,53 @@ class TestTimingsCache:
         # because a cache directory is read-only.
         progress.save_timings(tmp_path / "no" / "such" / "dir" / "t.json", {"a": 1.0})
 
+    def test_an_infinite_duration_is_dropped(self, tmp_path):
+        # json reads Infinity, and an infinite ETA cannot be printed: the
+        # display would raise mid-build over a cache that exists to be cosmetic.
+        path = tmp_path / "timings.json"
+        path.write_text('{"packages": Infinity, "unpack": 12.0}')
+        assert progress.load_timings(path) == {"unpack": 12.0}
+
+
+class TestProfileCache:
+    STEPS = progress.PROFILE_STEPS
+
+    def profile(self, end=100.0):
+        return [end * step / self.STEPS for step in range(self.STEPS + 1)]
+
+    def test_round_trips_beside_the_durations(self, tmp_path):
+        path = tmp_path / "timings.json"
+        progress.save_timings(path, {"packages": 100.0}, {"packages": self.profile()})
+        assert progress.load_profiles(path) == {"packages": self.profile()}
+        # And the durations read exactly as before, profiles or not.
+        assert progress.load_timings(path) == {"packages": 100.0}
+
+    def test_a_cache_from_before_profiles_has_none(self, tmp_path):
+        path = tmp_path / "timings.json"
+        path.write_text(json.dumps({"packages": 100.0}))
+        assert progress.load_profiles(path) == {}
+
+    def test_a_profile_of_the_wrong_length_is_dropped(self, tmp_path):
+        # Recorded with a different PROFILE_STEPS, every step would be read as
+        # some other step.
+        path = tmp_path / "timings.json"
+        path.write_text(json.dumps({"profiles": {"packages": self.profile()[:-1]}}))
+        assert progress.load_profiles(path) == {}
+
+    def test_a_profile_that_goes_back_in_time_is_dropped(self, tmp_path):
+        broken = self.profile()
+        broken[10], broken[11] = broken[11], broken[10]
+        path = tmp_path / "timings.json"
+        path.write_text(json.dumps({"profiles": {"packages": broken, "unpack": self.profile()}}))
+        assert progress.load_profiles(path) == {"unpack": self.profile()}
+
+    def test_junk_is_dropped_rather_than_trusted(self, tmp_path):
+        path = tmp_path / "timings.json"
+        path.write_text(json.dumps({"profiles": {"a": "soon", "b": [None] * (self.STEPS + 1)}}))
+        assert progress.load_profiles(path) == {}
+        path.write_text(json.dumps({"profiles": [1, 2, 3]}))
+        assert progress.load_profiles(path) == {}
+
 
 class TestStageDetection:
     """Which stage is running is derived from the command, not announced.
@@ -342,3 +415,198 @@ class TestStagesOnlyMoveForward:
         self.timeline.finish()
         expected = self.timeline.weight_of("partition") + self.timeline.weight_of("bootloader")
         assert self.timeline.overall() == pytest.approx(expected)
+
+
+class TestProfileRecording:
+    def setup_method(self):
+        self.now = 0.0
+        self.timeline = progress.Timeline(clock=lambda: self.now)
+
+    def test_records_when_each_step_was_first_reached(self):
+        self.timeline.start("packages")
+        self.now = 10
+        self.timeline.update(0.0)
+        self.now = 30
+        self.timeline.update(0.5)
+        self.now = 50
+        self.timeline.update(1.0)
+        self.timeline.finish()
+        profile = self.timeline.profiles()["packages"]
+        assert profile[0] == 10
+        assert profile[progress.PROFILE_STEPS // 2] == 30
+        assert profile[-1] == 50
+
+    def test_steps_never_reached_count_as_reached_at_the_end(self):
+        # apt's last line is 99.97%, and the stage goes on past it anyway, so
+        # the end of the stage is when the last steps were really done.
+        self.timeline.start("packages")
+        self.timeline.update(0.9997)
+        self.now = 80
+        self.timeline.finish()
+        assert self.timeline.profiles()["packages"][-1] == 80
+
+    def test_a_fraction_that_slips_back_does_not_rewrite_the_profile(self):
+        # apt recomputes its totals mid-install and the percentage dips.
+        self.timeline.start("packages")
+        self.timeline.update(0.5)
+        self.now = 10
+        self.timeline.update(0.49)
+        self.now = 20
+        self.timeline.update(0.5)
+        self.timeline.finish()
+        assert self.timeline.profiles()["packages"][progress.PROFILE_STEPS // 2] == 0
+
+    def test_a_stage_with_no_percentage_has_no_profile(self):
+        self.timeline.start("tarball")
+        self.now = 10
+        self.timeline.finish()
+        assert "tarball" not in self.timeline.profiles()
+
+
+class TestCalibratedEta:
+    """With an earlier build to go on, the ETA keeps its clock, not apt's.
+
+    apt counts steps rather than time. It reaches 99% with the initramfs still
+    to build, sits at 81% through the kernel's postinst and reports nothing
+    through apt update, so an ETA extrapolated from its percentage raced to
+    zero minutes before the stage was done. The same stalls fall at the same
+    percentages every build, so the last build's timing of each step is the
+    clock, and the percentage only corrects it.
+    """
+
+    # The packages stage in miniature, as (seconds, fraction at the end):
+    # apt update with no percentage, a steady stretch, the kernel's postinst
+    # holding at 80%, the rest, then the initramfs trigger after the last line.
+    STAGE = [(20, None), (100, 0.8), (60, 0.8), (20, 1.0), (40, 1.0)]
+
+    def setup_method(self):
+        self.now = 0.0
+        previous = progress.Timeline(clock=lambda: self.now)
+        self.play(previous, self.STAGE)
+        self.timings = previous.durations()
+        self.profiles = previous.profiles()
+
+    def play(self, timeline, stage, watch=None):
+        """Run one stage a second at a time, as apt would report it."""
+        timeline.start("packages")
+        fraction = None
+        for seconds, target in stage:
+            begin = fraction
+            for tick in range(1, seconds + 1):
+                self.now += 1
+                if target is not None and target != begin:
+                    start = begin or 0.0
+                    timeline.update(start + (target - start) * tick / seconds)
+                if watch:
+                    watch(timeline)
+            if target is not None:
+                fraction = target
+        timeline.finish()
+
+    def etas(self, stage):
+        """(true seconds left, ETA shown) for every second of this build."""
+        timeline = progress.Timeline(
+            timings=self.timings, profiles=self.profiles, clock=lambda: self.now
+        )
+        total = sum(seconds for seconds, _ in stage)
+        seen = []
+        self.play(
+            timeline,
+            stage,
+            watch=lambda t: seen.append((total - t.elapsed(), t.stage_remaining())),
+        )
+        return seen
+
+    def test_a_rebuild_like_the_last_counts_down_in_real_time(self):
+        # Through the stall at 80% and the tail at 100% alike, where the old
+        # extrapolation stood still and then showed nothing left.
+        for true, eta in self.etas(self.STAGE):
+            assert eta == pytest.approx(true, abs=1)
+
+    def test_falling_behind_early_does_not_skip_the_tail(self):
+        # A slow download puts every later step behind the last build's clock.
+        # Timed from the start of the stage, the build was then already past
+        # the stall and the trigger and the ETA read zero through both.
+        behind = [(20, None), (200, 0.8), (60, 0.8), (20, 1.0), (40, 1.0)]
+        for true, eta in self.etas(behind)[-120:]:
+            assert eta == pytest.approx(true, abs=1)
+
+    def test_getting_ahead_brings_the_eta_forward(self):
+        ahead = [(20, None), (50, 0.8), (60, 0.8), (20, 1.0), (40, 1.0)]
+        for true, eta in self.etas(ahead)[70:]:
+            assert eta == pytest.approx(true, abs=1)
+
+    def test_before_progress_begins_it_waits_where_the_last_build_began(self):
+        # A slow apt update has not got the build anywhere: it holds at
+        # however long the rest took last time rather than counting past it.
+        late = [(50, None), (100, 0.8), (60, 0.8), (20, 1.0), (40, 1.0)]
+        etas = [eta for _, eta in self.etas(late)]
+        rest = self.timings["packages"] - self.profiles["packages"][0]
+        assert etas[29] == pytest.approx(rest)
+        assert etas[49] == pytest.approx(rest)
+
+    def test_a_duration_without_a_profile_counts_down_from_it(self):
+        # A cache written before profiles existed, or a stage with no
+        # percentage of its own.
+        timeline = progress.Timeline(timings={"packages": 240.0}, clock=lambda: self.now)
+        timeline.start("packages")
+        self.now += 100
+        timeline.update(0.95)
+        assert timeline.stage_remaining() == pytest.approx(140)
+
+
+class TestFirstBuildEta:
+    def test_measures_the_rate_from_when_progress_began(self):
+        # A minute of apt update before the percentage moves used to count as
+        # time spent getting to it, which put the ETA far too high early and
+        # had it fall several seconds per second afterwards.
+        now = [0.0]
+        timeline = progress.Timeline(clock=lambda: now[0])
+        timeline.start("packages")
+        now[0] = 60
+        timeline.update(0.0)
+        now[0] = 80
+        timeline.update(0.5)
+        assert timeline.stage_remaining() == pytest.approx(20)
+
+    def test_has_no_estimate_before_progress_begins(self):
+        timeline = progress.Timeline(clock=lambda: 30.0)
+        timeline.start("packages")
+        assert timeline.stage_remaining() is None
+
+
+class TestTotalEta:
+    TIMINGS = {stage.key: 100.0 for stage in progress.DEFAULT_STAGES}
+
+    def test_adds_the_stages_still_to_come_to_the_current_one(self):
+        now = [0.0]
+        timeline = progress.Timeline(timings=self.TIMINGS, clock=lambda: now[0])
+        timeline.start("debootstrap")
+        now[0] = 100
+        timeline.start("packages")
+        now[0] = 130
+        later = len(progress.DEFAULT_STAGES) - 2
+        assert timeline.remaining() == pytest.approx(70 + 100 * later)
+
+    def test_keeps_falling_through_a_stage_with_no_percentage(self):
+        # Extrapolated from the overall fraction, which tar does not move, the
+        # total ETA climbed for as long as the tarball took.
+        now = [0.0]
+        timeline = progress.Timeline(timings=self.TIMINGS, clock=lambda: now[0])
+        timeline.start("tarball")
+        now[0] = 10
+        before = timeline.remaining()
+        now[0] = 50
+        assert timeline.remaining() == pytest.approx(before - 40)
+
+    def test_is_unknown_on_a_first_build(self):
+        timeline = progress.Timeline(clock=lambda: 0.0)
+        timeline.start("debootstrap")
+        assert timeline.remaining() is None
+
+    def test_is_nothing_once_every_stage_is_done(self):
+        timeline = progress.Timeline(timings=self.TIMINGS, clock=lambda: 0.0)
+        for stage in progress.DEFAULT_STAGES:
+            timeline.start(stage.key)
+        timeline.finish()
+        assert timeline.remaining() == 0

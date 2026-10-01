@@ -225,7 +225,7 @@ class Display:
             trailer = f"{timing:>8}"
         elif running:
             elapsed = self.timeline.elapsed()
-            remaining = progress.estimate_remaining(fraction, elapsed)
+            remaining = self.timeline.stage_remaining()
             trailer = f"{progress.format_duration(elapsed):>8}"
             if remaining is not None:
                 trailer += f"   ETA {progress.format_duration(remaining)}"
@@ -238,7 +238,11 @@ class Display:
     def _total_row(self) -> str:
         fraction = self.timeline.overall()
         elapsed = time.monotonic() - self.started
-        remaining = progress.estimate_remaining(fraction, elapsed)
+        remaining = self.timeline.remaining()
+        if remaining is None:
+            # A first build has no stage durations to add up, so the weighted
+            # fraction extrapolated is the only estimate there is.
+            remaining = progress.estimate_remaining(fraction, elapsed)
         # Padded before colouring. Formatting an already-coloured string counts
         # the escape codes toward the width, which silently shifts the column.
         label = self.theme(f"{'total':<14}", Theme.PAPER)
@@ -321,7 +325,9 @@ class BuildWatcher:
         # first and each reports its own 0-100%, so accepting all three would
         # send the bar backwards twice before the real work started.
         if "install" in argv:
-            self.timeline.update(fraction=status.fraction, detail=status.detail)
+            self.timeline.update(
+                fraction=progress.apt_install_fraction(status), detail=status.detail
+            )
         else:
             self.timeline.update(detail=status.detail)
 
@@ -598,7 +604,11 @@ def build(args: argparse.Namespace) -> int:
     timings_path = out_dir / TIMINGS_FILE
 
     timings = progress.load_timings(timings_path)
-    timeline = progress.Timeline(_stages(args.in_container), timings=timings)
+    timeline = progress.Timeline(
+        _stages(args.in_container),
+        timings=timings,
+        profiles=progress.load_profiles(timings_path),
+    )
 
     theme = Theme(sys.stdout.isatty() and "NO_COLOR" not in os.environ)
     unicode_ok = "UTF-8" in (os.environ.get("LANG", "") + os.environ.get("LC_ALL", "")).upper()
@@ -649,7 +659,7 @@ def build(args: argparse.Namespace) -> int:
     # Only a complete build produces usable timings; a partial one would teach
     # the next run's estimate that the build is much shorter than it is. Saved
     # even when verification fails, because the durations are still real.
-    progress.save_timings(timings_path, timeline.durations())
+    progress.save_timings(timings_path, timeline.durations(), timeline.profiles())
 
     if not verified.ok:
         # The image is left in place: it is usually nearly right, and inspecting

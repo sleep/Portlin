@@ -465,3 +465,37 @@ class TestBuildTools:
         with pytest.raises(Boom):
             script._install_build_tools(FakeRunner(), watcher)
         assert watcher.pinned is None
+
+
+class TestAptProgress:
+    """What the packages bar is fed from apt's status stream."""
+
+    class FakeDisplay:
+        def __init__(self, timeline):
+            self.timeline = timeline
+
+        def add_log(self, line, echo=False):
+            pass
+
+        def refresh(self, force=False):
+            pass
+
+    INSTALL = ["chroot", "/tmp/root", "eatmydata", "apt-get", "-y", "install", "xfce4"]
+
+    def test_the_bar_never_goes_back_when_dpkg_takes_over(self, script):
+        # apt counts the download 0-100% and then dpkg 0-100% again. Fed in
+        # raw, the bar emptied when dpkg started and the ETA leapt to hours.
+        timeline = progress.Timeline(clock=lambda: 0.0)
+        watcher = script.BuildWatcher(self.FakeDisplay(timeline))
+        seen = []
+        for line in (
+            "dlstatus:1:0.0000:Retrieving file 1 of 927",
+            "dlstatus:927:99.9:Retrieving file 927 of 927",
+            "pmstatus:dpkg-exec:0.0000:Running dpkg",
+            "pmstatus:xfce4:50.0:Unpacking xfce4 (amd64)",
+            "pmstatus:xfce4:99.97:Installed xfce4 (amd64)",
+        ):
+            watcher(self.INSTALL, "stdout", line)
+            seen.append(timeline.fraction)
+        assert seen == sorted(seen)
+        assert seen[-1] > 0.99
