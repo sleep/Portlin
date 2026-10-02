@@ -217,6 +217,9 @@ DESKTOP = [
     # For the intro film, which draws through cairo from a GTK draw handler.
     "python3-gi-cairo",
     "librsvg2-common",
+    # The Migrate window draws its progress strip and status marks with
+    # cairo, and a Python draw handler needs this to receive a context.
+    "python3-gi-cairo",
     # For the Software app. pkexec is what it elevates through, and it is a
     # separate package from polkitd in trixie. mate-polkit is the agent that
     # draws the password prompt in an Xfce session; it arrives as a Recommends

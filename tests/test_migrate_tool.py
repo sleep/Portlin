@@ -167,10 +167,36 @@ class TestRunSteps:
         result = tool.run_steps(steps, total=4000, out=out, execute=execute)
         assert result.ok and result.warnings == ()
         lines = out.getvalue().splitlines()
-        assert lines[0] == "::step Copying A"
+        assert lines[0].startswith("::stages ")
+        assert lines[1] == "::step Copying A"
         assert "::progress 37" in lines
         assert "::progress 75" in lines
-        assert lines[-1] == "::progress 100"
+        assert lines[-2:] == ["::progress 100", "::bytes 4000 4000"]
+
+    def test_the_outline_comes_first_and_bytes_and_files_follow_the_copy(self, tool, migrate):
+        steps = [
+            migrate.Step("Copying A", argv=("rsync", "a1"), progress="rsync", weight=3000),
+            migrate.Step("Copying A", argv=("rsync", "a2"), progress="rsync", weight=0),
+            migrate.Step("", warn="skipped something"),
+            migrate.Step("Copying B", argv=("rsync", "b"), progress="rsync", weight=1000),
+        ]
+        out = io.StringIO()
+
+        def execute(step, on_line):
+            on_line("      1,234  50%   1.00MB/s    0:00:01 (xfr#3, to-chk=1/2)")
+            on_line("      2,468  100%   1.00MB/s    0:00:01 (xfr#5, to-chk=0/2)")
+            return 0
+
+        tool.run_steps(steps, total=4000, out=out, execute=execute)
+        lines = out.getvalue().splitlines()
+        assert json.loads(lines[0].partition(" ")[2]) == [
+            {"text": "Copying A", "bytes": 3000},
+            {"text": "Copying B", "bytes": 1000},
+        ]
+        assert "::bytes 1500 4000" in lines
+        # Counts restart with each rsync and are added up across them.
+        files = [int(line.split()[1]) for line in lines if line.startswith("::files ")]
+        assert files == [3, 5, 8, 10, 13, 15]
 
     def test_tar_checkpoints_drive_progress_by_bytes(self, tool, migrate):
         step = migrate.Step("Restoring", argv=("tar", "x"), progress="tar", weight=4 * migrate.TAR_RECORD_BYTES * 1000)
@@ -513,6 +539,14 @@ class TestGauge:
             "XXX\n30\nCopying Downloads\nXXX\n"
         )
         assert gauge.percent == 30
+
+    def test_the_window_only_events_stay_off_the_gauge_and_the_log(self, tool, monkeypatch, tmp_path):
+        monkeypatch.setattr(tool, "LOG", tmp_path / "portlin-migrate.log")
+        feed = io.StringIO()
+        gauge = tool.Gauge(feed)
+        gauge.write('::stages [{"text": "Copying A", "bytes": 1}]\n::bytes 1 2\n::files 4\n')
+        assert feed.getvalue() == ""
+        assert not (tmp_path / "portlin-migrate.log").exists()
 
     def test_a_dead_gauge_process_does_not_fail_the_write(self, tool, monkeypatch, tmp_path):
         monkeypatch.setattr(tool, "LOG", tmp_path / "portlin-migrate.log")

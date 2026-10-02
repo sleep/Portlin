@@ -639,6 +639,8 @@ EXIT_NO_SPACE = 6
 SPACE_RESERVE = 512 * 1024**2
 
 _RSYNC_PERCENT = re.compile(r"\s(\d{1,3})%\s")
+# progress2's running count of files transferred, "(xfr#12, to-chk=...)".
+_RSYNC_FILES = re.compile(r"\(xfr#(\d+),")
 
 
 @dataclass(frozen=True)
@@ -725,6 +727,27 @@ def rsync_argv(source: Path, target: Path, *, backup_dir: Path, chown: tuple[int
 def parse_rsync_progress(line: str) -> int | None:
     match = _RSYNC_PERCENT.search(line)
     return int(match.group(1)) if match else None
+
+
+def parse_rsync_files(line: str) -> int | None:
+    match = _RSYNC_FILES.search(line)
+    return int(match.group(1)) if match else None
+
+
+def stage_outline(steps) -> list[dict]:
+    """The phases a run will announce with ::step, in order, with the bytes
+    each accounts for, so a front end can list them all before the first
+    one starts. An item with several paths is several steps under one text,
+    and one phase."""
+    outline: list[dict] = []
+    for step in steps:
+        if step.warn or not step.text:
+            continue
+        if outline and outline[-1]["text"] == step.text:
+            outline[-1]["bytes"] += step.weight
+        else:
+            outline.append({"text": step.text, "bytes": step.weight})
+    return outline
 
 
 def overall_percent(done: int, weight: int, step_percent: int, total: int) -> int:
