@@ -445,6 +445,22 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "systemd-inhibit is installed for the caffeine applet" \
         || fail "systemd-inhibit is missing (nothing takes the logind lock)"
 
+    # The intro film plays from its autostart entry and draws through cairo
+    # from a GTK draw handler. Without the binding the window still opens,
+    # full screen and black, over a desktop the new account cannot reach
+    # until a key is pressed.
+    test -x "$MNT/usr/bin/portlin-intro" \
+        && pass "portlin-intro is executable" \
+        || fail "portlin-intro is missing or not executable"
+
+    test -f "$MNT/etc/xdg/autostart/portlin-intro.desktop" \
+        && pass "the intro plays at an account's first login" \
+        || fail "no intro autostart entry (the film never plays)"
+
+    test -n "$(find "$MNT/usr/lib/python3/dist-packages/gi" -name '_gi_cairo*.so' 2>/dev/null)" \
+        && pass "python3-gi-cairo is installed for the intro" \
+        || fail "python3-gi-cairo is missing (the intro opens to a black screen)"
+
     # The icon set. Resolved out of the shipped config rather than repeated
     # here, so the name the session asks for and the directory that has to
     # exist can never disagree: naming a set the image did not install does not

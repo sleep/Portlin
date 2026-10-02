@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Welcome to Portlin
+Comment=The intro film, once, at an account's first login
+Exec=portlin-intro --once
+Icon=portlin
+Terminal=false
+StartupNotify=false
+# --once makes this a no-op after the first login, so it costs one stat per
+# session. Listed in Session and Startup like any autostart entry; unticking it
+# there stops it playing for an account that has not seen it yet.
+X-GNOME-Autostart-enabled=true

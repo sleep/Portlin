@@ -69,6 +69,9 @@ DESKTOP_TOOLS = [
     # program either; it is here because the prompt and banner only exist
     # where the desktop theme this package ships does.
     "portlin-welcome",
+    # The intro film each account sees at its first login. GTK and cairo,
+    # started by the autostart entry below.
+    "portlin-intro",
 ]
 
 # The panel id genmon is given, which is also the id in the filename genmon
@@ -103,6 +106,7 @@ MENU_LAYOUT_ENTRIES = {
 # file would be put back, enabled, by the next upgrade.
 AUTOSTART_ENTRIES = {
     "portlin-caffeine-autostart.desktop": "etc/xdg/autostart/portlin-caffeine.desktop",
+    "portlin-intro-autostart.desktop": "etc/xdg/autostart/portlin-intro.desktop",
 }
 
 # This runs in the X session, where XDG_RUNTIME_DIR is available.  It is a
@@ -447,6 +451,10 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     "portlin-runtime",
                     "python3-gi",
                     "gir1.2-gtk-3.0",
+                    # The intro draws with cairo from Python, and a GTK draw
+                    # handler cannot hand Python its cairo context without the
+                    # binding this carries: the window opens and stays black.
+                    "python3-gi-cairo",
                     "librsvg2-common",
                     "x11-xserver-utils",
                     "systemd",
