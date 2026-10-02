@@ -79,6 +79,11 @@ wizard, since everything that names a theme is a conffile. They sit in a directo
 because dpkg lets only one installed package own a path, and Xfce's own packages already own the
 canonical `/etc/xdg` locations.
 
+The wallpaper draws the stick's own partition table, with root crimson and labelled `LUKS2` only
+when root really is encrypted; on a plain stick it is white and labelled `ext4`. Which one shows
+is decided on every boot, before the login screen, because a stick can be encrypted at any boot
+after it was written.
+
 One panel, along the top, with a searchable applications menu under the portlin mark. At the right
 end sits a readout of what the machine is doing:
 
@@ -284,6 +289,15 @@ rather than stranding you at a login screen with no accounts. On a stick encrypt
 but never finished, the initramfs recognises the situation and asks for the passphrase itself.
 Otherwise no `crypttab` would exist yet, nothing would unlock the root, and cancelling a wizard
 would leave an unbootable drive.
+
+The first time each account logs in, `portlin-intro` plays a short full-screen film, drawn live: the
+mark draws itself, then its bars take this stick's real partition sizes beside the rows `lsblk`
+would print for them, with any space `portlin-expand` could still claim drawn in outline. Root is
+crimson only if it is encrypted. "Welcome" flies past in every language the installed fonts can
+draw, the last word to arrive is in the language that account chose, and the machine the stick is
+plugged into types itself in underneath. Any key or click skips it. It runs once per account
+(a stamp in `~/.local/state/portlin`), stays quiet when animations are turned off in Appearance,
+and replays any time by running `portlin-intro` by hand.
 
 </details>
 
