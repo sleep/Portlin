@@ -79,6 +79,11 @@ wizard, since everything that names a theme is a conffile. They sit in a directo
 because dpkg lets only one installed package own a path, and Xfce's own packages already own the
 canonical `/etc/xdg` locations.
 
+The wallpaper draws the stick's own partition table, with root crimson and labelled `LUKS2` only
+when root really is encrypted; on a plain stick it is white and labelled `ext4`. Which one shows
+is decided on every boot, before the login screen, because a stick can be encrypted at any boot
+after it was written.
+
 One panel, along the top, with a searchable applications menu under the portlin mark. At the right
 end sits a readout of what the machine is doing:
 

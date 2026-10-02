@@ -370,11 +370,14 @@ def test_the_greeter_shows_the_portlin_wallpaper():
         line.removeprefix("background=") for line in conf.splitlines()
         if line.startswith("background=")
     )
-    assert background.lstrip("/") in package.binary_files("portlin-desktop")
-    # The same render xfdesktop falls back to. One size has to stand in for
-    # every panel, and the greeter has no more idea than xfdesktop does what
-    # it will be plugged into.
-    assert package.DEFAULT_BACKDROP_SIZE in background
+    # The path xfdesktop falls back to, which portlin-backdrop points at the
+    # render that is true of this stick. Both of the renders it can choose
+    # have to ship, or one kind of stick logs in over lightdm's grey.
+    assert background == f"/{package.DEFAULT_BACKDROP}"
+    shipped = package.binary_files("portlin-desktop")
+    for variant in package.WALLPAPER_VARIANTS:
+        render = f"usr/share/backgrounds/portlin/{variant}-{package.DEFAULT_BACKDROP_SIZE}.png"
+        assert render in shipped
 
 
 def test_theme_files_are_not_executable():
@@ -422,17 +425,17 @@ def test_every_declared_binary_member_exists():
             assert source.exists(), f"{source} is missing for {destination}"
 
 
-def test_wallpapers_carry_every_declared_size():
-    # Every size, plus the one extra copy that sits where xfdesktop looks when
-    # nothing has configured a backdrop.
+def test_wallpapers_carry_every_declared_size_in_both_variants():
+    # Every size twice, encrypted and not, and nothing at the path xfdesktop
+    # falls back to: that is portlin-backdrop's to fill, at boot.
     destinations = package.binary_files("portlin-desktop")
-    renders = [d for d in destinations if d.startswith("usr/share/backgrounds/portlin/")]
-    assert len(renders) == len(package.WALLPAPER_SIZES)
-    assert set(destinations) - set(renders) == {
-        package.DEFAULT_BACKDROP,
-        *package.CAFFEINE_ICONS,
-        *package.MARK_ICONS,
+    renders = {d for d in destinations if d.startswith("usr/share/backgrounds/portlin/")}
+    assert renders == {
+        f"usr/share/backgrounds/portlin/{variant}-{size}.png"
+        for variant in package.WALLPAPER_VARIANTS
+        for size in package.WALLPAPER_SIZES
     }
+    assert set(destinations) - renders == {*package.CAFFEINE_ICONS, *package.MARK_ICONS}
 
 
 def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
@@ -516,9 +519,35 @@ def test_desktop_takes_over_the_backdrop_xfdesktop_falls_back_to():
     # written, so no shipped default can name the property. What it draws when
     # no such property exists is one path compiled into the binary, so that
     # path is the only place a default wallpaper can actually be put.
-    destinations = package.binary_files("portlin-desktop")
-    assert package.DEFAULT_BACKDROP in destinations
-    assert destinations[package.DEFAULT_BACKDROP].exists()
+    #
+    # The package diverts the path and leaves it to portlin-backdrop, which
+    # the postinst runs at once and the unit runs every boot after.
+    preinst = package.text_files("portlin-desktop")["DEBIAN/preinst"]
+    assert f"/{package.DEFAULT_BACKDROP}" in preinst
+    assert package.DEFAULT_BACKDROP not in package.binary_files("portlin-desktop")
+    assert package.DEFAULT_BACKDROP not in package.text_files("portlin-desktop")
+    postinst = package.text_files("portlin-desktop")["DEBIAN/postinst"]
+    assert f"/{package.BACKDROP_TOOL}" in postinst
+    assert "deb-systemd-helper enable portlin-backdrop.service" in postinst
+
+
+def test_the_backdrop_unit_runs_the_shipped_tool_before_the_greeter():
+    files = package.text_files("portlin-desktop")
+    unit = files[package.BACKDROP_UNIT]
+    assert f"ExecStart=/{package.BACKDROP_TOOL}" in unit
+    assert "Before=display-manager.service" in unit
+    assert package.BACKDROP_TOOL in files
+    assert package.BACKDROP_TOOL in package.executable_paths("portlin-desktop")
+    assert package.BACKDROP_UNIT.rsplit("/", 1)[1] in files["DEBIAN/postinst"]
+
+
+def test_postrm_clears_the_backdrop_link_before_giving_the_path_back():
+    # dpkg-divert --rename will not move Debian's file back over something
+    # still standing there, and the link is not a package file dpkg removes.
+    postrm = package.text_files("portlin-desktop")["DEBIAN/postrm"]
+    clear = postrm.index(f"rm -f /{package.DEFAULT_BACKDROP}")
+    undivert = postrm.index(f"--remove --rename")
+    assert clear < undivert
 
 
 def test_desktop_diverts_every_owned_path_symmetrically():

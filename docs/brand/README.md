@@ -11,7 +11,7 @@ The rendered PNGs are what ship; these are the files they are rendered from. Run
 | panel | `#1A212B` | Background, lit end of the gradient |
 | line | `#2C3542` | Grid, hairlines |
 | muted | `#7C8B9E` | Unencrypted partitions, labels, mark stroke |
-| paper | `#E8EDF3` | Wordmark |
+| paper | `#E8EDF3` | Wordmark, and root when it is not encrypted |
 | accent | `#FF3355` | Reserved for the encrypted root partition and `--encrypt` |
 
 Futura for the wordmark, Menlo for every technical label. The accent colour means one
@@ -38,6 +38,13 @@ the icons and the panel.
 Labels quote real system text in its real casing, never uppercased and letterspaced, and
 never a slogan. Uppercasing them also mangles the IEC units into `MIB` and `GIB`, which no
 tool prints.
+
+Every size is rendered twice. `portlin-*.png` is the picture above, for an encrypted
+stick. `portlin-plain-*.png` (`body.plain`) is the same table with root in paper and
+labelled `ext4`, and the crimson glow under the map gone neutral, because crimson on a
+root that is not encrypted would be the one thing the colour must never say. The
+lockup keeps its crimson bar in both: that is the logo, not a claim about this stick.
+`portlin-backdrop` picks between them on every boot, before the greeter draws.
 
 `wallpaper.html` is authored at 1920x1080 and scales its stage to the viewport, so any
 target size comes out exact. Deriving sizes from a rounded `--force-device-scale-factor`

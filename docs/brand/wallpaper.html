@@ -124,6 +124,27 @@
   body.ground .grid,
   body.ground .map,
   body.ground .sig { display: none; }
+
+  /* The same picture for a stick whose root is not encrypted. Crimson means
+     LUKS2 and nothing else, so here root is paper, its label names the
+     filesystem actually on it, and the warm glow under the map goes neutral.
+     The lockup keeps its crimson bar: that is the logo, not this stick. */
+  .l4 .plain { display: none; }
+  body.plain .l4 .plain { display: inline; }
+  body.plain .l4 .luks { display: none; }
+  body.plain .l4 { color: rgba(232, 237, 243, 0.7); }
+  body.plain .b4 {
+    background: linear-gradient(to right,
+      var(--paper) 0,
+      var(--paper) calc(var(--fade-start) - var(--start)),
+      rgba(232, 237, 243, 0.42) 62%,
+      rgba(232, 237, 243, 0.05) 100%);
+  }
+  body.plain #stage {
+    background:
+      radial-gradient(820px 460px at 46% 74%, rgba(232, 237, 243, 0.035), transparent 70%),
+      linear-gradient(155deg, #0E1218 0%, var(--ink) 36%, var(--panel) 74%, #141A22 100%);
+  }
 </style>
 
 <div id="stage">
@@ -138,7 +159,7 @@
   <div class="label l1">EF02 &middot; 1 MiB</div>
   <div class="label l2">EF00 &middot; 512 MiB</div>
   <div class="label l3">ext4 &middot; 1 GiB</div>
-  <div class="label l4">LUKS2 &middot; rest</div>
+  <div class="label l4"><span class="luks">LUKS2</span><span class="plain">ext4</span> &middot; rest</div>
 </div>
 
 <div class="sig">

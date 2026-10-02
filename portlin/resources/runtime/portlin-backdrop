@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Point the default backdrop at the wallpaper that tells the truth about root.
+
+The wallpaper draws the stick's partition table, and its root bar is crimson
+and labelled LUKS2 because crimson means an encrypted root. On a stick whose
+root is not encrypted that is a false claim, so portlin-desktop ships a second
+render with root in paper and labelled ext4, and this picks between them.
+
+Run before the display manager on every boot, by portlin-backdrop.service,
+and once by the package's postinst. Every boot rather than once, because a
+stick can be encrypted long after it was written: the initramfs does it, at
+boot, and that is the only place it can happen. So the answer is fixed for
+the length of a boot and can change between two of them, which is exactly
+how often this asks.
+
+The path it manages is the one xfdesktop falls back to when no xfconf
+property names the monitor, which portlin-desktop diverts and leaves empty;
+the login greeter reads the same path. It becomes a relative symlink, so it
+resolves the same way inside a chroot or a mounted image as on the stick.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import root_source  # noqa: E402
+
+BACKDROP = Path("/usr/share/backgrounds/xfce/xfce-x.svg")
+RENDERS = Path("/usr/share/backgrounds/portlin")
+# One size has to stand in for every panel until someone picks another in
+# Settings; see DEFAULT_BACKDROP_SIZE in portlin/package.py.
+SIZE = "1920x1080"
+
+
+def render_for(encrypted: bool) -> Path:
+    name = f"portlin-{SIZE}.png" if encrypted else f"portlin-plain-{SIZE}.png"
+    return RENDERS / name
+
+
+def is_encrypted(source: str) -> bool:
+    """Whether root is mounted from a device-mapper node, as it is when LUKS
+    opened it. An unknown source counts as unencrypted: understating the
+    protection a stick has is a smaller wrong than claiming one it lacks."""
+    return source.startswith("/dev/mapper/")
+
+
+def point(link: Path, target: Path) -> bool:
+    """Make link a relative symlink to target. True if anything changed.
+
+    Swapped in with a rename, so a greeter or xfdesktop starting at the same
+    moment sees the old picture or the new one, never a missing file.
+    """
+    relative = os.path.relpath(target, link.parent)
+    if link.is_symlink() and os.readlink(link) == relative:
+        return False
+    staged = link.with_name(f".{link.name}.portlin-new")
+    staged.unlink(missing_ok=True)
+    staged.symlink_to(relative)
+    os.replace(staged, link)
+    return True
+
+
+def main(root: Path = Path("/")) -> int:
+    target = render_for(is_encrypted(root_source()))
+    if not (root / target.relative_to("/")).exists():
+        # Renders not installed: a partly removed package, or a headless
+        # stick. Pointing at nothing would be worse than leaving it alone.
+        return 0
+    link = root / BACKDROP.relative_to("/")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    point(link, root / target.relative_to("/"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

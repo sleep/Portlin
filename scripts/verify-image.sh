@@ -611,13 +611,33 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         && pass "xfdesktop's default backdrop is diverted to portlin" \
         || fail "no diversion of /$BACKDROP (portlin-desktop's preinst did not run)"
 
-    # By content, not by name. The path keeps its .svg suffix so that dpkg and
+    # A relative symlink portlin-backdrop maintains, so it resolves inside
+    # this mount exactly as it does on the stick. Followed and checked by
+    # content, not by name: the path keeps its .svg suffix so that dpkg and
     # xfdesktop4-data still agree on what is being diverted, and xfdesktop
     # sniffs the bytes rather than the extension, so PNG magic is the only
-    # honest evidence that the file there is portlin's render.
+    # honest evidence that what is there is portlin's render.
+    test -L "$MNT/$BACKDROP" \
+        && pass "the default backdrop is portlin-backdrop's link" \
+        || fail "/$BACKDROP is not a symlink (portlin-desktop's postinst did not set it)"
+
     head -c 8 "$MNT/$BACKDROP" 2>/dev/null | grep -qa PNG \
         && pass "portlin's render is installed as the default backdrop" \
-        || fail "/$BACKDROP is not a PNG (portlin's render did not land there)"
+        || fail "/$BACKDROP does not lead to a PNG (a dangling link, or no render)"
+
+    # Both renders the link can choose between, because which one is right is
+    # only known at boot, and a stick can be encrypted after it was written.
+    for variant in portlin portlin-plain; do
+        test -f "$MNT/usr/share/backgrounds/portlin/$variant-1920x1080.png" \
+            && pass "the $variant wallpaper is installed" \
+            || fail "$variant-1920x1080.png is missing (that kind of stick has no wallpaper)"
+    done
+
+    # Without the unit the link keeps whatever write's chroot decided, which
+    # is a guess, and goes stale the first time the stick is encrypted.
+    test -L "$MNT/etc/systemd/system/multi-user.target.wants/portlin-backdrop.service" \
+        && pass "portlin-backdrop runs every boot" \
+        || fail "portlin-backdrop.service is not enabled (the wallpaper can claim LUKS2 on a plain root)"
 
     test -e "$MNT/$BACKDROP.distrib" \
         && pass "Debian's own backdrop is preserved beside it" \

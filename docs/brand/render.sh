@@ -28,7 +28,9 @@ shot() {  # page scale WxH out
 # Same trick for the boot background: one class turns the wallpaper into the
 # bare ground GRUB draws the menu and the boot log on.
 { echo '<body class="ground">'; cat wallpaper.html; } > .wallpaper-ground.html
-trap 'rm -f .lockup-light.html .wallpaper-ground.html' EXIT
+# And again for a stick whose root is not encrypted: root in paper, not crimson.
+{ echo '<body class="plain">'; cat wallpaper.html; } > .wallpaper-plain.html
+trap 'rm -f .lockup-light.html .wallpaper-ground.html .wallpaper-plain.html' EXIT
 
 shot logo.html         2 256,256 portlin-logo.png
 # 1x and opaque, unlike every other asset here: this one is decoded by GRUB's
@@ -49,6 +51,7 @@ shot .lockup-light.html 2 524,172 portlin-lockup-light.png
 # 2560x1440 that way lands on 2559x1440.
 wallpaper() {  # W H scale windowW windowH
     shot wallpaper.html "$3" "$4,$5" "portlin-$1x$2.png"
+    shot .wallpaper-plain.html "$3" "$4,$5" "portlin-plain-$1x$2.png"
 }
 wallpaper 1365 768  1 1365 768
 wallpaper 1920 1080 1 1920 1080
