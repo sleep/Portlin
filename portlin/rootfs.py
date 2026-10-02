@@ -174,6 +174,11 @@ def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
     chroot.run(["systemctl", "enable", "NetworkManager.service"], check=False)
     for timer in ("apt-daily.timer", "apt-daily-upgrade.timer", "man-db.timer"):
         chroot.run(["systemctl", "disable", timer], check=False)
+    # openssh-server enables itself on install. A stick should not listen for
+    # logins until its owner asks the first-boot wizard for that, and it has
+    # no host keys until then anyway: _anonymise removes them.
+    for unit in ("ssh.service", "ssh.socket"):
+        chroot.run(["systemctl", "disable", unit], check=False)
 
 
 def _anonymise(runner: Runner, chroot: Chroot) -> None:

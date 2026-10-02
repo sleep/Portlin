@@ -100,6 +100,11 @@ NETWORK = [
     "iw",
     "iproute2",
     "openssh-client",
+    # Both offered by the first-boot wizard, which runs with no network, so
+    # they have to be on the stick already. The SSH server ships disabled and
+    # without host keys (see rootfs); ufw ships installed but switched off.
+    "openssh-server",
+    "ufw",
     "curl",
     "wget",
     "ca-certificates",
@@ -181,6 +186,9 @@ DESKTOP = [
     "xfce4-terminal",
     "xfce4-power-manager",
     "xfce4-screenshooter",
+    # The locker the wizard's screen-lock settings configure. xflock4 prefers
+    # it over light-locker, and naming it here is what makes it the one there.
+    "xfce4-screensaver",
     # The two plugins portlin's own panel layout names. Both arrive as Depends
     # of xfce4-goodies today, but a line in someone else's package is not a
     # promise, and this file exists precisely so the contents are not a

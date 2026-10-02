@@ -10,7 +10,7 @@ Two pieces of test-only instrumentation are added to a COPY of the image:
 
   * console=ttyS0 on the kernel command line, so the kernel, the initramfs and
     systemd all narrate to a file.
-  * a systemd drop-in pointing the wizard at ttyS0 instead of tty1, so whiptail
+  * a systemd drop-in pointing the wizard at ttyS0 instead of tty1, so it
     draws where this script can both read it and answer it.
 
 Neither changes any logic under test; they change which terminal it speaks to.
@@ -201,9 +201,9 @@ class Serial:
                 label: str = "", attempts: int = 8) -> bool:
         """Press ``key`` until the screen actually changes.
 
-        A single keystroke sent the moment a dialog's text appears arrives
-        before whiptail has finished setting up its input, and is silently
-        swallowed -- leaving a live wizard that looks completely hung. Pressing
+        A single keystroke sent the moment a screen's text appears could
+        arrive before the program had finished setting up its input, and be
+        silently swallowed -- leaving a live wizard that looks completely hung. Pressing
         again is harmless (it re-accepts the same default), so retry until the
         next screen shows up.
         """
@@ -297,19 +297,27 @@ def main() -> int:
         # outcome is the real test; reading the screens was only ever a way to
         # find out where it went wrong.
         shots = Path("/out") if Path("/out").is_dir() else Path("/tmp")
+        # One Enter per screen and never more: the wizard is curses, so a key
+        # pressed early waits in the terminal for the next screen rather than
+        # being dropped, and a spare Enter would answer a question unseen.
+        # qemu's network is wired, so the Wi-Fi list never appears, and its
+        # virtual display has no drivers to offer.
         sequence = [
             ("welcome", "\r", 45),
             ("keyboard", "\r", 20),
             ("language", "\r", 20),
-            ("timezone region", "\r", 20),
-            ("timezone city", "\r", 20),
-            ("hostname", "\r", 20),
-            ("full name", "\r", 20),
-            ("username", "\r", 20),
-            ("password", PASSPHRASE + "\r", 20),
-            ("password again", PASSPHRASE + "\r", 25),
-            ("autologin", "\r", 20),
-            ("EXPAND offer", "\r", 30),
+            ("time zone", "\r", 20),
+            ("hardware clock", "\r", 20),
+            ("network", "\r", 25),
+            ("full name", "\r", 10),
+            ("username", "\r", 10),
+            ("password", PASSPHRASE + "\r", 10),
+            ("password again", PASSPHRASE + "\r", 20),
+            ("security", "\r", 20),
+            ("appearance", "\r", 20),
+            ("hardware", "\r", 30),
+            ("services", "\r", 20),
+            ("storage", "\r", 30),
             ("summary", "\r", 60),
         ]
         for index, (label, keys, wait) in enumerate(sequence):

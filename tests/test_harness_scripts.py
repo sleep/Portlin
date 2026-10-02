@@ -164,7 +164,7 @@ class TestExpandHarnessLoadsTheWizardAsWritten:
         seeded = {"Path", "re", "os", "subprocess", "log", "ask_password", "message", "run"}
         known = set(namespace) | seeded | set(dir(builtins))
 
-        block = source[source.index("def _resize_mapping"):source.index("def step_autologin")]
+        block = source[source.index("def _root_devices"):source.index("def finalise_encryption")]
         tree = ast.parse(block)
         bound = {node.name for node in ast.walk(tree)
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}

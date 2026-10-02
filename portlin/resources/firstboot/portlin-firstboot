@@ -3,28 +3,38 @@
 # Part of portlin. Copyright (C) 2026 the portlin authors.
 # Licensed under the GNU General Public License, version 3 or later.
 # See <https://www.gnu.org/licenses/gpl-3.0.html>.
-"""Portlin first-boot setup wizard.
+"""Portlin first-boot setup.
 
-Runs once on tty1 before the display manager, and gives the stick its identity:
-account, hostname, locale, keyboard, timezone, and optionally a new LUKS
-passphrase so the person holding the stick owns the key rather than whoever
-built it.
+Runs once on tty1 before the display manager, and gives the stick its identity
+and its defaults: account, language, keyboard, time, network, security, the
+desktop's look, drivers, services and storage. Optionally a new LUKS
+passphrase too, so the person holding the stick owns the key rather than
+whoever built it.
 
-Deliberately stdlib-only and whiptail-driven rather than graphical. This runs
-before X on hardware nobody has tested, where a text UI on tty1 is the only
-thing guaranteed to work.
+A full-screen curses program rather than a graphical one. This runs before X
+on hardware nobody has tested, where a text UI on tty1 is the only thing
+guaranteed to work. curses rather than a chain of whiptail dialogs because it
+is still the standard library, and it is what lets setup be one screen with a
+step list, a way back to any earlier answer, settings grouped where they can be
+read together, and portlin's own colours on the Linux console.
 """
 
 from __future__ import annotations
 
+import contextlib
+import curses
 import grp
 import json
+import locale
 import os
 import re
 import signal
 import subprocess
 import sys
+import textwrap
+import time
 import traceback
+import uuid
 from pathlib import Path
 
 SENTINEL = Path("/var/lib/portlin/firstboot-pending")
@@ -45,7 +55,6 @@ WEAR_CONFIG = Path("/etc/portlin/wear.conf")
 # inert while visudo is deciding whether to allow it.
 SUDOERS_DROPIN = Path("/etc/sudoers.d/50-portlin-nopasswd")
 SUDOERS_NOPASSWD_RULE = "{username} ALL=(ALL) NOPASSWD: ALL\n"
-BACKTITLE = "Portlin first-boot setup"
 
 # The packaged migration tool. Probed rather than assumed, for the reason
 # GNOME_KEYRING_DAEMON is: this wizard is frozen at write time, and the tool
@@ -54,6 +63,141 @@ BACKTITLE = "Portlin first-boot setup"
 # boundary that survives the two moving at different speeds.
 MIGRATE_TOOL = "/usr/bin/portlin-migrate"
 MIGRATION_PLAN = Path("/run/portlin/migrate/plan.json")
+
+# The other packaged tools setup hands work to, probed for the same reason.
+# portlin-install knows which drivers fit this hardware and how to install
+# them; portlin-wear owns the storage-wear switches the Settings window shows.
+INSTALL_TOOL = "/usr/bin/portlin-install"
+WEAR_TOOL = "/usr/bin/portlin-wear"
+SSHD = "/usr/sbin/sshd"
+UFW = "/usr/sbin/ufw"
+
+# Wi-Fi joined during setup lives under /run until the summary is accepted, so
+# a postponed setup leaves no network password on the stick. NetworkManager
+# reads profiles and configuration from /run as well as from /etc.
+NM_RUN_CONNECTIONS = Path("/run/NetworkManager/system-connections")
+NM_CONNECTIONS = Path("/etc/NetworkManager/system-connections")
+NM_RUN_MAC_CONF = Path("/run/NetworkManager/conf.d/50-portlin-mac.conf")
+NM_MAC_CONF = Path("/etc/NetworkManager/conf.d/50-portlin-mac.conf")
+MAC_CONF = (
+    "# Written by portlin-firstboot. The hardware address this stick shows each\n"
+    "# network, so that it cannot be followed from one network to the next.\n"
+    "[device]\n"
+    "wifi.scan-rand-mac-address=yes\n"
+    "\n"
+    "[connection-mac-randomization]\n"
+    "wifi.cloned-mac-address={mode}\n"
+    "ethernet.cloned-mac-address={mode}\n"
+)
+
+ADJTIME = Path("/etc/adjtime")
+ZRAM_CONFIG = Path("/etc/default/zramswap")
+
+# Defaults for channels portlin does not otherwise ship, in the directory the
+# desktop's XDG_CONFIG_DIRS puts first. A whole channel file is only written
+# for a program that has no system-wide one of its own, because xfconf takes
+# a channel from the first directory that has it rather than merging them.
+XFCONF_DEFAULTS = Path("/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml")
+SCREENSAVER_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<!-- Written by portlin-firstboot. -->
+<channel name="xfce4-screensaver" version="1.0">
+  <property name="saver" type="empty">
+    <property name="enabled" type="bool" value="{idle}"/>
+    <property name="mode" type="int" value="0"/>
+    <property name="idle-activation" type="empty">
+      <property name="enabled" type="bool" value="{idle}"/>
+      <property name="delay" type="int" value="{minutes}"/>
+    </property>
+  </property>
+  <property name="lock" type="empty">
+    <property name="enabled" type="bool" value="{lock}"/>
+    <property name="saver-activation" type="empty">
+      <property name="enabled" type="bool" value="{idle}"/>
+      <property name="delay" type="int" value="0"/>
+    </property>
+    <property name="sleep-activation" type="bool" value="{suspend}"/>
+  </property>
+</channel>
+"""
+POWER_MANAGER_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<!-- Written by portlin-firstboot. -->
+<channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
+    <property name="lock-screen-suspend-hibernate" type="bool" value="{suspend}"/>
+  </property>
+</channel>
+"""
+
+# Display scaling is decided at each login rather than once here, because the
+# stick meets a different screen on every machine it is plugged into.
+SCALE_CONFIG = Path("/etc/portlin/display.conf")
+SCALE_SCRIPT = Path("/usr/local/libexec/portlin-display-scale")
+SCALE_AUTOSTART = Path("/etc/xdg/autostart/portlin-display-scale.desktop")
+SCALE_SCRIPT_TEXT = r"""#!/bin/sh
+# Written by portlin-firstboot. Sets the desktop's scale for the screen this
+# stick is plugged into, at every login, from /etc/portlin/display.conf.
+mode=$(sed -n 's/^scale=//p' /etc/portlin/display.conf 2>/dev/null)
+case "$mode" in
+    1|2) scale=$mode ;;
+    *)
+        # Width in pixels and millimetres of the first connected screen.
+        # Projectors and virtual machines report 0 mm, which keeps 1x.
+        set -- $(xrandr --query 2>/dev/null | awk '/ connected/ {
+            w = 0
+            for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+/) { split($i, p, /[x+]/); w = p[1] }
+            mm = $(NF - 2); sub(/mm$/, "", mm)
+            if (w > 0 && mm + 0 > 0) { print w, mm + 0; exit }
+        }')
+        scale=1
+        if [ -n "$1" ] && [ "$1" -ge 2560 ]; then
+            # About 180 pixels per inch is where 1x text stops being readable.
+            ppi=$(( $1 * 254 / ($2 * 10) ))
+            [ "$ppi" -ge 180 ] && scale=2
+        fi ;;
+esac
+xfconf-query -c xsettings -p /Gdk/WindowScalingFactor -n -t int -s "$scale"
+"""
+SCALE_AUTOSTART_TEXT = """[Desktop Entry]
+Type=Application
+Name=Display scale
+Comment=Match the desktop's scale to this screen
+Exec=/usr/local/libexec/portlin-display-scale
+NoDisplay=true
+OnlyShowIn=XFCE;
+"""
+
+# An owner's "if found" note. Shown on the boot menu, which every stick draws,
+# and printed by the initramfs above the passphrase prompt, which is the only
+# screen a finder of an encrypted stick ever gets to.
+FOUND_MESSAGE = Path("/etc/portlin/found-message")
+FOUND_HOOK = Path("/etc/initramfs-tools/hooks/portlin-found-message")
+FOUND_PREMOUNT = Path("/etc/initramfs-tools/scripts/init-premount/portlin-found-message")
+FOUND_LIMIT = 72
+GRUB_THEME = Path("/boot/grub/themes/portlin/theme.txt")
+FOUND_BEGIN = "# portlin-found-message begin"
+FOUND_END = "# portlin-found-message end"
+FOUND_HOOK_TEXT = """#!/bin/sh
+# Written by portlin-firstboot: carry the owner's message into the initramfs.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+[ -s /etc/portlin/found-message ] || exit 0
+mkdir -p "$DESTDIR/etc/portlin"
+cp /etc/portlin/found-message "$DESTDIR/etc/portlin/found-message"
+"""
+FOUND_PREMOUNT_TEXT = """#!/bin/sh
+# Written by portlin-firstboot: show the owner's message before the
+# passphrase prompt, which is all a finder of an encrypted stick can see.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+if [ -s /etc/portlin/found-message ]; then
+    echo
+    cat /etc/portlin/found-message
+    echo
+fi
+exit 0
+"""
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
@@ -152,6 +296,8 @@ ICON_THEME_TARGETS = {
     ),
 }
 
+# Offered first in the language and keyboard lists, ahead of the full sets
+# read from the system, so most people never need the search.
 COMMON_LOCALES = [
     ("en_US.UTF-8", "English (United States)"),
     ("en_GB.UTF-8", "English (United Kingdom)"),
@@ -181,10 +327,47 @@ COMMON_KEYMAPS = [
     ("pl", "Polish"),
     ("ru", "Russian"),
 ]
+XKB_RULES = Path("/usr/share/X11/xkb/rules/base.lst")
+SUPPORTED_LOCALES = Path("/usr/share/i18n/SUPPORTED")
+
+# The switches portlin-wear accepts, worded for a first look rather than the
+# Settings window's terser rows.
+WEAR_ROWS = [
+    ("journal", "Keep system logs", "System logs otherwise stay in memory and are gone after a restart."),
+    ("portlin_logs", "Keep setup logs", "Setup and migration logs are otherwise not saved to the drive."),
+    ("maintenance", "Daily maintenance", "Refreshes package lists and manual pages once a day. Each run writes to the drive."),
+    ("ram_cache", "Caches in RAM", "Desktop and browser caches live in memory and are discarded at logout, sparing the flash."),
+    ("downloads", "Keep package downloads", "Keeps what apt downloads, so a reinstall needs no network."),
+]
+
+# What the hardware screen calls the entries portlin-install suggests.
+DRIVER_LABELS = {
+    "nvidia-driver": "NVIDIA driver",
+    "intel-graphics": "Intel video acceleration",
+    "amd-graphics": "AMD video acceleration",
+    "broadcom-wifi": "Broadcom Wi-Fi driver",
+}
+DRIVER_HELP = {
+    "nvidia-driver": "NVIDIA's own driver, chosen for this card. A large download, built on this "
+                     "stick, and it needs a restart. Without it the open nouveau driver runs the screen.",
+    "intel-graphics": "Hardware video decoding and Vulkan for Intel graphics. A small download.",
+    "amd-graphics": "Hardware video decoding and Vulkan for AMD graphics. A small download.",
+    "broadcom-wifi": "Only for Broadcom chips the built-in driver does not handle. Skip it if Wi-Fi works.",
+}
+ENTRY_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+POSTPONE_TEXT = (
+    "Setup runs again the next time this stick boots, from the start.\n\n"
+    "There is no user account yet, so nobody can log in until it is finished."
+)
 
 
 class Cancelled(Exception):
-    """The user pressed Cancel or Esc."""
+    """The user chose to postpone setup."""
+
+
+class Back(Exception):
+    """Esc: return to the previous screen."""
 
 
 def claim_console(quiet: bool) -> None:
@@ -193,7 +376,7 @@ def claim_console(quiet: bool) -> None:
     Three separate things write to this terminal during boot and each needs its
     own silencer: the kernel's printk stream, systemd's service status lines, and
     plymouth's splash. Left alone they scribble straight through the wizard's
-    dialogs, which looks like a crash rather than a prompt.
+    screens, which looks like a crash rather than a prompt.
 
     Everything here is best-effort and reversible. Failing to quiet the console
     is a cosmetic problem; failing to restore it would leave the machine
@@ -232,12 +415,18 @@ def claim_console(quiet: bool) -> None:
         log("could not toggle systemd console status")
 
 
-def log(message: str) -> None:
+def log(message: str, *, force: bool = False) -> None:
+    """Note what setup did, if the owner keeps setup logs.
+
+    force is for the one thing worth a write either way: why setup failed,
+    which the failure screen points at.
+    """
     try:
-        if "portlin_logs=1" not in WEAR_CONFIG.read_text().splitlines():
+        if not force and "portlin_logs=1" not in WEAR_CONFIG.read_text().splitlines():
             return
     except OSError:
-        return
+        if not force:
+            return
     try:
         with LOG.open("a") as handle:
             handle.write(message.rstrip() + "\n")
@@ -252,10 +441,9 @@ def run(argv: list[str], *, check: bool = True, stdin: str | None = None) -> sub
     unit gives it tty1 with StandardInput=tty-force and a child that inherits
     that has a controlling terminal to prompt on. cryptsetup is the one that
     does: given a terminal it opens /dev/tty and asks for the passphrase itself,
-    over the top of whatever dialog is on screen, and waits. With a pipe it
-    fails with "Nothing to read on input" instead, which lets the caller decide
-    what to ask and how -- the assumption every fallback in _resize_mapping is
-    built on.
+    over the top of whatever is on screen, and waits. With a pipe it fails with
+    "Nothing to read on input" instead, which lets the caller decide what to
+    ask and how -- the assumption every fallback in _resize_mapping is built on.
     """
     log(f"run: {' '.join(argv)}")
     proc = subprocess.run(argv, input=stdin or "", capture_output=True, text=True)
@@ -266,89 +454,1015 @@ def run(argv: list[str], *, check: bool = True, stdin: str | None = None) -> sub
     return proc
 
 
-# --------------------------------------------------------------------------
-# whiptail wrappers
-# --------------------------------------------------------------------------
+def _write_private(path: Path, text: str) -> None:
+    """Write a file that holds a secret, never readable by anyone but root.
 
-def _whiptail(args: list[str], *, capture: bool = False) -> str:
-    """Invoke whiptail. Selections come back on stderr, which is whiptail's convention."""
-    argv = ["whiptail", "--backtitle", BACKTITLE, *args]
-    proc = subprocess.run(argv, stderr=subprocess.PIPE, text=True)
-    if proc.returncode == 255:
-        raise Cancelled()
-    if proc.returncode != 0 and capture:
-        raise Cancelled()
-    return (proc.stderr or "").strip()
-
-
-def _box_height(text: str, minimum: int = 12) -> int:
-    """Height needed to show ``text`` in full.
-
-    whiptail silently clips whatever does not fit rather than scrolling or
-    complaining, so a fixed height quietly swallows the end of any longer
-    message. The summary screen lost both its last row and the question the
-    buttons were answering, which is a bad thing not to notice.
+    Created with its final mode rather than chmod-ed afterwards, so there is
+    no moment in which a network password sits in a world-readable file.
     """
-    lines = text.count("\n") + 1
-    return max(minimum, min(lines + 8, 22))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.chmod(path, 0o600)
+
+
+def _write(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    os.chmod(path, mode)
+
+
+# --------------------------------------------------------------------------
+# The screen
+# --------------------------------------------------------------------------
+
+# Brand tokens. On the Linux console these replace the eight palette slots
+# outright, so ink is the console's black and crimson its red; elsewhere they
+# are approximated from the 256-colour cube.
+INK, PANEL, LINE, MUTED, PAPER, ACCENT = "12161C", "1A212B", "2C3542", "7C8B9E", "E8EDF3", "FF3355"
+SELECT, DIM = "232B37", "B9C3CF"
+LINUX_PALETTE = (INK, ACCENT, PANEL, LINE, MUTED, SELECT, DIM, PAPER)
+SLOTS_LINUX = {"ink": 0, "accent": 1, "panel": 2, "line": 3, "muted": 4, "select": 5, "dim": 6, "paper": 7}
+SLOTS_256 = {"ink": 233, "accent": 197, "panel": 234, "line": 237, "muted": 103, "select": 235, "dim": 250, "paper": 255}
+SLOTS_8 = {"ink": 0, "accent": 1, "panel": 0, "line": 4, "muted": 6, "select": 4, "dim": 7, "paper": 7}
+ROLES = {
+    "text": ("paper", "ink"),
+    "muted": ("muted", "ink"),
+    "accent": ("accent", "ink"),
+    "side": ("paper", "panel"),
+    "side_muted": ("muted", "panel"),
+    "side_accent": ("accent", "panel"),
+    "focus": ("paper", "line"),
+    "focus_muted": ("dim", "line"),
+    "focus_accent": ("accent", "line"),
+    "field": ("paper", "panel"),
+    "button": ("paper", "line"),
+    "button_focus": ("paper", "accent"),
+    "bar": ("ink", "muted"),
+    "bar_accent": ("ink", "accent"),
+}
+# whiptail's colours for the screens the migration tool draws itself, named
+# by the console slots LINUX_PALETTE repaints: black is ink, red crimson,
+# green the panel, brown the rule, blue muted and lightgray paper.
+NEWT_COLORS = (
+    "root=lightgray,black window=lightgray,green border=blue,green "
+    "title=lightgray,green textbox=lightgray,green button=lightgray,brown "
+    "actbutton=lightgray,red compactbutton=lightgray,green listbox=lightgray,green "
+    "actlistbox=lightgray,brown actsellistbox=lightgray,red sellistbox=lightgray,green "
+    "entry=lightgray,brown disentry=blue,green checkbox=lightgray,green "
+    "actcheckbox=lightgray,brown emptyscale=,brown fullscale=,red "
+    "helpline=blue,black roottext=blue,black"
+)
+
+# Only glyphs the Linux console's default font was seen to draw: Latin-1, the
+# arrows, the ellipsis and the black square. It has no block elements -- half
+# blocks came out as diamonds on a real boot -- so every bar, marker and fill
+# is a run of spaces in a background colour instead, which any font can draw.
+UNICODE_GLYPHS = {
+    "done": "\u25a0", "todo": "\u00b7", "empty": "\u00b7", "fail": "\u00d7",
+    "more": "\u2026", "keys": "\u2191\u2193", "turn": "\u2190\u2192",
+}
+ASCII_GLYPHS = {
+    "done": "*", "todo": "-", "empty": ".", "fail": "x",
+    "more": "...", "keys": "up/down", "turn": "left/right",
+}
+SPINNER = "|/-\\"
+
+SIDEBAR = 24
+# Narrower than this and the step list gives way to a one-line header.
+SIDEBAR_MIN_COLUMNS = 72
+
+
+class Field:
+    """One line of a form."""
+
+    def __init__(self, key: str, label: str, value: str = "", *, secret: bool = False,
+                 hint: str = "", limit: int = 64) -> None:
+        self.key, self.label, self.value = key, label, value
+        self.secret, self.hint, self.limit = secret, hint, limit
+
+
+class Row:
+    """One setting on a settings screen: a choice, or a line of text.
+
+    help is a string, or a function of every row's current value returning a
+    string, or (string, warning) to draw it in crimson. That is what lets the
+    sudo row say something stronger once automatic login has been switched on
+    two rows above it.
+    """
+
+    def __init__(self, key: str, label: str, choices=None, value=None, *, help="",
+                 text: bool = False, placeholder: str = "", limit: int = 64,
+                 enabled: bool = True) -> None:
+        self.key, self.label, self.choices = key, label, list(choices or [])
+        self.value = value if value is not None or text else self.choices[0][0]
+        if text and self.value is None:
+            self.value = ""
+        self.help, self.text, self.placeholder = help, text, placeholder
+        self.limit, self.enabled = limit, enabled
+
+    def describe(self, values: dict) -> tuple[str, bool]:
+        described = self.help(values) if callable(self.help) else self.help
+        if isinstance(described, tuple):
+            return described
+        return described or "", False
+
+    def shown(self, value) -> str:
+        if self.text:
+            return value
+        return dict(self.choices).get(value, str(value))
+
+
+class UI:
+    """portlin's setup screen: a step list on the left, one question on the right.
+
+    Every widget draws the whole screen and loops on keys until it has an
+    answer. Esc raises Back, which the wizard turns into the previous step;
+    F10 or Ctrl-C asks whether to postpone, and raises Cancelled if so.
+    """
+
+    def __init__(self) -> None:
+        self.screen = None
+        self.sections: list[tuple[str, str]] = []
+        self.current = ""
+        self.visited: set[str] = set()
+        self.postpone_allowed = True
+        self.glyphs = ASCII_GLYPHS
+        self.colors: dict[str, int] = {}
+        self.linux_palette = False
+        self._postponing = False
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def start(self) -> None:
+        # Esc is Back, and ncurses otherwise waits a full second to be sure it
+        # is not the start of an arrow key.
+        os.environ.setdefault("ESCDELAY", "25")
+        try:
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error:
+            pass
+        if "utf" not in (locale.getpreferredencoding(False) or "").lower():
+            # A unit started with no LANG gets the C locale, in which curses
+            # can neither draw the mark nor read a typed accent. C.UTF-8 is
+            # built into Debian's libc, so it is there whatever locale.gen says.
+            try:
+                locale.setlocale(locale.LC_ALL, "C.UTF-8")
+            except locale.Error:
+                pass
+        if "utf" in (locale.getpreferredencoding(False) or "").lower():
+            self.glyphs = UNICODE_GLYPHS
+        try:
+            self.screen = curses.initscr()
+        except curses.error:
+            # A TERM with no terminfo entry. Every place this runs is a Linux
+            # VT, and that entry is in ncurses-base, which nothing removes.
+            os.environ["TERM"] = "linux"
+            self.screen = curses.initscr()
+        curses.noecho()
+        # raw rather than cbreak: Ctrl-C arrives as a key, which asks whether
+        # to postpone, instead of a SIGINT that could land while useradd or
+        # chpasswd is half done.
+        curses.raw()
+        self.screen.keypad(True)
+        self._cursor(False)
+        self._colours()
+
+    def stop(self) -> None:
+        if self.screen is None:
+            return
+        try:
+            self.screen.erase()
+            self.screen.refresh()
+            curses.noraw()
+            self.screen.keypad(False)
+            curses.echo()
+            curses.endwin()
+        except curses.error:
+            pass
+        self.screen = None
+        self._reset_palette()
+
+    @contextlib.contextmanager
+    def suspended(self):
+        """Hand the bare terminal to a child that draws its own screens."""
+        if self.screen is None:
+            yield
+            return
+        curses.def_prog_mode()
+        curses.endwin()
+        self._emit("\033[H\033[2J")
+        try:
+            yield
+        finally:
+            curses.reset_prog_mode()
+            self.repaint()
+
+    def repaint(self) -> None:
+        """Redraw from nothing, after anything else has written to the console.
+
+        setupcon reloads the console font and keymap, and children run in the
+        foreground draw over everything, so the next frame cannot assume the
+        terminal still holds the last one.
+        """
+        if self.screen is None:
+            return
+        if self.linux_palette:
+            self._set_linux_palette()
+        self.screen.clear()
+        self.screen.refresh()
+
+    def _emit(self, text: str) -> None:
+        try:
+            os.write(sys.stdout.fileno(), text.encode())
+        except (OSError, ValueError):
+            pass
+
+    def _cursor(self, visible: bool) -> None:
+        try:
+            curses.curs_set(1 if visible else 0)
+        except curses.error:
+            pass
+
+    def _colours(self) -> None:
+        if not curses.has_colors():
+            self.colors = {
+                "text": curses.A_NORMAL, "muted": curses.A_DIM, "accent": curses.A_BOLD,
+                "side": curses.A_NORMAL, "side_muted": curses.A_DIM, "side_accent": curses.A_BOLD,
+                "focus": curses.A_REVERSE, "focus_muted": curses.A_REVERSE,
+                "focus_accent": curses.A_REVERSE | curses.A_BOLD, "field": curses.A_UNDERLINE,
+                "button": curses.A_NORMAL, "button_focus": curses.A_REVERSE,
+                "bar": curses.A_REVERSE, "bar_accent": curses.A_REVERSE,
+            }
+            return
+        curses.start_color()
+        term = os.environ.get("TERM", "")
+        if term.startswith("linux"):
+            self._set_linux_palette()
+            slots = SLOTS_LINUX
+            # The migration tool's whiptail screens inherit this, and come out
+            # in the same palette as everything around them.
+            os.environ["NEWT_COLORS"] = NEWT_COLORS
+        elif curses.COLORS >= 256:
+            slots = SLOTS_256
+        else:
+            slots = SLOTS_8
+        for number, (role, (fg, bg)) in enumerate(ROLES.items(), start=1):
+            curses.init_pair(number, slots[fg], slots[bg])
+            self.colors[role] = curses.color_pair(number)
+        self.screen.bkgd(" ", self.colors["text"])
+
+    def _set_linux_palette(self) -> None:
+        # OSC P sets one console palette slot. The bright half gets the same
+        # colours, so text the console decides to embolden keeps its colour.
+        self._emit("".join(f"\033]P{index:X}{colour}" for index, colour in enumerate(LINUX_PALETTE * 2)))
+        self.linux_palette = True
+
+    def _reset_palette(self) -> None:
+        if self.linux_palette:
+            self._emit("\033]R")
+            self.linux_palette = False
+
+    # -- drawing ------------------------------------------------------------
+
+    def c(self, role: str) -> int:
+        return self.colors.get(role, 0)
+
+    def g(self, name: str) -> str:
+        return self.glyphs[name]
+
+    def put(self, y: int, x: int, text: str, attr: int = 0, width: int | None = None) -> None:
+        height, columns = self.screen.getmaxyx()
+        if y < 0 or y >= height or x < 0 or x >= columns:
+            return
+        limit = columns - x if width is None else min(width, columns - x)
+        if limit <= 0:
+            return
+        try:
+            self.screen.addstr(y, x, text[:limit], attr)
+        except curses.error:
+            # Writing the bottom-right cell draws it and then raises, because
+            # the cursor has nowhere to go.
+            pass
+
+    def block(self, y: int, x: int, width: int, role: str) -> None:
+        """A solid run of colour, drawn as spaces so it needs nothing from the font."""
+        self.put(y, x, " " * width, self.c(role))
+
+    def wrap(self, text: str, width: int) -> list[str]:
+        lines: list[str] = []
+        for paragraph in text.split("\n"):
+            lines += textwrap.wrap(paragraph, max(width, 10)) or [""]
+        return lines
+
+    def frame(self, title: str, text: str = "", hints=()) -> tuple[int, int, int, int]:
+        """Clear the screen, draw the chrome, and return the content area.
+
+        The area is (top, left, height, width), starting below the title and
+        the wrapped introduction.
+        """
+        self.screen.erase()
+        height, columns = self.screen.getmaxyx()
+        if columns >= SIDEBAR_MIN_COLUMNS and height >= 20:
+            self._sidebar(height)
+            left, top = SIDEBAR + 3, 1
+        else:
+            self._header(columns)
+            left, top = 2, 2
+        width = max(columns - left - 2, 20)
+        self.put(top, left, title, self.c("text") | curses.A_BOLD)
+        y = top + 2
+        if text:
+            for line in self.wrap(text, width):
+                self.put(y, left, line, self.c("muted"))
+                y += 1
+            y += 1
+        self._footer(height, columns, left, hints)
+        return y, left, max(height - 2 - y, 3), width
+
+    def _sidebar(self, height: int) -> None:
+        side = self.c("side")
+        for y in range(height):
+            self.put(y, 0, " " * SIDEBAR, side)
+        # The mark: the stick's four partitions from the device start, in their
+        # true rank order, the encrypted root last and crimson.
+        for row, width in enumerate((3, 6, 8, 12)):
+            self.block(1 + row, 2, width, "bar_accent" if row == 3 else "bar")
+        self.put(6, 2, "portlin", side | curses.A_BOLD)
+        self.put(7, 2, "first-boot setup", self.c("side_muted"))
+        y = 9
+        for key, label in self.sections:
+            if y >= height - 2:
+                break
+            if key == self.current:
+                self.put(y, 0, " " * SIDEBAR, self.c("focus"))
+                self.block(y, 0, 1, "bar_accent")
+                self.put(y, 3, label, self.c("focus") | curses.A_BOLD)
+            elif key in self.visited:
+                self.put(y, 1, self.g("done"), self.c("side_muted"))
+                self.put(y, 3, label, side)
+            else:
+                self.put(y, 1, self.g("todo"), self.c("side_muted"))
+                self.put(y, 3, label, self.c("side_muted"))
+            y += 1
+
+    def _header(self, columns: int) -> None:
+        side = self.c("side")
+        self.put(0, 0, " " * columns, side)
+        self.put(0, 1, "portlin", side | curses.A_BOLD)
+        keys = [key for key, _ in self.sections]
+        label = dict(self.sections).get(self.current, "")
+        where = f"  setup  {self.g('todo')}  {label}" if label else "  setup"
+        self.put(0, 8, where, self.c("side_muted"))
+        if self.current in keys:
+            count = f"{keys.index(self.current) + 1}/{len(keys)} "
+            self.put(0, columns - len(count) - 1, count, self.c("side_muted"))
+
+    def _footer(self, height: int, columns: int, left: int, hints) -> None:
+        x = left
+        for key, word in hints:
+            self.put(height - 1, x, key, self.c("text") | curses.A_BOLD)
+            x += len(key) + 1
+            self.put(height - 1, x, word, self.c("muted"))
+            x += len(word) + 3
+        if self.postpone_allowed and not self._postponing:
+            text = "F10 postpone"
+            if x + len(text) < columns - 1:
+                self.put(height - 1, columns - len(text) - 2, "F10", self.c("text") | curses.A_BOLD)
+                self.put(height - 1, columns - len(text) + 2, "postpone", self.c("muted"))
+
+    def _buttons(self, y: int, x: int, labels, focus: int) -> None:
+        for index, label in enumerate(labels):
+            role = "button_focus" if index == focus else "button"
+            text = f"  {label}  "
+            self.put(y, x, text, self.c(role) | (curses.A_BOLD if index == focus else 0))
+            x += len(text) + 2
+
+    # -- input --------------------------------------------------------------
+
+    KEYS = {
+        curses.KEY_UP: "UP", curses.KEY_DOWN: "DOWN", curses.KEY_LEFT: "LEFT",
+        curses.KEY_RIGHT: "RIGHT", curses.KEY_HOME: "HOME", curses.KEY_END: "END",
+        curses.KEY_PPAGE: "PGUP", curses.KEY_NPAGE: "PGDN", curses.KEY_BACKSPACE: "BACKSPACE",
+        curses.KEY_DC: "DELETE", curses.KEY_ENTER: "ENTER", curses.KEY_BTAB: "BTAB",
+        curses.KEY_RESIZE: "RESIZE", curses.KEY_F10: "F10",
+    }
+
+    def key(self) -> str:
+        """The next key, by name. Printable characters come back as themselves."""
+        while True:
+            try:
+                pressed = self.screen.get_wch()
+            except KeyboardInterrupt:
+                pressed = curses.KEY_F10
+            except curses.error:
+                continue
+            if isinstance(pressed, int):
+                name = self.KEYS.get(pressed, "")
+            elif pressed in ("\n", "\r"):
+                name = "ENTER"
+            elif pressed == "\x1b":
+                # A key this terminal's entry does not describe still arrives
+                # as Esc followed by the rest of its sequence. Swallow the lot
+                # rather than read it as Back.
+                name = "" if self._drain() else "ESC"
+            elif pressed == "\t":
+                name = "TAB"
+            elif pressed in ("\x7f", "\x08"):
+                name = "BACKSPACE"
+            elif pressed == "\x03":
+                name = "F10"
+            elif pressed.isprintable():
+                name = pressed
+            else:
+                name = ""
+            if not name:
+                continue
+            if name == "F10":
+                if not self.postpone_allowed or self._postponing:
+                    continue
+                self._postponing = True
+                try:
+                    if self.confirm("Postpone setup?", POSTPONE_TEXT, yes="Postpone",
+                                    no="Keep going", default_yes=False, back=False):
+                        raise Cancelled()
+                finally:
+                    self._postponing = False
+                return "RESIZE"
+            return name
+
+    def _drain(self) -> bool:
+        """Discard whatever input is already waiting. Returns whether there was any."""
+        self.screen.nodelay(True)
+        found = False
+        try:
+            while True:
+                try:
+                    self.screen.get_wch()
+                except curses.error:
+                    break
+                found = True
+        finally:
+            self.screen.nodelay(False)
+        return found
+
+    # -- widgets ------------------------------------------------------------
+
+    def dialog(self, title: str, text: str, buttons, *, default: int = 0, back: bool = True,
+               tone: str = "text") -> int:
+        """A message with buttons. Returns the index of the button chosen."""
+        focus = default
+        hints = [("enter", "choose")] + ([("esc", "back")] if back else [])
+        if len(buttons) > 1:
+            hints.insert(0, (self.g("turn"), "switch"))
+        while True:
+            top, left, height, width = self.frame(title, "", hints)
+            lines = self.wrap(text, width)[: max(height - 2, 1)]
+            for offset, line in enumerate(lines):
+                self.put(top + offset, left, line, self.c(tone))
+            self._buttons(min(top + len(lines) + 1, top + height), left, buttons, focus)
+            self.screen.refresh()
+            pressed = self.key()
+            if pressed in ("LEFT", "UP", "BTAB"):
+                focus = max(focus - 1, 0)
+            elif pressed in ("RIGHT", "DOWN", "TAB"):
+                focus = min(focus + 1, len(buttons) - 1)
+            elif pressed == "ENTER":
+                return focus
+            elif pressed == "ESC" and back:
+                raise Back()
+
+    def confirm(self, title: str, text: str, *, yes: str = "Yes", no: str = "No",
+                default_yes: bool = True, back: bool = True) -> bool:
+        return self.dialog(title, text, [yes, no], default=0 if default_yes else 1, back=back) == 0
+
+    def message(self, title: str, text: str, *, button: str = "Continue", back: bool = False,
+                tone: str = "text") -> None:
+        self.dialog(title, text, [button], back=back, tone=tone)
+
+    def busy(self, title: str, text: str) -> None:
+        """A screen with nothing to answer, for work happening right now."""
+        top, left, _, width = self.frame(title, "", ())
+        for offset, line in enumerate(self.wrap(text, width)):
+            self.put(top + offset, left, line, self.c("text"))
+        self.screen.refresh()
+
+    def menu(self, title: str, text: str, entries, *, default=None, search: bool = False,
+             back: bool = True):
+        """Pick one of (tag, label, detail). With search, typing filters the list."""
+        query = ""
+        tags = [entry[0] for entry in entries]
+        index = tags.index(default) if default in tags else 0
+        offset = 0
+        hints = [(self.g("keys"), "move"), ("enter", "choose")]
+        if search:
+            hints.append(("type", "to search"))
+        if back:
+            hints.append(("esc", "back"))
+        label_width = min(max((len(entry[1]) for entry in entries), default=10) + 2, 34)
+        # Matched against tag, label and detail at once, with the underscores
+        # zone names use read as spaces, so "new york" finds America/New_York.
+        haystacks = [" ".join(map(str, entry)).lower() for entry in entries]
+        haystacks = [f"{text} {text.replace('_', ' ')}" for text in haystacks]
+        while True:
+            needle = query.lower()
+            shown = [entry for entry, text in zip(entries, haystacks) if needle in text]
+            index = max(0, min(index, len(shown) - 1))
+            top, left, height, width = self.frame(title, text, hints)
+            y = top
+            if search:
+                self.put(y, left, "Search", self.c("muted"))
+                field = min(width - 8, 36)
+                self.put(y, left + 8, " " * field, self.c("field"))
+                self.put(y, left + 8, query[-(field - 1):], self.c("field"))
+                y += 2
+            rows = max(top + height - y, 1)
+            if index < offset:
+                offset = index
+            elif index >= offset + rows:
+                offset = index - rows + 1
+            offset = max(0, min(offset, max(len(shown) - rows, 0)))
+            for row, entry in enumerate(shown[offset: offset + rows]):
+                focused = offset + row == index
+                base = self.c("focus") if focused else self.c("text")
+                if focused:
+                    self.put(y + row, left - 1, " " * (width + 1), base)
+                    self.block(y + row, left - 1, 1, "bar_accent")
+                self.put(y + row, left + 1, entry[1], base | (curses.A_BOLD if focused else 0), label_width - 1)
+                detail = entry[2] if len(entry) > 2 else ""
+                if detail:
+                    self.put(y + row, left + 1 + label_width, detail,
+                             self.c("focus_muted") if focused else self.c("muted"), width - label_width - 2)
+            if offset > 0:
+                self.put(y, left + width - 3, self.g("more"), self.c("muted"))
+            if offset + rows < len(shown):
+                self.put(y + rows - 1, left + width - 3, self.g("more"), self.c("muted"))
+            if not shown:
+                self.put(y, left + 1, f"Nothing matches '{query}'.", self.c("muted"))
+            self.screen.refresh()
+            pressed = self.key()
+            if pressed == "UP":
+                index -= 1
+            elif pressed == "DOWN":
+                index += 1
+            elif pressed == "PGUP":
+                index -= rows
+            elif pressed == "PGDN":
+                index += rows
+            elif pressed == "HOME":
+                index = 0
+            elif pressed == "END":
+                index = len(shown) - 1
+            elif pressed == "ENTER" and shown:
+                return shown[index][0]
+            elif pressed == "ESC":
+                if query:
+                    query = ""
+                elif back:
+                    raise Back()
+            elif pressed == "BACKSPACE" and search:
+                query = query[:-1]
+                index = 0
+            elif len(pressed) == 1 and search:
+                query += pressed
+                index = 0
+            elif len(pressed) == 1:
+                for position, entry in enumerate(shown):
+                    if entry[1][:1].lower() == pressed.lower():
+                        index = position
+                        break
+
+    def form(self, title: str, text: str, fields, *, validate=None, derive=None,
+             back: bool = True, back_label: str = "back", submit: str = "Continue") -> dict:
+        """Lines of text to fill in.
+
+        validate returns None, or (key, problem, *keys to clear), which puts
+        the problem under that field and empties the others named, so a
+        mismatched password pair is typed again from scratch.
+        """
+        values = {field.key: field.value for field in fields}
+        focus = 0
+        problem = None
+        hints = [("tab", "next"), ("enter", "continue")] + ([("esc", back_label)] if back else [])
+        label_width = max(len(field.label) for field in fields) + 3
+        try:
+            while True:
+                top, left, height, width = self.frame(title, text, hints)
+                box = max(min(width - label_width, 40), 12)
+                y = top
+                cursor = None
+                for index, field in enumerate(fields):
+                    focused = index == focus
+                    self.put(y, left, field.label, self.c("text") if focused else self.c("muted"))
+                    value = values[field.key]
+                    shown = "*" * len(value) if field.secret else value
+                    shown = shown[-(box - 1):]
+                    role = "focus" if focused else "field"
+                    self.put(y, left + label_width, " " * box, self.c(role))
+                    self.put(y, left + label_width, shown, self.c(role))
+                    if focused:
+                        cursor = (y, left + label_width + len(shown))
+                    if problem and problem[0] == field.key:
+                        note, role = problem[1], "accent"
+                    else:
+                        note, role = field.hint, "muted"
+                    lines = self.wrap(note, width - label_width)[:2] if note else []
+                    for offset, line in enumerate(lines):
+                        self.put(y + 1 + offset, left + label_width, line, self.c(role))
+                    y += 2 + max(len(lines), 1)
+                self._buttons(y, left + label_width, [submit], 0 if focus == len(fields) else -1)
+                if cursor:
+                    self._cursor(True)
+                    self.screen.move(*cursor)
+                else:
+                    self._cursor(False)
+                self.screen.refresh()
+                pressed = self.key()
+                if pressed in ("TAB", "DOWN"):
+                    focus = min(focus + 1, len(fields))
+                elif pressed in ("BTAB", "UP"):
+                    focus = max(focus - 1, 0)
+                elif pressed == "ENTER":
+                    if focus < len(fields) - 1:
+                        focus += 1
+                        continue
+                    problem = validate(values) if validate else None
+                    if problem:
+                        keys = [field.key for field in fields]
+                        focus = keys.index(problem[0]) if problem[0] in keys else 0
+                        for key in problem[2:] if len(problem) > 2 else ():
+                            values[key] = ""
+                        continue
+                    return values
+                elif pressed == "ESC":
+                    if back:
+                        raise Back()
+                elif focus < len(fields):
+                    field = fields[focus]
+                    if pressed == "BACKSPACE":
+                        values[field.key] = values[field.key][:-1]
+                    elif len(pressed) == 1 and len(values[field.key]) < field.limit:
+                        values[field.key] += pressed
+                    else:
+                        continue
+                    if problem and problem[0] == field.key:
+                        problem = None
+                    if derive:
+                        derive(values, field.key)
+        finally:
+            self._cursor(False)
+
+    def settings(self, title: str, text: str, rows, *, preface=(), validate=None,
+                 back: bool = True, submit: str = "Continue") -> dict:
+        """A list of settings, each changed in place. Enter accepts them all."""
+        values = {row.key: row.value for row in rows}
+        focus = 0
+        problem = None
+        hints = [(self.g("keys"), "move"), (self.g("turn"), "change"), ("enter", "continue")]
+        if back:
+            hints.append(("esc", "back"))
+        label_width = max(len(row.label) for row in rows) + 4
+        try:
+            while True:
+                top, left, height, width = self.frame(title, text, hints)
+                y = top
+                for line, role in preface:
+                    for wrapped in self.wrap(line, width):
+                        self.put(y, left, wrapped, self.c(role))
+                        y += 1
+                if preface:
+                    y += 1
+                cursor = None
+                for index, row in enumerate(rows):
+                    focused = index == focus
+                    if focused:
+                        self.put(y, left - 1, " " * (width + 1), self.c("focus"))
+                        self.block(y, left - 1, 1, "bar_accent")
+                    if not row.enabled:
+                        label_role = "focus_muted" if focused else "muted"
+                    else:
+                        label_role = "focus" if focused else "text"
+                    self.put(y, left + 1, row.label, self.c(label_role))
+                    value = values[row.key]
+                    # Choices are drawn as "< value >" when focused, so every
+                    # value starts two columns in and text rows line up with them.
+                    x = left + label_width
+                    if row.text:
+                        x += 2
+                        shown = value[-(width - label_width - 2):] if value else ""
+                        if not value and not focused:
+                            self.put(y, x, row.placeholder, self.c("muted"))
+                        else:
+                            self.put(y, x, shown, self.c("focus" if focused else "text"))
+                        if focused:
+                            cursor = (y, x + len(shown))
+                    else:
+                        shown = row.shown(value)
+                        if focused and row.enabled:
+                            self.put(y, x, f"< {shown} >", self.c("focus") | curses.A_BOLD)
+                        else:
+                            role = ("focus_muted" if focused else "muted") if not row.enabled else (
+                                "focus" if focused else "text")
+                            self.put(y, x, f"  {shown}", self.c(role))
+                    y += 1
+                y += 1
+                described, warn = rows[focus].describe(values)
+                if problem:
+                    described, warn = problem[1], True
+                limit = top + height - 2
+                for line in self.wrap(described, width):
+                    if y >= limit:
+                        break
+                    self.put(y, left, line, self.c("accent" if warn else "muted"))
+                    y += 1
+                # Enter accepts from any row, so the button always looks pressed-ready.
+                self._buttons(top + height - 1, left, [submit], 0)
+                if cursor:
+                    self._cursor(True)
+                    self.screen.move(*cursor)
+                else:
+                    self._cursor(False)
+                self.screen.refresh()
+                pressed = self.key()
+                row = rows[focus]
+                if pressed in ("UP", "BTAB"):
+                    focus = (focus - 1) % len(rows)
+                elif pressed in ("DOWN", "TAB"):
+                    focus = (focus + 1) % len(rows)
+                elif pressed == "ENTER":
+                    problem = validate(values) if validate else None
+                    if problem:
+                        keys = [r.key for r in rows]
+                        focus = keys.index(problem[0]) if problem[0] in keys else focus
+                        continue
+                    return values
+                elif pressed == "ESC":
+                    if back:
+                        raise Back()
+                elif row.text:
+                    if pressed == "BACKSPACE":
+                        values[row.key] = values[row.key][:-1]
+                    elif len(pressed) == 1 and len(values[row.key]) < row.limit:
+                        values[row.key] += pressed
+                    problem = None
+                elif row.enabled and pressed in ("LEFT", "RIGHT", " "):
+                    options = [choice for choice, _ in row.choices]
+                    current = options.index(values[row.key]) if values[row.key] in options else 0
+                    step = -1 if pressed == "LEFT" else 1
+                    values[row.key] = options[(current + step) % len(options)]
+                    problem = None
+        finally:
+            self._cursor(False)
+
+    def review(self, title: str, text: str, groups, *, submit: str = "Apply settings"):
+        """Everything chosen, by section. Returns a section key to edit, or None to apply."""
+        focus = len(groups)
+        offset = 0
+        hints = [(self.g("keys"), "move"), ("enter", "edit or apply"), ("esc", "back")]
+        heading_width = max(len(heading) for _, heading, _ in groups) + 3
+        while True:
+            top, left, height, width = self.frame(title, text, hints)
+            lines: list[tuple[int, str, str]] = []
+            for index, (_, heading, summary) in enumerate(groups):
+                wrapped = self.wrap(summary, width - heading_width - 1)[:4]
+                lines.append((index, heading, wrapped[0]))
+                lines += [(index, "", extra) for extra in wrapped[1:]]
+            rows = height - 2
+            first = next((n for n, line in enumerate(lines) if line[0] == focus), None)
+            if first is not None:
+                last = max(n for n, line in enumerate(lines) if line[0] == focus)
+                if first < offset:
+                    offset = first
+                elif last >= offset + rows:
+                    offset = last - rows + 1
+            else:
+                offset = max(len(lines) - rows, 0)
+            for row, (index, heading, summary) in enumerate(lines[offset: offset + rows]):
+                y = top + row
+                focused = index == focus
+                if focused:
+                    self.put(y, left - 1, " " * (width + 1), self.c("focus"))
+                    if heading:
+                        self.block(y, left - 1, 1, "bar_accent")
+                self.put(y, left + 1, heading, self.c("focus" if focused else "muted"))
+                self.put(y, left + heading_width, summary, self.c("focus" if focused else "text"),
+                         width - heading_width)
+            if offset > 0:
+                self.put(top, left + width - 3, self.g("more"), self.c("muted"))
+            if offset + rows < len(lines):
+                self.put(top + rows - 1, left + width - 3, self.g("more"), self.c("muted"))
+            self._buttons(top + height - 1, left, [submit], 0 if focus == len(groups) else -1)
+            self.screen.refresh()
+            pressed = self.key()
+            if pressed in ("UP", "BTAB"):
+                focus = max(focus - 1, 0)
+            elif pressed in ("DOWN", "TAB"):
+                focus = min(focus + 1, len(groups))
+            elif pressed == "HOME":
+                focus = 0
+            elif pressed == "END":
+                focus = len(groups)
+            elif pressed == "ENTER":
+                return None if focus == len(groups) else groups[focus][0]
+            elif pressed == "ESC":
+                raise Back()
+
+
+class Progress:
+    """The apply screen: every task in order, with what is happening now."""
+
+    def __init__(self, screen: UI, title: str, text: str, labels) -> None:
+        self.ui, self.title, self.text = screen, title, text
+        self.labels = list(labels)
+        self.states = ["todo"] * len(self.labels)
+        self.details = [""] * len(self.labels)
+        self.fraction: float | None = None
+        self.current = -1
+        self.tick = 0
+
+    def start(self, index: int) -> None:
+        self.current, self.fraction = index, None
+        self.states[index] = "run"
+        self.draw()
+
+    def finish(self, index: int, state: str = "done", detail: str = "") -> None:
+        self.states[index], self.details[index] = state, detail
+        self.fraction = None
+        self.draw()
+
+    def note(self, detail: str, fraction: float | None = None) -> None:
+        if 0 <= self.current < len(self.labels):
+            self.details[self.current] = detail
+        if fraction is not None:
+            self.fraction = max(0.0, min(fraction, 1.0))
+        self.tick += 1
+        self.draw()
+
+    def draw(self) -> None:
+        screen = self.ui
+        if screen.screen is None:
+            return
+        top, left, height, width = screen.frame(self.title, self.text, ())
+        first = max(0, min(self.current - height // 2, len(self.labels) - height + 2))
+        y = top
+        for index in range(first, len(self.labels)):
+            if y >= top + height:
+                break
+            state = self.states[index]
+            if state == "done":
+                mark, mark_role, role = screen.g("done"), "muted", "text"
+            elif state == "run":
+                mark, mark_role, role = SPINNER[self.tick % len(SPINNER)], "accent", "text"
+            elif state == "fail":
+                mark, mark_role, role = screen.g("fail"), "accent", "text"
+            elif state == "skip":
+                mark, mark_role, role = screen.g("todo"), "muted", "muted"
+            else:
+                mark, mark_role, role = screen.g("todo"), "muted", "muted"
+            screen.put(y, left, mark, screen.c(mark_role))
+            screen.put(y, left + 2, self.labels[index],
+                       screen.c(role) | (curses.A_BOLD if state == "run" else 0))
+            y += 1
+            detail = self.details[index]
+            if state == "run" and (detail or self.fraction is not None):
+                if self.fraction is not None:
+                    bar = max(min(width - 12, 40), 10)
+                    filled = int(bar * self.fraction)
+                    screen.block(y, left + 2, filled, "bar_accent")
+                    screen.put(y, left + 2 + filled, screen.g("empty") * (bar - filled), screen.c("muted"))
+                    screen.put(y, left + 3 + bar, f"{int(self.fraction * 100):3d}%", screen.c("muted"))
+                    y += 1
+                if detail:
+                    screen.put(y, left + 2, detail, screen.c("muted"), width - 2)
+                    y += 1
+            elif state == "fail" and detail:
+                screen.put(y, left + 2, detail, screen.c("accent"), width - 2)
+                y += 1
+        screen.screen.refresh()
+
+
+ui = UI()
 
 
 def message(title: str, text: str) -> None:
-    _whiptail(["--title", title, "--msgbox", text, str(_box_height(text, 16)), "72"])
+    ui.message(title, text)
 
 
 def info(title: str, text: str) -> None:
-    """A dialog with no button, for work happening right now.
-
-    msgbox would block on Ok and then do the work with the screen already
-    dismissed, leaving the user staring at nothing while the disk is resized.
-    """
-    _whiptail(["--title", title, "--infobox", text, str(_box_height(text)), "72"])
-
-
-def ask(title: str, text: str, default: str = "") -> str:
-    return _whiptail(
-        ["--title", title, "--inputbox", text, "12", "72", default],
-        capture=True,
-    )
-
-
-def ask_password(title: str, text: str) -> str:
-    return _whiptail(["--title", title, "--passwordbox", text, "12", "72"], capture=True)
-
-
-def choose(title: str, text: str, entries: list[tuple[str, str]], height: int = 20, default: str = "") -> str:
-    rows: list[str] = []
-    for tag, label in entries:
-        rows += [tag, label]
-    listsize = min(len(entries), max(height - 8, 4))
-    args = ["--title", title, "--menu", text, str(height), "72", str(listsize), *rows]
-    if default:
-        # Prefilled from another portlin, so the answer is the same one
-        # keypress away as a fresh answer would be.
-        args = ["--default-item", default, *args]
-    return _whiptail(args, capture=True)
+    ui.busy(title, text)
 
 
 def confirm(title: str, text: str, *, default_yes: bool = True) -> bool:
-    args = ["--title", title, "--yesno", text, str(_box_height(text)), "72"]
-    if not default_yes:
-        args.insert(0, "--defaultno")
-    argv = ["whiptail", "--backtitle", BACKTITLE, *args]
-    return subprocess.run(argv).returncode == 0
+    return ui.confirm(title, text, default_yes=default_yes, back=False)
+
+
+def ask_password(title: str, text: str) -> str:
+    """One secret, or an empty string if the person backs out."""
+    try:
+        values = ui.form(title, text, [Field("secret", "Passphrase", secret=True, limit=512)],
+                         back_label="give up")
+    except Back:
+        return ""
+    return values["secret"]
 
 
 # --------------------------------------------------------------------------
-# Wizard steps
+# What setup asks
 # --------------------------------------------------------------------------
 
-def step_welcome() -> None:
-    message(
-        "Welcome to Portlin",
-        "\nThis stick is a full Debian system with an Xfce desktop, and it "
-        "carries its changes with it from machine to machine.\n\n"
-        "Setting it up takes a minute. Nothing is written until the last step.",
+
+class State:
+    """Every answer so far, so that going back shows them again."""
+
+    def __init__(self) -> None:
+        self.candidates: list[dict] = []
+        self.migration: dict | None = None
+        self.prefill: dict = {}
+        self.account_plan: dict | None = None
+        self.migrated_ids: set = set()
+        self.layout = ""
+        self.locale = ""
+        self.timezone = ""
+        self.rtc_local: bool | None = None
+        self.hostname = ""
+        self.mac = "stable"
+        self.wifi: dict | None = None
+        self.has_wifi = False
+        self.online = False
+        self.network_checked = False
+        self.username = ""
+        self.full_name = ""
+        self.password: str | None = None
+        self.luks_device: str | None = None
+        self.has_desktop = False
+        self.autologin: bool | None = None
+        self.sudo_password: bool | None = None
+        self.lock_minutes = 10
+        self.lock_on_suspend = True
+        self.change_passphrase: bool | None = None
+        self.found_message = ""
+        self.theme = ""
+        self.icon_theme = ""
+        self.scale = "auto"
+        self.scan: dict | None = None
+        self.drivers: list[str] = []
+        self.swap: int | None = None
+        self.ssh = False
+        self.firewall = True
+        self.expand: bool | None = None
+        self.expand_free: int | None = None
+        self.wear: dict | None = None
+        self.wear_initial: dict | None = None
+        self.reboot = False
+        self.warnings: list[str] = []
+
+
+def _machine_description() -> str:
+    def read(name: str) -> str:
+        try:
+            return Path(f"/sys/class/dmi/id/{name}").read_text().strip()
+        except OSError:
+            return ""
+
+    # Firmware fills these with placeholders often enough to filter the
+    # common ones rather than print them as a machine's name.
+    placeholders = ("to be filled by o.e.m.", "system product name", "default string", "not applicable")
+    vendor, product = read("sys_vendor"), read("product_version") or read("product_name")
+    names = [part for part in (vendor, product) if part and part.lower() not in placeholders]
+    if len(names) == 2 and names[1].lower().startswith(names[0].lower()):
+        names = names[1:]
+    parts = [" ".join(names)] if names else []
+    memory = _memory_bytes()
+    if memory:
+        parts.append(f"{memory / 1024**3:.0f} GB memory")
+    return ", ".join(parts)
+
+
+def _memory_bytes() -> int:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def step_welcome(state: State):
+    machine = _machine_description()
+    text = (
+        "This stick is a full Debian system with an Xfce desktop. It carries "
+        "everything you change with it, from machine to machine.\n\n"
+        "Setup takes a couple of minutes. Each step has sensible answers already "
+        "chosen, so Enter moves on, and Esc goes back to change an earlier one. "
+        "Nothing is written to the stick until you confirm the summary at the end."
     )
+    if machine:
+        text += f"\n\nThis machine: {machine}"
+    if state.luks_device:
+        text += "\nThis stick's storage is encrypted."
+    ui.dialog("Welcome to Portlin", text, ["Start setup"], back=False)
 
 
 def migration_candidates() -> list[dict]:
@@ -373,40 +1487,58 @@ def migration_candidates() -> list[dict]:
     return found
 
 
-def step_migration(candidates: list[dict]) -> dict | None:
+def step_migration(state: State):
     """Offer a restore, and hand the choosing to the tool's own screens.
 
     The tool is run with the console rather than through run(): its screens
-    are whiptail too, and they need tty1 the way this wizard's do. It keeps
-    the old drive open afterwards so apply can copy from it without asking
-    for the passphrase twice.
+    are whiptail, and they need tty1 the way this wizard's do. It keeps the
+    old drive open afterwards so apply can copy from it without asking for the
+    passphrase twice. Coming back to this step releases any earlier plan
+    first, so a second answer starts clean.
     """
     names = "\n".join(
-        f"  {c.get('model') or Path(c['path']).name} {c.get('size', '')}".rstrip() for c in candidates
+        f"  {c.get('model') or Path(c['path']).name} {c.get('size', '')}".rstrip() for c in state.candidates
     )
-    if not confirm(
+    wanted = ui.confirm(
         "Restore from another portlin",
-        f"\nAnother portlin was found:\n\n{names}\n\n"
-        "Bring its account, files and settings over to this stick?\n\n"
-        "You choose exactly what to bring on the next screen.",
-    ):
-        return None
-    proc = subprocess.run([MIGRATE_TOOL, "plan", "--firstboot", "--keep-open", "--out", str(MIGRATION_PLAN)])
-    if proc.returncode != 0:
-        return None
-    try:
-        plan = json.loads(MIGRATION_PLAN.read_text())
-    except (OSError, ValueError):
-        return None
+        f"Another portlin was found:\n\n{names}\n\n"
+        "Bring its account, files and settings over to this stick? You choose "
+        "exactly what to bring on the next screen.",
+        yes="Restore", no="Start fresh",
+    )
+    close_migration()
+    state.migration, state.prefill, state.account_plan, state.migrated_ids = None, {}, None, set()
+    if not wanted:
+        return True
+    with ui.suspended():
+        proc = subprocess.run([MIGRATE_TOOL, "plan", "--firstboot", "--keep-open", "--out", str(MIGRATION_PLAN)])
+    plan = None
+    if proc.returncode == 0:
+        try:
+            plan = json.loads(MIGRATION_PLAN.read_text())
+        except (OSError, ValueError):
+            plan = None
     if not isinstance(plan, dict) or not isinstance(plan.get("ids"), list):
-        return None
+        ui.message("Restore", "Nothing will be restored. Setup continues as for a new stick.")
+        return True
     log(f"migration planned from {plan.get('source')}: {len(plan['ids'])} items")
-    return plan
+    state.migration = plan
+    state.prefill = plan.get("identity") or {}
+    account_plan = plan.get("account")
+    # The plan is the tool's output, and only an account named the way the
+    # account screen would accept is taken from it; anything else means the
+    # account is asked for as usual.
+    if not isinstance(account_plan, dict) or not USERNAME_RE.fullmatch(str(account_plan.get("name") or "")):
+        account_plan = None
+    state.account_plan = account_plan
+    state.migrated_ids = set(plan.get("ids") or [])
+    return True
 
 
 def apply_migration() -> bool:
     """The copy, drawn by the tool's own gauge on the console."""
-    return subprocess.run([MIGRATE_TOOL, "apply", "--plan", str(MIGRATION_PLAN), "--gauge"]).returncode == 0
+    with ui.suspended():
+        return subprocess.run([MIGRATE_TOOL, "apply", "--plan", str(MIGRATION_PLAN), "--gauge"]).returncode == 0
 
 
 def close_migration() -> None:
@@ -424,31 +1556,78 @@ def close_migration() -> None:
     MIGRATION_PLAN.unlink(missing_ok=True)
 
 
-def step_keyboard(default: str = "") -> tuple[str, str]:
-    known = dict(COMMON_KEYMAPS)
-    layout = choose(
+def _current_keyboard() -> str:
+    try:
+        found = re.search(r'(?m)^XKBLAYOUT="?([^",\n]*)', Path("/etc/default/keyboard").read_text())
+    except OSError:
+        return ""
+    return found.group(1) if found else ""
+
+
+def _keyboard_layouts() -> list[tuple[str, str, str]]:
+    entries = [(code, label, code) for code, label in COMMON_KEYMAPS]
+    seen = {code for code, _ in COMMON_KEYMAPS}
+    try:
+        text = XKB_RULES.read_text()
+    except OSError:
+        return entries
+    section, others = "", []
+    for line in text.splitlines():
+        if line.startswith("!"):
+            section = line[1:].strip()
+            continue
+        if section != "layout" or not line.strip():
+            continue
+        code, _, label = line.strip().partition(" ")
+        if code and code not in seen:
+            seen.add(code)
+            others.append((code, label.strip(), code))
+    return entries + sorted(others, key=lambda entry: entry[1].lower())
+
+
+def step_keyboard(state: State):
+    entries = _keyboard_layouts()
+    default = state.layout or state.prefill.get("keyboard", "") or _current_keyboard() or "us"
+    if default not in [entry[0] for entry in entries]:
+        entries.insert(0, (default, default, default))
+    state.layout = ui.menu(
         "Keyboard layout",
-        "Which keyboard layout does this machine have?\n"
-        "You can pick a different one later from the Xfce settings.",
-        COMMON_KEYMAPS + [("other", "Something else (type the code)")],
-        default=default if default in known else ("other" if default else ""),
+        "Which keyboard does this machine have? Everything after this is typed "
+        "with it, including the disk passphrase at boot.",
+        entries, default=default, search=True,
     )
-    if layout == "other":
-        layout = ask("Keyboard layout", "Enter an X11 layout code, for example 'cz' or 'br':", default or "us")
-    return layout, known.get(layout, layout)
+    ui.busy("Keyboard layout", "Switching the keyboard layout.")
+    apply_keyboard(state.layout)
+    ui.repaint()
+    return True
 
 
-def step_locale(default: str = "") -> str:
-    known = dict(COMMON_LOCALES)
-    locale = choose(
+def _locales() -> list[tuple[str, str, str]]:
+    entries = [(code, label, code) for code, label in COMMON_LOCALES]
+    seen = {code for code, _ in COMMON_LOCALES}
+    try:
+        text = SUPPORTED_LOCALES.read_text()
+    except OSError:
+        return entries
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == "UTF-8" and fields[0] not in seen:
+            seen.add(fields[0])
+            entries.append((fields[0], fields[0], ""))
+    return entries
+
+
+def step_locale(state: State):
+    entries = _locales()
+    default = state.locale or state.prefill.get("locale", "") or "en_US.UTF-8"
+    if default not in [entry[0] for entry in entries]:
+        entries.insert(0, (default, default, default))
+    state.locale = ui.menu(
         "Language",
         "Which language and regional formats should the desktop use?",
-        COMMON_LOCALES + [("other", "Something else (type the name)")],
-        default=default if default in known else ("other" if default else ""),
+        entries, default=default, search=True,
     )
-    if locale == "other":
-        locale = ask("Language", "Enter a locale name, for example 'cs_CZ.UTF-8':", default or "en_US.UTF-8")
-    return locale
+    return True
 
 
 def _timezones() -> list[str]:
@@ -466,103 +1645,370 @@ def _timezones() -> list[str]:
     return sorted(zones)
 
 
-def step_timezone(default: str = "") -> str:
-    zones = _timezones()
-    if not zones:
-        return "UTC"
-    regions = sorted({z.split("/", 1)[0] for z in zones})
-    region = choose(
-        "Time zone",
-        "Which region are you in?",
-        [(r, r.replace("_", " ")) for r in regions],
-        default=default.split("/", 1)[0],
-    )
-    cities = sorted(z for z in zones if z.split("/", 1)[0] == region)
-    if len(cities) <= 1:
-        return cities[0] if cities else region
-    return choose(
-        "Time zone",
-        f"Which city in {region} shares your time zone?",
-        [(c, c.split("/", 1)[1].replace("_", " ")) for c in cities],
-        default=default,
-    )
+def _windows_on_this_machine() -> bool:
+    """Whether this machine boots Windows, which keeps the hardware clock in local time."""
+    try:
+        listing = subprocess.run(["efibootmgr"], input="", capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "Windows Boot Manager" in listing
 
 
-def step_hostname(default: str = "portlin") -> str:
+def step_timezone(state: State):
+    zones = _timezones() or ["UTC"]
+    entries = [
+        (zone, zone.rsplit("/", 1)[-1].replace("_", " "), zone.rsplit("/", 1)[0].replace("_", " ") if "/" in zone else "")
+        for zone in zones
+    ]
     while True:
-        hostname = ask(
-            "Computer name",
-            "What should this stick call itself on a network?",
-            default,
+        default = state.timezone or state.prefill.get("timezone", "")
+        if not default:
+            try:
+                default = Path("/etc/timezone").read_text().strip()
+            except OSError:
+                default = "UTC"
+        state.timezone = ui.menu(
+            "Time zone",
+            "Where are you? Type a city or region to find it.",
+            entries, default=default, search=True,
         )
-        if HOSTNAME_RE.match(hostname):
-            return hostname
-        message("Computer name", f"\n'{hostname}' is not a valid hostname.\n\n"
-                                 "Use letters, digits and hyphens, starting and ending with a "
-                                 "letter or digit.")
+        windows = _windows_on_this_machine()
+        if state.rtc_local is None:
+            state.rtc_local = windows
+        try:
+            choice = ui.menu(
+                "Hardware clock",
+                "Machines disagree about the time their hardware clock keeps. Linux and "
+                "Macs keep universal time; Windows keeps local time. Pick what the "
+                "machines you plug this stick into mostly run, so the clock is right "
+                "from boot and the stick never shifts a Windows PC's clock."
+                + ("\n\nThis machine boots Windows." if windows else ""),
+                [
+                    ("utc", "Universal time", "Linux and Mac machines"),
+                    ("local", "Local time", "Windows PCs"),
+                ],
+                default="local" if state.rtc_local else "utc",
+            )
+        except Back:
+            continue
+        state.rtc_local = choice == "local"
+        return True
 
 
-def _desktop_installed() -> bool:
-    """Whether this stick has the desktop whose appearance there is to choose.
+# -- network ---------------------------------------------------------------
 
-    A --minimal stick installs portlin-runtime alone, so none of the files the
-    picker rewrites are there. Keyed on the files themselves rather than on a
-    dpkg query, because these are the only reason the question is being asked.
+def _nmcli(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["nmcli", *args], input="", capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _terse(line: str) -> list[str]:
+    """Split one line of `nmcli -t`, which escapes ':' and '\\' inside fields."""
+    fields, current, escaped = [], "", False
+    for char in line:
+        if escaped:
+            current += char
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == ":":
+            fields.append(current)
+            current = ""
+        else:
+            current += char
+    fields.append(current)
+    return fields
+
+
+def network_status() -> tuple[bool, bool]:
+    """(has a Wi-Fi adapter, already online), once NetworkManager is answering."""
+    for _ in range(10):
+        running = _nmcli(["-t", "-f", "RUNNING", "general"])
+        if running is None:
+            return False, False
+        if running.stdout.strip() == "running":
+            break
+        time.sleep(1)
+    devices = _nmcli(["-t", "-f", "TYPE,STATE", "device"])
+    has_wifi = bool(devices) and any(_terse(line)[0] == "wifi" for line in devices.stdout.splitlines())
+    general = _nmcli(["-t", "-f", "STATE", "general"])
+    online = bool(general) and general.stdout.strip() == "connected"
+    return has_wifi, online
+
+
+def wifi_networks() -> list[dict]:
+    _nmcli(["radio", "wifi", "on"])
+    listing = _nmcli(["-t", "-f", "SSID,SECURITY,SIGNAL", "device", "wifi", "list", "--rescan", "yes"], timeout=45)
+    best: dict[str, dict] = {}
+    for line in (listing.stdout.splitlines() if listing else []):
+        fields = _terse(line)
+        if len(fields) < 3 or not fields[0]:
+            continue
+        try:
+            signal_strength = int(fields[2] or 0)
+        except ValueError:
+            signal_strength = 0
+        security = fields[1].strip()
+        if not security or security == "--":
+            kind = "open"
+        elif "802.1X" in security:
+            kind = "enterprise"
+        elif "WPA3" in security and "WPA2" not in security:
+            kind = "sae"
+        else:
+            kind = "psk"
+        found = {"ssid": fields[0], "security": kind, "label": security if kind != "open" else "open",
+                 "signal": signal_strength}
+        if fields[0] not in best or best[fields[0]]["signal"] < signal_strength:
+            best[fields[0]] = found
+    return sorted(best.values(), key=lambda network: -network["signal"])
+
+
+def _keyfile_value(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return "\\s" + escaped[1:] if escaped.startswith(" ") else escaped
+
+
+def wifi_keyfile(identifier: str, ssid: str, security: str, password: str, *, hidden: bool = False) -> str:
+    """A NetworkManager profile, in the keyfile format it stores them in.
+
+    The SSID is written as its bytes, which the keyfile format accepts for any
+    network name, so no SSID can break the file whatever it contains.
     """
-    return all(
-        Path(path).exists() for path in {**THEME_TARGETS, **ICON_THEME_TARGETS}
-    )
+    lines = [
+        "[connection]",
+        f"id={_keyfile_value(ssid)}",
+        f"uuid={identifier}",
+        "type=wifi",
+        "autoconnect=true",
+        "",
+        "[wifi]",
+        "mode=infrastructure",
+        "ssid=" + "".join(f"{byte};" for byte in ssid.encode()),
+    ]
+    if hidden:
+        lines.append("hidden=true")
+    lines.append("")
+    if security != "open":
+        lines += [
+            "[wifi-security]",
+            f"key-mgmt={'sae' if security == 'sae' else 'wpa-psk'}",
+            f"psk={_keyfile_value(password)}",
+            "",
+        ]
+    lines += ["[ipv4]", "method=auto", "", "[ipv6]", "addr-gen-mode=stable-privacy", "method=auto", ""]
+    return "\n".join(lines)
 
 
-def step_theme() -> str:
-    return choose(
-        "Appearance",
-        "\nChoose the desktop theme.\n\n"
-        "This can be changed later in Settings, Appearance.",
-        THEMES,
-        height=14,
-    )
+def forget_wifi(wifi: dict | None) -> None:
+    if not wifi:
+        return
+    _nmcli(["connection", "delete", "uuid", wifi["uuid"]])
+    Path(wifi["path"]).unlink(missing_ok=True)
 
 
-def step_icon_theme() -> str:
-    """A separate prompt from the widget theme, not a paired choice.
+def wifi_connect(ssid: str, security: str, password: str, *, hidden: bool = False) -> tuple[dict | None, str]:
+    """Join a network with a profile kept in /run, and say why if it failed.
 
-    Three widget themes against five icon sets is fifteen rows on an 80x24
-    console, and curated pairings would teach a model the desktop does not
-    have: Settings, Appearance offers these as two independent dropdowns, and
-    the wizard should configure the thing the way the thing works.
+    The password goes into a file NetworkManager reads rather than onto
+    nmcli's command line, where every user on the machine could read it.
     """
-    return choose(
-        "Appearance",
-        "\nChoose the icon set.\n\n"
-        "This can be changed later in Settings, Appearance.",
-        ICON_THEMES,
-        height=16,
-    )
+    identifier = str(uuid.uuid4())
+    path = NM_RUN_CONNECTIONS / f"portlin-setup-{identifier}.nmconnection"
+    _write_private(path, wifi_keyfile(identifier, ssid, security, password, hidden=hidden))
+    _nmcli(["connection", "load", str(path)])
+    up = _nmcli(["--wait", "45", "connection", "up", "uuid", identifier], timeout=60)
+    joined = {"ssid": ssid, "uuid": identifier, "path": str(path), "security": security}
+    if up is not None and up.returncode == 0:
+        return joined, ""
+    forget_wifi(joined)
+    reason = ((up.stderr or up.stdout).strip().splitlines() or ["no answer"])[-1] if up else "nmcli did not answer"
+    return None, re.sub(r"^Error:\s*", "", reason)
 
 
-def step_account() -> tuple[str, str, str]:
+def _set_runtime_mac(mode: str) -> None:
+    if mode == "off":
+        NM_RUN_MAC_CONF.unlink(missing_ok=True)
+    else:
+        _write(NM_RUN_MAC_CONF, MAC_CONF.format(mode=mode))
+    _nmcli(["general", "reload", "conf"])
+
+
+MAC_CHOICES = [("stable", "random per network"), ("random", "random every time"), ("off", "the real one")]
+
+
+def _signal_bars(strength: int) -> str:
+    filled = min(4, max(1, (strength + 24) // 25))
+    return ui.g("done") * filled + ui.g("todo") * (4 - filled)
+
+
+def step_network(state: State):
     while True:
-        full_name = ask("Your account", "What is your full name? (optional, shown on the login screen)")
-        username = ask("Your account", "Choose a username. Lowercase letters, digits, - and _.",
-                       _suggest_username(full_name))
+        values = ui.settings(
+            "Network",
+            "How this stick introduces itself to networks.",
+            [
+                Row("hostname", "Computer name", text=True,
+                    value=state.hostname or state.prefill.get("hostname") or "portlin", limit=63,
+                    help="Shown to other machines on the network. Letters, digits and hyphens."),
+                Row("mac", "Hardware address", MAC_CHOICES, state.mac,
+                    help=lambda v: {
+                        "stable": "Each network sees a different made-up address, the same one every "
+                                  "visit, so logins on hotel and cafe networks keep working but no two "
+                                  "networks can tell they saw the same stick.",
+                        "random": "A new made-up address on every connection. The most private, but "
+                                  "networks that remember devices will ask you to log in every time.",
+                        "off": ("Every network sees the hardware's own address, so this stick can be "
+                                "recognised wherever it connects.", True),
+                    }[v["mac"]]),
+            ],
+            validate=lambda v: None if HOSTNAME_RE.match(v["hostname"]) else (
+                "hostname", f"'{v['hostname']}' is not a valid computer name. Use letters, digits and "
+                            "hyphens, starting and ending with a letter or digit."),
+        )
+        state.hostname, state.mac = values["hostname"], values["mac"]
+        if not state.network_checked:
+            ui.busy("Network", "Looking for network adapters.")
+            state.has_wifi, state.online = network_status()
+            state.network_checked = True
+        if not state.has_wifi or (state.online and not state.wifi):
+            return True
+        try:
+            step_wifi(state)
+            return True
+        except Back:
+            continue
+
+
+def step_wifi(state: State) -> None:
+    _set_runtime_mac(state.mac)
+    while True:
+        ui.busy("Wi-Fi", "Looking for networks.")
+        networks = wifi_networks()
+        entries = [
+            (network["ssid"], network["ssid"], f"{_signal_bars(network['signal'])}  {network['label']}")
+            for network in networks
+        ]
+        entries += [
+            ("\0hidden", "Hidden network", "type its name"),
+            ("\0rescan", "Look again", ""),
+            ("\0skip", "Not now", "set it up later from the desktop"),
+        ]
+        current = state.wifi["ssid"] if state.wifi else None
+        chosen = ui.menu(
+            "Wi-Fi",
+            ("Connected to " + current + ". Pick it again to keep it, or another network."
+             if current else
+             "Connecting now sets the clock and lets setup download drivers. "
+             "The password is saved only when you apply the summary."),
+            entries, default=current or (entries[0][0] if networks else "\0skip"),
+        )
+        if chosen == "\0rescan":
+            continue
+        if chosen == "\0skip":
+            forget_wifi(state.wifi)
+            state.wifi = None
+            state.online = network_status()[1]
+            return
+        if current and chosen == current:
+            return
+        hidden = chosen == "\0hidden"
+        network = next((n for n in networks if n["ssid"] == chosen), None)
+        if network and network["security"] == "enterprise":
+            ui.message("Wi-Fi", f"{chosen} uses enterprise sign-in, which needs more than a password. "
+                                "Set it up from the network icon on the desktop.")
+            continue
+        security = network["security"] if network else "psk"
+        fields = []
+        if hidden:
+            fields.append(Field("ssid", "Network name", limit=32))
+        if security != "open":
+            fields.append(Field("password", "Password", secret=True, limit=63,
+                                hint="Leave empty for an open network" if hidden else ""))
+
+        def check(values):
+            if hidden and not values["ssid"]:
+                return "ssid", "Type the network's name."
+            password = values.get("password", "")
+            if hidden and not password:
+                return None
+            if security != "open" and security != "sae" and not 8 <= len(password) <= 63:
+                return "password", "Wi-Fi passwords are 8 to 63 characters."
+            if security == "sae" and not password:
+                return "password", "Type the network's password."
+            return None
+
+        try:
+            values = ui.form("Wi-Fi", f"Join {chosen}." if not hidden else "Join a network that does not "
+                             "announce its name.", fields, validate=check, submit="Connect") if fields else {}
+        except Back:
+            continue
+        ssid = values.get("ssid", chosen)
+        password = values.get("password", "")
+        if hidden and not password:
+            security = "open"
+        forget_wifi(state.wifi)
+        state.wifi = None
+        ui.busy("Wi-Fi", f"Connecting to {ssid}. This can take half a minute.")
+        joined, reason = wifi_connect(ssid, security, password, hidden=hidden)
+        if joined:
+            state.wifi, state.online = joined, True
+            return
+        ui.message("Wi-Fi", f"Could not connect to {ssid}.\n\n{reason}", tone="text")
+
+
+# -- account ---------------------------------------------------------------
+
+def step_account(state: State):
+    if state.account_plan:
+        # The tool recreates the account with its password hash, so there is
+        # no password to ask for and none to hold here.
+        state.username = state.account_plan.get("name", "")
+        state.full_name = state.account_plan.get("gecos", "")
+        state.password = None
+        ui.message("Your account",
+                   f"The account '{state.username}' comes over from the old drive, with its password.",
+                   back=True)
+        return True
+
+    edited = {"username": bool(state.username)}
+
+    def derive(values, changed):
+        if changed == "username":
+            edited["username"] = True
+        elif changed == "full_name" and not edited["username"]:
+            values["username"] = _suggest_username(values["full_name"])
+
+    def check(values):
+        username = values["username"]
+        if ":" in values["full_name"] or not values["full_name"].isprintable():
+            return "full_name", "A name cannot contain ':'."
         if not USERNAME_RE.match(username):
-            message("Your account", f"\n'{username}' is not a valid username.\n\n"
-                                    "Start with a lowercase letter or underscore, then use "
-                                    "lowercase letters, digits, hyphens or underscores.")
-            continue
-        if _user_exists(username):
-            message("Your account", f"\nThe user '{username}' already exists. Choose another name.")
-            continue
+            return ("username", "Start with a lowercase letter or underscore, then use lowercase "
+                                "letters, digits, hyphens or underscores.")
+        if _user_exists(username) and username != _account_from_earlier_run():
+            return "username", f"The user '{username}' already exists. Choose another name."
+        if len(values["password"]) < 4:
+            return "password", "Use at least 4 characters.", "password", "again"
+        if values["password"] != values["again"]:
+            return "password", "Those did not match. Type both again.", "password", "again"
+        return None
 
-        password = _ask_matching_password(
-            "Your account",
-            "Choose a password for this account.\n"
-            "It is also the password sudo will ask for.",
-        )
-        if password is None:
-            continue
-        return username, full_name, password
+    values = ui.form(
+        "Your account",
+        "The account you log in with. It can run administrator commands with sudo.",
+        [
+            Field("full_name", "Full name", state.full_name, hint="Optional, for the login screen"),
+            Field("username", "Username", state.username or _suggest_username(state.full_name)),
+            Field("password", "Password", state.password or "", secret=True, limit=128),
+            Field("again", "Repeat password", state.password or "", secret=True, limit=128),
+        ],
+        validate=check, derive=derive,
+    )
+    state.full_name, state.username, state.password = values["full_name"], values["username"], values["password"]
+    return True
 
 
 def _suggest_username(full_name: str) -> str:
@@ -575,39 +2021,49 @@ def _user_exists(username: str) -> bool:
     return subprocess.run(["id", "--", username], capture_output=True).returncode == 0
 
 
-def _ask_matching_password(title: str, text: str) -> str | None:
-    password = ask_password(title, text)
-    if len(password) < 4:
-        message(title, "\nThat password is too short. Use at least 4 characters.")
-        return None
-    again = ask_password(title, "Type the same password again to confirm.")
-    if password != again:
-        message(title, "\nThose passwords did not match. Let's try again.")
-        return None
-    return password
+# -- security --------------------------------------------------------------
+
+def _autologin_help(username: str, encrypted: bool):
+    def describe(values):
+        if not values["autologin"]:
+            return "The login screen asks for the password on every boot."
+        warning = (
+            f"Boots straight to {username}'s desktop. Convenient on a stick you carry, but anyone "
+            "who boots it reaches your desktop without typing anything."
+        )
+        if not encrypted:
+            # An encrypted stick gets a self-unlocking keyring, so the cost
+            # named here applies only where that trade is not on offer.
+            warning += (
+                " Because this stick is not encrypted, the password keyring also stays locked: "
+                "browsers and the Wi-Fi applet ask for your password the first time they need a "
+                "saved one after each boot."
+            )
+        return warning, not encrypted
+    return describe
 
 
-def _luks_device() -> str | None:
-    """The backing device of the encrypted root, if this stick has one.
+def _sudo_help(encrypted: bool):
+    def describe(values):
+        if values["sudo_password"]:
+            return "sudo asks for the account password before running anything as root."
+        warning = (
+            "Any command can run as root without asking, so anyone who reaches this desktop "
+            "owns the whole system."
+        )
+        if values.get("autologin") and not encrypted:
+            # Neither a passphrase at boot nor a password at the login screen,
+            # so a waiver here would leave nothing at all on the path from
+            # plugging the stick in to root on the machine it was plugged into.
+            warning += " This stick is not encrypted and logs in automatically, so nothing else would stand in the way either."
+        return warning, True
+    return describe
 
-    Read from crypttab rather than guessed, so it stays correct no matter how the
-    stick's partitions are enumerated on this particular machine.
-    """
-    if not CRYPTTAB.exists():
-        return None
-    for line in CRYPTTAB.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split()
-        if len(fields) < 2:
-            continue
-        source = fields[1]
-        if source.startswith("UUID="):
-            path = Path("/dev/disk/by-uuid") / source.split("=", 1)[1]
-            return str(path) if path.exists() else None
-        return source if Path(source).exists() else None
-    return None
+
+def _found_help(encrypted: bool) -> str:
+    where = "on the boot menu and above the passphrase prompt" if encrypted else "on the boot menu"
+    return (f"A line shown {where}, for whoever finds this stick if you lose it. "
+            "For example: If found, please email sam@example.com. Leave it empty for none.")
 
 
 def _encrypted_at_boot() -> bool:
@@ -624,34 +2080,330 @@ def _encrypted_at_boot() -> bool:
     return CRYPTTAB_BOOT_MARKER in CRYPTTAB.read_text()
 
 
-def step_change_passphrase(device: str) -> None:
-    # Nothing to offer when the passphrase is already theirs: they typed it into
-    # the initramfs prompt on the way to this wizard.
-    if _encrypted_at_boot():
-        return
+def step_security(state: State):
+    encrypted = state.luks_device is not None
+    plan = state.account_plan or {}
+    if state.autologin is None:
+        state.autologin = bool(plan.get("autologin"))
+    if state.sudo_password is None:
+        state.sudo_password = not plan.get("sudo_nopasswd")
+    # Nothing to offer when the passphrase is already theirs: they typed it
+    # into the initramfs prompt on the way here.
+    offer_passphrase = encrypted and not _encrypted_at_boot()
+    if state.change_passphrase is None:
+        state.change_passphrase = offer_passphrase
+    rows = [
+        Row("autologin", "Log in automatically", [(False, "no"), (True, "yes")], state.autologin,
+            help=_autologin_help(state.username, encrypted)),
+        Row("sudo_password", "sudo password", [(True, "ask for it"), (False, "never ask")],
+            state.sudo_password, help=_sudo_help(encrypted)),
+    ]
+    if state.has_desktop:
+        rows += [
+            Row("lock_minutes", "Lock the screen after",
+                [(5, "5 minutes"), (10, "10 minutes"), (15, "15 minutes"), (30, "30 minutes"), (0, "never")],
+                state.lock_minutes,
+                help=lambda v: ("The screen stays unlocked however long the machine is left.", True)
+                if v["lock_minutes"] == 0 else
+                f"Locks after {v['lock_minutes']} minutes without input. Unlocking takes the account password."),
+            Row("lock_on_suspend", "Lock on suspend", [(True, "yes"), (False, "no")], state.lock_on_suspend,
+                help="Lock before the machine sleeps, so closing the lid is enough to leave it."),
+        ]
+    if offer_passphrase:
+        rows.append(Row("change_passphrase", "New disk passphrase", [(True, "yes"), (False, "no")],
+                        state.change_passphrase,
+                        help=lambda v: "Whoever built this stick chose its passphrase. Setup asks for a new "
+                                       "one only you know, after everything else is applied."
+                        if v["change_passphrase"] else
+                        ("The passphrase stays the one whoever built this stick chose.", True)))
+    rows.append(Row("found_message", "If found", text=True, value=state.found_message,
+                    placeholder="no message", limit=FOUND_LIMIT, help=_found_help(encrypted)))
+    values = ui.settings("Security", "Who can get in, and what a finder sees.", rows)
+    state.autologin, state.sudo_password = values["autologin"], values["sudo_password"]
+    state.lock_minutes = values.get("lock_minutes", state.lock_minutes)
+    state.lock_on_suspend = values.get("lock_on_suspend", state.lock_on_suspend)
+    state.change_passphrase = values.get("change_passphrase", False)
+    state.found_message = _clean_found_message(values["found_message"])
+    return True
 
-    if not confirm(
-        "Disk encryption",
-        "\nThis stick's storage is encrypted.\n\n"
-        "The passphrase was set by whoever built it. Would you like to change it "
-        "to one only you know?",
-        default_yes=True,
-    ):
-        return
 
-    # cryptsetup prompts on the tty directly. Passing the passphrases through
-    # files or arguments instead would leave them readable to other processes,
-    # so the interactive path is both simpler and safer here.
-    subprocess.run(["clear"])
-    print("\nChanging the disk passphrase for", device)
-    print("You will be asked for the current passphrase, then the new one.\n")
-    result = subprocess.run(["cryptsetup", "luksChangeKey", device])
-    if result.returncode != 0:
-        message("Disk encryption", "\nThe passphrase was not changed. "
-                                   "Your existing passphrase still works.")
+def _clean_found_message(text: str) -> str:
+    """One printable line that is safe in a GRUB theme string and a plain file."""
+    text = "".join(char for char in text if char.isprintable())
+    text = re.sub(r"\s+", " ", text.replace('"', "'").replace("\\", "/")).strip()
+    return text[:FOUND_LIMIT]
+
+
+# -- appearance ------------------------------------------------------------
+
+def _desktop_installed() -> bool:
+    """Whether this stick has the desktop whose appearance there is to choose.
+
+    A --minimal stick installs portlin-runtime alone, so none of the files the
+    picker rewrites are there. Keyed on the files themselves rather than on a
+    dpkg query, because these are the only reason the question is being asked.
+    """
+    return all(
+        Path(path).exists() for path in {**THEME_TARGETS, **ICON_THEME_TARGETS}
+    )
+
+
+def step_appearance(state: State):
+    if not state.has_desktop:
+        return False
+    # A migrated theme is applied by the tool; asking here would override it.
+    migrated = "extras.theme" in state.migrated_ids
+    rows = []
+    if not migrated:
+        rows += [
+            Row("theme", "Theme", [(name, name) for name, _ in THEMES], state.theme or THEMES[0][0],
+                help=lambda v: dict(THEMES)[v["theme"]] + ". Change it later in Settings, Appearance."),
+            Row("icon_theme", "Icons", [(name, name) for name, _ in ICON_THEMES],
+                state.icon_theme or ICON_THEMES[0][0],
+                help=lambda v: dict(ICON_THEMES)[v["icon_theme"]] + ". Change it later in Settings, Appearance."),
+        ]
+    rows.append(Row(
+        "scale", "Display scale", [("auto", "automatic"), ("1", "100%"), ("2", "200%")], state.scale,
+        help=lambda v: {
+            "auto": "Chosen at each login for the screen in front of you: 200% on high-density "
+                    "laptop panels, 100% everywhere else. Right on every machine this stick visits.",
+            "1": "Always 100%. Text is small on high-density screens.",
+            "2": "Always 200%. Everything is very large on ordinary screens.",
+        }[v["scale"]],
+    ))
+    values = ui.settings("Appearance", "How the desktop looks.", rows)
+    state.theme = values.get("theme", "")
+    state.icon_theme = values.get("icon_theme", "")
+    state.scale = values["scale"]
+    return True
+
+
+# -- hardware --------------------------------------------------------------
+
+def hardware_scan() -> dict:
+    """portlin-install's view of this machine, or nothing if it has none."""
+    if not Path(INSTALL_TOOL).exists():
+        return {}
+    try:
+        proc = subprocess.run([INSTALL_TOOL, "scan", "--json"], input="", capture_output=True, text=True, timeout=60)
+        report = json.loads(proc.stdout) if proc.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    return report if isinstance(report, dict) else {}
+
+
+def _zram_percent() -> int:
+    try:
+        found = re.search(r"(?m)^PERCENT=(\d+)", ZRAM_CONFIG.read_text())
+    except OSError:
+        return 50
+    return int(found.group(1)) if found else 50
+
+
+def step_hardware(state: State):
+    if state.scan is None:
+        ui.busy("Hardware", "Looking at this machine's hardware.")
+        state.scan = hardware_scan()
+    if state.swap is None:
+        state.swap = _zram_percent()
+    # A card the PCI ID database does not know is named just "Device", which
+    # says nothing; its vendor and device numbers at least identify it.
+    gpus = [
+        gpu.get("name", "") if gpu.get("name", "") not in ("", "Device") else f"unnamed device [{gpu.get('id', '?')}]"
+        for gpu in state.scan.get("gpus", []) if isinstance(gpu, dict)
+    ]
+    preface = [(f"Graphics: {', '.join(gpus) if gpus else 'not identified'}", "text")]
+    preface += [(note, "muted") for note in state.scan.get("notes", []) if isinstance(note, str)]
+    rows = []
+    suggested = [s for s in state.scan.get("suggestions", [])
+                 if isinstance(s, dict) and ENTRY_ID.match(str(s.get("entry", "")))]
+    for suggestion in suggested:
+        entry = suggestion["entry"]
+        reason = DRIVER_HELP.get(entry, suggestion.get("reason", ""))
+        if suggestion.get("detail"):
+            reason += f" {suggestion['detail']}."
+        if state.online:
+            rows.append(Row(f"driver:{entry}", DRIVER_LABELS.get(entry, entry),
+                            [(False, "not now"), (True, "install")], entry in state.drivers, help=reason))
+        else:
+            rows.append(Row(f"driver:{entry}", DRIVER_LABELS.get(entry, entry), [(False, "needs network")],
+                            False, enabled=False,
+                            help=reason + " Connect on the Network step to install it now, or later from Software."))
+    memory = _memory_bytes()
+
+    def swap_help(values):
+        percent = values["swap"]
+        if not percent:
+            return ("No swap at all. Programs are closed when memory runs out.", True)
+        size = f"up to {memory * percent / 100 / 1024**3:.1f} GB" if memory else f"{percent}% of memory"
+        return (f"Compressed swap kept in RAM, {size} on this machine. Nothing is ever paged out "
+                "to the stick, which would be slow and wear it out.")
+
+    rows.append(Row("swap", "Compressed swap", [(0, "off"), (25, "25% of RAM"), (50, "50% of RAM"),
+                                                (75, "75% of RAM"), (100, "100% of RAM")],
+                    state.swap if state.swap in (0, 25, 50, 75, 100) else 50, help=swap_help))
+    values = ui.settings("Hardware", "Drivers for this machine, and how memory is stretched.", rows,
+                         preface=preface)
+    state.drivers = [key.split(":", 1)[1] for key, chosen in values.items() if key.startswith("driver:") and chosen]
+    state.swap = values["swap"]
+    return True
+
+
+# -- services --------------------------------------------------------------
+
+def step_services(state: State):
+    has_ssh, has_ufw = Path(SSHD).exists(), Path(UFW).exists()
+    if not has_ssh and not has_ufw:
+        return False
+
+    def ssh_help(values):
+        if not has_ssh:
+            return "The SSH server is not installed on this stick."
+        if not values["ssh"]:
+            return "Nobody can log in to this stick over the network."
+        text = (f"Other computers can log in as {state.username or 'your account'} with its password. "
+                "Turn it on only if you need it.")
+        if values.get("firewall"):
+            return text + " The firewall lets SSH through, slowed down for repeated attempts."
+        return text, True
+
+    def firewall_help(values):
+        if not has_ufw:
+            return "The firewall is not installed on this stick."
+        if values["firewall"]:
+            return ("Blocks connections that other machines start. Everything this stick connects "
+                    "to itself keeps working.")
+        return ("Any service running on this stick can be reached by every machine on the same "
+                "network, which on public Wi-Fi means strangers.", True)
+
+    rows = [
+        Row("ssh", "SSH server", [(False, "off"), (True, "on")] if has_ssh else [(False, "not installed")],
+            state.ssh and has_ssh, help=ssh_help, enabled=has_ssh),
+        Row("firewall", "Firewall", [(True, "on"), (False, "off")] if has_ufw else [(False, "not installed")],
+            state.firewall and has_ufw, help=firewall_help, enabled=has_ufw),
+    ]
+    values = ui.settings("Services", "What this stick lets other machines do.", rows)
+    state.ssh, state.firewall = values["ssh"], values["firewall"]
+    return True
+
+
+# -- storage ---------------------------------------------------------------
+
+def wear_status() -> dict | None:
+    if not Path(WEAR_TOOL).exists():
+        return None
+    try:
+        proc = subprocess.run([WEAR_TOOL, "status"], input="", capture_output=True, text=True, timeout=30)
+        status = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not isinstance(status, dict):
+        return None
+    return {key: bool(status.get(key)) for key, _, _ in WEAR_ROWS}
+
+
+def step_storage(state: State):
+    if state.expand_free is None:
+        ui.busy("Storage", "Measuring the drive.")
+        state.expand_free = expansion_offer()
+        state.wear = wear_status()
+        state.wear_initial = dict(state.wear) if state.wear else None
+    rows = []
+    if state.expand_free:
+        gigabytes = state.expand_free / 1024**3
+        if state.expand is None:
+            state.expand = True
+        rows.append(Row("expand", "Use the whole drive", [(True, "yes"), (False, "not now")], state.expand,
+                        help=lambda v: f"The system fills {gigabytes:.1f} GB of the drive that is not used yet. "
+                                       "Your files and settings are untouched; only the filesystem grows."
+                        if v["expand"] else
+                        (f"{gigabytes:.1f} GB stays unused. portlin-expand can grow it later.", True)))
     else:
-        message("Disk encryption", "\nThe passphrase was changed successfully.")
+        state.expand = False
+    for key, label, detail in WEAR_ROWS if state.wear is not None else ():
+        rows.append(Row(f"wear:{key}", label, [(False, "no"), (True, "yes")], state.wear[key], help=detail))
+    if not rows:
+        return False
+    values = ui.settings("Storage", "How the system uses the drive. Flash wears out with writes, so "
+                                    "portlin writes as little as it can unless asked.", rows)
+    state.expand = values.get("expand", False)
+    if state.wear is not None:
+        state.wear = {key: values[f"wear:{key}"] for key, _, _ in WEAR_ROWS}
+    return True
 
+
+# -- review ----------------------------------------------------------------
+
+def _yes(value: bool, yes: str = "yes", no: str = "no") -> str:
+    return yes if value else no
+
+
+def summary_groups(state: State) -> list[tuple[str, str, str]]:
+    groups = []
+    if state.migration:
+        groups.append(("restore", "Restore",
+                       f"{len(state.migrated_ids)} items from {state.migration.get('label', 'the old drive')}"))
+    keymaps = {code: label for code, label, _ in _keyboard_layouts()}
+    groups.append(("keyboard", "Keyboard", f"{keymaps.get(state.layout, state.layout)} ({state.layout})"))
+    groups.append(("language", "Language", dict(COMMON_LOCALES).get(state.locale, state.locale)))
+    groups.append(("time", "Time zone",
+                   f"{state.timezone}, hardware clock in {_yes(state.rtc_local, 'local time', 'universal time')}"))
+    if state.wifi:
+        connection = f"Wi-Fi {state.wifi['ssid']}"
+    elif state.online:
+        connection = "connected"
+    else:
+        connection = "not connected"
+    groups.append(("network", "Network",
+                   f"{state.hostname}, {connection}, hardware address {dict(MAC_CHOICES)[state.mac]}"))
+    account = state.username + (f" ({state.full_name})" if state.full_name else "")
+    if state.account_plan:
+        account += ", from the old drive"
+    groups.append(("account", "Account", account))
+    security = [
+        f"automatic login {_yes(state.autologin, 'on', 'off')}",
+        f"sudo {_yes(state.sudo_password, 'asks for a password', 'never asks')}",
+    ]
+    if state.has_desktop:
+        security.append(f"locks after {state.lock_minutes} minutes" if state.lock_minutes else "never locks")
+    if state.change_passphrase:
+        security.append("new disk passphrase")
+    if state.found_message:
+        security.append(f"if found: {state.found_message}")
+    groups.append(("security", "Security", ", ".join(security)))
+    if state.has_desktop:
+        appearance = [part for part in (state.theme, state.icon_theme) if part]
+        appearance.append({"auto": "automatic scale", "1": "100% scale", "2": "200% scale"}[state.scale])
+        groups.append(("appearance", "Appearance", ", ".join(appearance)))
+    drivers = ", ".join(DRIVER_LABELS.get(entry, entry) for entry in state.drivers) or "no drivers to install"
+    groups.append(("hardware", "Hardware",
+                   f"{drivers}, swap {state.swap}% of RAM" if state.swap else f"{drivers}, no swap"))
+    if Path(SSHD).exists() or Path(UFW).exists():
+        groups.append(("services", "Services",
+                       f"SSH {_yes(state.ssh, 'on', 'off')}, firewall {_yes(state.firewall, 'on', 'off')}"))
+    storage = []
+    if state.expand_free:
+        storage.append("use the whole drive" if state.expand else "leave the drive as it is")
+    if state.wear:
+        kept = [label[0].lower() + label[1:] for key, label, _ in WEAR_ROWS if state.wear.get(key)]
+        storage.append(", ".join(kept) if kept else "minimal writes")
+    if storage:
+        groups.append(("storage", "Storage", ", ".join(storage)))
+    return groups
+
+
+def step_review(state: State):
+    return ui.review(
+        "Ready to apply",
+        "Check everything once more. Pick a line to change it, or apply. "
+        "This is the first point at which anything is written to the stick.",
+        summary_groups(state),
+    )
+
+
+# --------------------------------------------------------------------------
+# Device discovery and expansion
+# --------------------------------------------------------------------------
 
 def _root_devices() -> tuple[str, str, int] | None:
     """Locate (disk, partition, number) holding the root filesystem.
@@ -791,8 +2543,8 @@ def _unused_inside_partition(partition: str) -> int:
     return max(0, partition_bytes - filesystem_bytes - 64 * 1024**2)
 
 
-def step_expand() -> bool:
-    """Offer to grow the system to fill the stick.
+def expansion_offer() -> int:
+    """Bytes the system could grow into, or 0 when it is not worth offering.
 
     The image is deliberately smaller than any stick worth using, so almost
     every first boot has free space to claim.
@@ -800,25 +2552,15 @@ def step_expand() -> bool:
     located = _root_devices()
     if located is None:
         log("could not identify the root device, skipping expansion")
-        return False
+        return 0
     disk, partition, _ = located
     free = _free_space_bytes(disk, partition) + _unused_inside_partition(partition)
     log(f"expansion: disk={disk} partition={partition} free={free} bytes")
     # Below a gigabyte there is nothing worth the risk of repartitioning.
     if free < 1024**3:
         log("expansion: not enough free space to be worth offering")
-        return False
-
-    gigabytes = free / 1024**3
-    return confirm(
-        "Expand to fill the drive",
-        f"\nThis drive has {gigabytes:.1f} GB of unused space beyond the "
-        f"installed system.\n\n"
-        "Grow the system to use all of it? Your files and settings are "
-        "untouched; this only makes the existing filesystem bigger.\n\n"
-        "You can skip this and do it later, but it is easiest now.",
-        default_yes=True,
-    )
+        return 0
+    return free
 
 
 def apply_expand() -> None:
@@ -893,8 +2635,8 @@ def _resize_mapping(name: str) -> None:
 
     for _ in range(3):
         passphrase = ask_password(
-            "Disk encryption",
-            "\nEnter this drive's passphrase to finish expanding it.\n\n"
+            "Disk passphrase",
+            "Enter this drive's passphrase to finish expanding it. "
             "This is the passphrase you typed when the system started.",
         )
         if not passphrase:
@@ -906,7 +2648,7 @@ def _resize_mapping(name: str) -> None:
         )
         if retry.returncode == 0:
             return
-        message("Disk encryption", "\nThat passphrase was not accepted.")
+        message("Disk passphrase", "That passphrase was not accepted.")
 
     raise RuntimeError(f"could not resize the encrypted mapping: {result.stderr.strip()}")
 
@@ -922,44 +2664,92 @@ def finalise_encryption() -> bool:
     return Path("/run/portlin/finalised").exists()
 
 
-def step_autologin(username: str, *, encrypted: bool, default_yes: bool = False) -> bool:
-    warning = (
-        "Convenient on a stick you carry, but anyone who boots it reaches your "
-        "desktop without typing anything."
-    )
-    if not encrypted:
-        # An encrypted stick gets a self-unlocking keyring below, so the cost
-        # named here applies only where that trade is not on offer.
-        warning += (
-            "\n\nBecause this stick is not encrypted, it also means the password "
-            "keyring stays locked. Browsers and the Wi-Fi applet will ask for "
-            "your password the first time they need a saved one after each boot."
-        )
-    return confirm(
-        "Automatic login",
-        f"\nLog in as '{username}' automatically when this stick boots?\n\n{warning}",
-        default_yes=default_yes,
-    )
+def _luks_device() -> str | None:
+    """The backing device of the encrypted root, if this stick has one.
+
+    Read from crypttab rather than guessed, so it stays correct no matter how the
+    stick's partitions are enumerated on this particular machine.
+    """
+    if not CRYPTTAB.exists():
+        return None
+    for line in CRYPTTAB.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        source = fields[1]
+        if source.startswith("UUID="):
+            path = Path("/dev/disk/by-uuid") / source.split("=", 1)[1]
+            return str(path) if path.exists() else None
+        return source if Path(source).exists() else None
+    return None
 
 
-def step_sudo_password(username: str, *, encrypted: bool, autologin: bool, default_yes: bool = True) -> bool:
-    warning = (
-        "Saying no lets any command run as root without asking, so anyone who "
-        "reaches this desktop owns the whole system."
-    )
-    if autologin and not encrypted:
-        # Neither a passphrase at boot nor a password at the login screen, so
-        # a waiver here would leave nothing at all on the path from plugging
-        # the stick in to root on the machine it was plugged into.
-        warning += (
-            "\n\nThis stick is not encrypted and logs in automatically, so "
-            "nothing else would stand in the way either."
-        )
-    return confirm(
-        "Administrator password",
-        f"\nRequire a password when '{username}' runs sudo?\n\n{warning}",
-        default_yes=default_yes,
-    )
+def change_luks_passphrase(device: str, current: str, new: str) -> bool:
+    """Replace the passphrase in the keyslot ``current`` opens.
+
+    Both passphrases travel by pipe: the current one on stdin, the new one on
+    a second descriptor cryptsetup reads as its new key file. Neither is ever
+    an argument, which /proc would show to every user, nor a file on disk.
+    """
+    read_end, write_end = os.pipe()
+    argv = ["cryptsetup", "luksChangeKey", "--key-file", "-", device, f"/dev/fd/{read_end}"]
+    log(f"run: {' '.join(argv)}")
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, pass_fds=(read_end,))
+    except OSError as exc:
+        os.close(read_end)
+        os.close(write_end)
+        log(f"  could not start cryptsetup: {exc}")
+        return False
+    os.close(read_end)
+    try:
+        with os.fdopen(write_end, "w") as handle:
+            handle.write(new)
+    except BrokenPipeError:
+        # cryptsetup gave up before reading the new passphrase; its exit
+        # status below says so.
+        pass
+    _, stderr = proc.communicate(current)
+    if stderr.strip():
+        log(f"  stderr: {stderr.strip()}")
+    return proc.returncode == 0
+
+
+def step_change_passphrase(device: str) -> None:
+    def check(values):
+        if not values["current"]:
+            return "current", "Type the passphrase you unlocked this stick with."
+        if len(values["new"]) < 8:
+            return "new", "Use at least 8 characters. This is the only thing between the stick and a stranger.", "new", "again"
+        if values["new"] != values["again"]:
+            return "new", "Those did not match. Type them again.", "new", "again"
+        return None
+
+    for _ in range(3):
+        try:
+            values = ui.form(
+                "Disk passphrase",
+                "Choose the passphrase this stick asks for at boot. Whoever built it knows the "
+                "current one; after this, only you will.",
+                [
+                    Field("current", "Current passphrase", secret=True, limit=512),
+                    Field("new", "New passphrase", secret=True, limit=512),
+                    Field("again", "Repeat new passphrase", secret=True, limit=512),
+                ],
+                validate=check, back_label="keep the current one", submit="Change passphrase",
+            )
+        except Back:
+            break
+        ui.busy("Disk passphrase", "Changing the passphrase. This takes a few seconds.")
+        if change_luks_passphrase(device, values["current"], values["new"]):
+            ui.message("Disk passphrase", "The passphrase was changed. Use the new one from the next boot on.")
+            return
+        ui.message("Disk passphrase", "The passphrase was not changed. Check the current passphrase and try again.")
+    ui.message("Disk passphrase", "The passphrase was not changed. The existing one still works.")
 
 
 # --------------------------------------------------------------------------
@@ -983,17 +2773,29 @@ def apply_keyboard(layout: str) -> None:
     run(["localectl", "set-x11-keymap", layout], check=False)
 
 
-def apply_locale(locale: str) -> None:
-    Path("/etc/locale.gen").write_text(f"{locale} UTF-8\nC.UTF-8 UTF-8\n")
+def apply_locale(locale_name: str) -> None:
+    Path("/etc/locale.gen").write_text(f"{locale_name} UTF-8\nC.UTF-8 UTF-8\n")
     run(["locale-gen"])
-    Path("/etc/default/locale").write_text(f'LANG="{locale}"\n')
-    run(["localectl", "set-locale", f"LANG={locale}"], check=False)
+    Path("/etc/default/locale").write_text(f'LANG="{locale_name}"\n')
+    run(["localectl", "set-locale", f"LANG={locale_name}"], check=False)
 
 
 def apply_timezone(timezone: str) -> None:
     if run(["timedatectl", "set-timezone", timezone], check=False).returncode != 0:
         run(["ln", "-sf", f"/usr/share/zoneinfo/{timezone}", "/etc/localtime"], check=False)
         Path("/etc/timezone").write_text(f"{timezone}\n")
+
+
+def apply_clock(local: bool) -> None:
+    """Say which time the hardware clock keeps, without rewriting the clock.
+
+    --adjust-system-clock makes timedatectl reread the hardware clock under
+    the new rule, rather than write this boot's time back into it. Writing it
+    back is what would shift the clock of the Windows PC the stick is in.
+    """
+    done = run(["timedatectl", "set-local-rtc", "1" if local else "0", "--adjust-system-clock"], check=False)
+    if done.returncode != 0:
+        ADJTIME.write_text("0.0 0 0.0\n0\n" + ("LOCAL" if local else "UTC") + "\n")
 
 
 def apply_hostname(hostname: str) -> None:
@@ -1053,19 +2855,54 @@ def apply_icon_theme(icon_theme: str) -> None:
     log(f"icon theme set to {icon_theme}")
 
 
+def apply_scale(scale: str) -> None:
+    _write(SCALE_CONFIG, f"scale={scale}\n")
+    _write(SCALE_SCRIPT, SCALE_SCRIPT_TEXT, 0o755)
+    _write(SCALE_AUTOSTART, SCALE_AUTOSTART_TEXT)
+
+
+def apply_screen_lock(minutes: int, on_suspend: bool) -> None:
+    def flag(value: bool) -> str:
+        return "true" if value else "false"
+
+    _write(XFCONF_DEFAULTS / "xfce4-screensaver.xml", SCREENSAVER_XML.format(
+        idle=flag(minutes > 0), minutes=minutes or 10,
+        lock=flag(minutes > 0 or on_suspend), suspend=flag(on_suspend),
+    ))
+    _write(XFCONF_DEFAULTS / "xfce4-power-manager.xml", POWER_MANAGER_XML.format(suspend=flag(on_suspend)))
+
+
+def _account_from_earlier_run() -> str | None:
+    """The account a setup that failed after creating it left behind, if any.
+
+    Recorded in the sentinel, which only ever exists while setup is unfinished,
+    so the next run can take that account up again rather than refusing its
+    name as taken and forcing a second account onto the stick.
+    """
+    try:
+        found = re.search(r"(?m)^account=(.+)$", SENTINEL.read_text())
+    except OSError:
+        return None
+    return found.group(1) if found and USERNAME_RE.match(found.group(1)) else None
+
+
 def apply_account(username: str, full_name: str, password: str) -> None:
     existing = {g.gr_name for g in grp.getgrall()}
     groups = [g for g in DESIRED_GROUPS if g in existing]
-    run(
-        [
-            "useradd",
-            "--create-home",
-            "--shell", "/bin/bash",
-            "--comment", full_name,
-            "--groups", ",".join(groups),
-            username,
-        ]
-    )
+    if username == _account_from_earlier_run() and _user_exists(username):
+        run(["usermod", "--comment", full_name, "--append", "--groups", ",".join(groups), username])
+    else:
+        run(
+            [
+                "useradd",
+                "--create-home",
+                "--shell", "/bin/bash",
+                "--comment", full_name,
+                "--groups", ",".join(groups),
+                username,
+            ]
+        )
+        SENTINEL.write_text(f"pending\naccount={username}\n")
     run(["chpasswd"], stdin=f"{username}:{password}\n")
 
 
@@ -1136,7 +2973,8 @@ def apply_keyring_autounlock(username: str) -> bool:
     called for encrypted sticks, where LUKS already protects the secrets at rest
     and the keyring's own password guards nothing the boot passphrase has not
     covered. On an unencrypted stick the same change would leave saved passwords
-    readable to anyone who picks the stick up, so step_autologin warns instead.
+    readable to anyone who picks the stick up, so the security screen warns
+    instead.
 
     gnome-keyring's on-disk format is encrypted even when the password is empty,
     so writing the file directly would mean deriving keys here. --login is the
@@ -1165,12 +3003,146 @@ def apply_keyring_autounlock(username: str) -> bool:
         stdin="",
         check=False,
     )
-    run(["pkill", "-u", username, "-x", "gnome-keyring-daemon"], check=False)
+    # -f, because the kernel truncates a process name to 15 characters and
+    # "gnome-keyring-daemon" would never match it exactly.
+    run(["pkill", "-u", username, "-f", GNOME_KEYRING_DAEMON], check=False)
 
     if not keyring.exists():
         log(f"keyring: {keyring} was not created; autologin will prompt for secrets")
         return False
     return True
+
+
+def _connection_file_name(ssid: str, identifier: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", ssid).strip("._") or "wifi"
+    return f"{safe}-{identifier[:8]}.nmconnection"
+
+
+def apply_network(wifi: dict | None, mac: str) -> None:
+    """Keep the Wi-Fi joined during setup, and the hardware-address rule."""
+    if wifi and Path(wifi["path"]).exists():
+        source = Path(wifi["path"])
+        _write_private(NM_CONNECTIONS / _connection_file_name(wifi["ssid"], wifi["uuid"]), source.read_text())
+        source.unlink()
+        run(["nmcli", "connection", "reload"], check=False)
+    if mac == "off":
+        NM_MAC_CONF.unlink(missing_ok=True)
+    else:
+        _write(NM_MAC_CONF, MAC_CONF.format(mode=mac))
+    NM_RUN_MAC_CONF.unlink(missing_ok=True)
+    run(["nmcli", "general", "reload", "conf"], check=False)
+
+
+def apply_drivers(entries: list[str], progress: Progress) -> bool:
+    """Install drivers through portlin-install, narrating its progress lines.
+
+    Returns whether a kernel module was built, which needs a restart before
+    the driver is in use.
+    """
+    argv = [INSTALL_TOOL, "install", *entries]
+    log(f"run: {' '.join(argv)}")
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    reboot, failed = False, []
+    for line in proc.stdout:
+        line = line.rstrip()
+        log(f"  {line}")
+        if line.startswith("::step "):
+            progress.note(line[7:].strip())
+        elif line.startswith("::progress "):
+            try:
+                progress.note(progress.details[progress.current], int(line.split()[1]) / 100)
+            except (ValueError, IndexError):
+                pass
+        elif line.startswith("::reboot"):
+            reboot = True
+        elif line.startswith("::result failed"):
+            failed.append(line.split()[2] if len(line.split()) > 2 else "?")
+        else:
+            progress.note(progress.details[progress.current])
+    if proc.wait() != 0 or failed:
+        raise RuntimeError(f"portlin-install could not install {', '.join(failed) or ', '.join(entries)}")
+    return reboot
+
+
+def apply_swap(percent: int) -> None:
+    if not percent:
+        run(["systemctl", "disable", "--now", "zramswap.service"], check=False)
+        return
+    try:
+        text = ZRAM_CONFIG.read_text()
+    except OSError:
+        text = "ALGO=zstd\n"
+    if re.search(r"(?m)^PERCENT=", text):
+        text = re.sub(r"(?m)^PERCENT=.*$", f"PERCENT={percent}", text)
+    else:
+        text = text.rstrip("\n") + f"\nPERCENT={percent}\n"
+    ZRAM_CONFIG.write_text(text)
+    run(["systemctl", "enable", "zramswap.service"], check=False)
+    run(["systemctl", "restart", "zramswap.service"], check=False)
+
+
+def apply_ssh(enabled: bool) -> None:
+    """Turn the SSH server on or off.
+
+    The image ships without host keys, because a rootfs is written to many
+    sticks and keys baked into it would be shared by all of them. Each stick
+    makes its own the first time its server is switched on.
+    """
+    if enabled:
+        run(["ssh-keygen", "-A"])
+        run(["systemctl", "enable", "--now", "ssh.service"])
+    else:
+        run(["systemctl", "disable", "--now", "ssh.service"], check=False)
+
+
+def apply_firewall(enabled: bool, ssh: bool) -> None:
+    if not enabled:
+        run([UFW, "--force", "disable"], check=False)
+        return
+    run([UFW, "default", "deny", "incoming"])
+    run([UFW, "default", "allow", "outgoing"])
+    if ssh:
+        # limit rather than allow: six attempts in thirty seconds from one
+        # address and that address is refused for a while.
+        run([UFW, "limit", "22/tcp"])
+    run([UFW, "--force", "enable"])
+    run(["systemctl", "enable", "ufw.service"], check=False)
+
+
+def apply_wear(wanted: dict, initial: dict) -> None:
+    for key, value in wanted.items():
+        if initial.get(key) != value:
+            run([WEAR_TOOL, "set", key, "1" if value else "0"])
+
+
+def apply_found_message(text: str) -> None:
+    """Write the owner's note where a finder will see it, or remove it everywhere."""
+    if GRUB_THEME.exists():
+        theme = GRUB_THEME.read_text()
+        theme = re.sub(rf"\n?{re.escape(FOUND_BEGIN)}.*?{re.escape(FOUND_END)}\n?", "\n", theme, flags=re.S)
+        if text:
+            theme = theme.rstrip("\n") + "\n\n" + "\n".join([
+                FOUND_BEGIN,
+                "+ label {",
+                f'    text = "{text}"',
+                "    left = 0",
+                "    top = 6%",
+                "    width = 100%",
+                '    align = "center"',
+                '    color = "#E8EDF3"',
+                '    font = "GNU Unifont Regular 16"',
+                "}",
+                FOUND_END,
+            ]) + "\n"
+        GRUB_THEME.write_text(theme)
+    if text:
+        _write(FOUND_MESSAGE, text + "\n")
+        _write(FOUND_HOOK, FOUND_HOOK_TEXT, 0o755)
+        _write(FOUND_PREMOUNT, FOUND_PREMOUNT_TEXT, 0o755)
+    else:
+        for path in (FOUND_MESSAGE, FOUND_HOOK, FOUND_PREMOUNT):
+            path.unlink(missing_ok=True)
 
 
 def drop_passphrase_stash() -> None:
@@ -1197,146 +3169,202 @@ def refresh_initramfs_for_keymap(encrypted: bool) -> None:
     The passphrase prompt happens in the initramfs, long before /etc/default/keyboard
     is read at boot. Without this rebuild a passphrase containing symbols is typed
     on a US layout no matter what the user selected here, which is a genuinely
-    horrible way to be locked out of your own stick.
+    horrible way to be locked out of your own stick. The same rebuild carries
+    the owner's "if found" message in, which is only ever shown at that prompt.
     """
     if not encrypted:
         return
     run(["update-initramfs", "-u", "-k", "all"], check=False)
 
 
-# --------------------------------------------------------------------------
+def apply_all(state: State) -> None:
+    """Apply every answer, in the order the system needs them.
 
-def wizard() -> None:
-    step_welcome()
+    Each task is either essential, in which case a failure stops setup and it
+    runs again next boot, or optional, in which case the failure is reported
+    at the end and everything else still happens. Nothing optional is allowed
+    to leave a stick without an account.
+    """
+    encrypted = state.luks_device is not None
+    tasks: list[tuple[str, object, bool]] = []
 
-    migration = None
-    candidates = migration_candidates()
-    if candidates:
-        migration = step_migration(candidates)
-    prefill = (migration or {}).get("identity") or {}
-    account_plan = (migration or {}).get("account")
-    # The plan is the tool's output, and only an account named the way the
-    # screen below would accept is taken from it; anything else means the
-    # account is asked for here as usual.
-    if not isinstance(account_plan, dict) or not USERNAME_RE.fullmatch(str(account_plan.get("name") or "")):
-        account_plan = None
-    migrated_ids = set((migration or {}).get("ids") or [])
+    def task(label, function, optional=False):
+        tasks.append((label, function, optional))
 
-    layout, _ = step_keyboard(default=prefill.get("keyboard", ""))
-    apply_keyboard(layout)
-
-    locale = step_locale(default=prefill.get("locale", ""))
-    timezone = step_timezone(default=prefill.get("timezone", ""))
-    hostname = step_hostname(default=prefill.get("hostname") or "portlin")
-    if account_plan:
-        # The tool recreates the account with its password hash, so there is
-        # no password to ask for and none to hold here.
-        username, full_name, password = account_plan.get("name", ""), account_plan.get("gecos", ""), None
-        message(
-            "Your account",
-            f"\nThe account '{username}' comes over from the old drive, with its password.",
-        )
-    else:
-        username, full_name, password = step_account()
-
-    luks_device = _luks_device()
-    autologin = step_autologin(
-        username, encrypted=luks_device is not None,
-        default_yes=bool(account_plan and account_plan.get("autologin")),
-    )
-    sudo_password = step_sudo_password(
-        username, encrypted=luks_device is not None, autologin=autologin,
-        default_yes=not (account_plan and account_plan.get("sudo_nopasswd")),
-    )
-    has_desktop = _desktop_installed()
-    # A migrated theme is applied by the tool; asking here would override it.
-    theme = step_theme() if has_desktop and "extras.theme" not in migrated_ids else ""
-    icon_theme = step_icon_theme() if has_desktop and "extras.theme" not in migrated_ids else ""
-    expand = step_expand()
-
-    if not confirm(
-        "Ready to apply",
-        f"\nAccount:   {username}\n"
-        f"Computer:  {hostname}\n"
-        f"Language:  {locale}\n"
-        f"Keyboard:  {layout}\n"
-        f"Time zone: {timezone}\n"
-        f"Autologin: {'yes' if autologin else 'no'}\n"
-        f"Sudo:      {'asks for a password' if sudo_password else 'no password'}\n"
-        + (f"Theme:     {theme}\n" if theme else "")
-        + (f"Icons:     {icon_theme}\n" if icon_theme else "")
-        + (f"Restore:   {len(migrated_ids)} items from {migration.get('label', 'the old drive')}\n" if migration else "")
-        + f"Expand:    {'yes, use the whole drive' if expand else 'no'}\n\n"
-        "Apply these settings now?",
-    ):
-        raise Cancelled()
-
-    # Before anything else: if the initramfs just encrypted this drive, make
-    # that permanent, so a crash later in setup cannot leave a stick that is
-    # encrypted but no longer bootable.
+    # Before anything else: if the initramfs just encrypted this drive, the
+    # finaliser has already made that permanent, so a crash later in setup
+    # cannot leave a stick that is encrypted but no longer bootable.
     if finalise_encryption():
-        info(
-            "Encryption",
-            "\nThis drive was encrypted during boot.\n\n"
-            "Recording the settings so it unlocks normally from now on.",
-        )
-
-    if expand:
-        # First, so everything below writes into the full-size filesystem rather
-        # than the handful of gigabytes the image shipped with.
-        info(
-            "Expanding",
-            "\nGrowing the system to fill the drive.\n\n"
-            "This takes a few seconds. Do not remove the drive.",
-        )
-        apply_expand()
-
-    apply_locale(locale)
-    apply_timezone(timezone)
-    apply_hostname(hostname)
-    if password is not None:
-        apply_account(username, full_name, password)
-    if migration:
+        task("Encryption recorded during boot", lambda: None)
+    if state.expand:
+        # First, so everything below writes into the full-size filesystem
+        # rather than the handful of gigabytes the image shipped with.
+        task("Growing the system to fill the drive", apply_expand)
+    if state.wear is not None and state.wear_initial is not None:
+        task("Storage wear settings", lambda: apply_wear(state.wear, state.wear_initial), True)
+    task("Language and time zone", lambda: (apply_locale(state.locale), apply_timezone(state.timezone),
+                                            apply_clock(bool(state.rtc_local))))
+    task("Computer name", lambda: apply_hostname(state.hostname))
+    if state.password is not None:
+        task(f"Creating the account {state.username}",
+             lambda: apply_account(state.username, state.full_name, state.password))
+    if state.migration:
         # Right after the account exists, so files land under the right uid,
         # and before anything that reads the home directory.
-        if not apply_migration():
-            message(
-                "Restore",
-                "\nNot everything could be brought over. The details are in "
-                "/var/log/portlin-migrate.log.\n\nSetup continues. You can try again "
-                "later from Migrate in the applications menu.",
-            )
-        if password is None and not _user_exists(username):
-            raise RuntimeError(f"the account {username} was not created by the restore")
-    if not apply_sudo_password(username, sudo_password):
-        message(
-            "Administrator password",
-            "\nThe rule that skips the sudo password could not be installed, "
-            f"so sudo will ask '{username}' for one after all.",
-        )
-    if theme:
-        apply_theme(theme)
-    if icon_theme:
-        apply_icon_theme(icon_theme)
-    apply_autologin(username, autologin)
-    # Only together: a password login unlocks the keyring by itself, and without
-    # LUKS a passwordless keyring trades away real protection for convenience.
-    if autologin and luks_device:
-        apply_keyring_autounlock(username)
-    drop_passphrase_stash()
-    refresh_initramfs_for_keymap(luks_device is not None)
+        def restore():
+            if not apply_migration():
+                state.warnings.append("Not everything could be restored. The details are in "
+                                      "/var/log/portlin-migrate.log, and Migrate in the menu can try again.")
+            if state.password is None and not _user_exists(state.username):
+                raise RuntimeError(f"the account {state.username} was not created by the restore")
+        task(f"Restoring from {state.migration.get('label', 'the old drive')}", restore)
 
-    if luks_device:
-        step_change_passphrase(luks_device)
+    def privilege():
+        if not apply_sudo_password(state.username, state.sudo_password):
+            state.warnings.append("The rule that skips the sudo password could not be installed, "
+                                  f"so sudo asks {state.username} for one after all.")
+    task("Administrator access", privilege)
+
+    def login():
+        apply_autologin(state.username, state.autologin)
+        # Only together: a password login unlocks the keyring by itself, and
+        # without LUKS a passwordless keyring trades away real protection.
+        if state.autologin and encrypted:
+            apply_keyring_autounlock(state.username)
+    task("Login", login)
+    if state.has_desktop:
+        def appearance():
+            if state.theme:
+                apply_theme(state.theme)
+            if state.icon_theme:
+                apply_icon_theme(state.icon_theme)
+        if state.theme or state.icon_theme:
+            task("Theme and icons", appearance)
+        task("Display scale", lambda: apply_scale(state.scale), True)
+        task("Screen lock", lambda: apply_screen_lock(state.lock_minutes, state.lock_on_suspend), True)
+    task("Network", lambda: apply_network(state.wifi, state.mac), True)
+    if state.drivers and state.online:
+        def drivers():
+            # progress is bound below, before any task runs.
+            state.reboot = apply_drivers(state.drivers, progress) or state.reboot
+        task("Installing drivers", drivers, True)
+
+    def swap():
+        # Restarting zramswap pulls every swapped page back into RAM, so it
+        # is only worth doing when the size actually changes.
+        if not state.swap or state.swap != _zram_percent():
+            apply_swap(state.swap)
+    task("Compressed swap", swap, True)
+    if Path(SSHD).exists():
+        task("SSH server", lambda: apply_ssh(state.ssh), True)
+    if Path(UFW).exists():
+        task("Firewall", lambda: apply_firewall(state.firewall, state.ssh and Path(SSHD).exists()), True)
+    task("If-found message", lambda: apply_found_message(state.found_message), True)
+    task("Boot files", lambda: (drop_passphrase_stash(), refresh_initramfs_for_keymap(encrypted)))
+
+    progress = Progress(ui, "Applying", "Setting the stick up. Do not remove it.", [t[0] for t in tasks])
+    for index, (label, function, optional) in enumerate(tasks):
+        progress.start(index)
+        try:
+            function()
+        except Exception as exc:
+            if not optional:
+                raise
+            log(traceback.format_exc())
+            progress.finish(index, "fail", str(exc).splitlines()[0] if str(exc) else "failed")
+            state.warnings.append(f"{label}: {str(exc).splitlines()[0] if str(exc) else 'failed'}")
+            continue
+        progress.finish(index)
+
+
+# --------------------------------------------------------------------------
+
+STEPS = [
+    ("welcome", "Welcome", step_welcome),
+    ("restore", "Restore", step_migration),
+    ("keyboard", "Keyboard", step_keyboard),
+    ("language", "Language", step_locale),
+    ("time", "Time zone", step_timezone),
+    ("network", "Network", step_network),
+    ("account", "Account", step_account),
+    ("security", "Security", step_security),
+    ("appearance", "Appearance", step_appearance),
+    ("hardware", "Hardware", step_hardware),
+    ("services", "Services", step_services),
+    ("storage", "Storage", step_storage),
+    ("review", "Review", step_review),
+]
+
+
+def wizard() -> State:
+    state = State()
+    state.candidates = migration_candidates()
+    state.luks_device = _luks_device()
+    state.has_desktop = _desktop_installed()
+    steps = [step for step in STEPS if step[0] != "restore" or state.candidates]
+    ui.sections = [(key, label) for key, label, _ in steps]
+    keys = [key for key, _, _ in steps]
+
+    # Walk the steps, keeping the ones actually shown so Esc can retrace them.
+    # The review step hands back a section to edit; after that one step, the
+    # walk jumps straight back to the review rather than through everything
+    # after it again.
+    index, shown, review_at = 0, [], None
+    while index < len(steps):
+        key, _, step = steps[index]
+        ui.current = key
+        try:
+            outcome = step(state)
+        except Back:
+            if review_at is not None:
+                index, review_at = review_at, None
+            elif shown:
+                index = shown.pop()
+            continue
+        ui.visited.add(key)
+        if isinstance(outcome, str):
+            review_at, index = index, keys.index(outcome)
+            continue
+        # An edit from the review is a detour, not a new step on the way back:
+        # recording it would make Esc from the review land on it twice.
+        if outcome is not False and review_at is None:
+            shown.append(index)
+        if review_at is not None:
+            index, review_at = review_at, None
+            continue
+        index += 1
+
+    ui.current = ""
+    ui.postpone_allowed = False
+    apply_all(state)
+    if state.luks_device and state.change_passphrase:
+        step_change_passphrase(state.luks_device)
 
     SENTINEL.unlink(missing_ok=True)
     run(["systemctl", "disable", "portlin-firstboot.service"], check=False)
-    message(
-        "All set",
-        f"\nWelcome, {full_name or username}.\n\n"
-        "The desktop is starting now. Everything you change on this stick is "
-        "saved to it, on whatever machine you plug it into next.",
-    )
+
+    text = (f"Welcome, {state.full_name or state.username}.\n\n"
+            "Everything you change on this stick is saved to it, on whatever machine you plug it into next.")
+    if state.warnings:
+        text += "\n\nSome things need another look:\n" + "\n".join(f"  {ui.g('fail')} {w}" for w in state.warnings)
+    buttons = ["Start the desktop"]
+    if state.reboot:
+        text += "\n\nThe new driver is in use after a restart."
+        buttons = ["Restart now", "Start the desktop"]
+    choice = ui.dialog("All set", text, buttons, back=False)
+    state.reboot = state.reboot and choice == 0
+    return state
+
+
+def _say(title: str, text: str) -> None:
+    """Report on whatever is left of the screen, curses or not."""
+    if ui.screen is not None:
+        try:
+            ui.message(title, text)
+            return
+        except curses.error:
+            pass
+    print(f"\n{title}\n\n{text}\n")
 
 
 def main() -> int:
@@ -1344,25 +3372,26 @@ def main() -> int:
         print("portlin-firstboot must run as root", file=sys.stderr)
         return 1
 
+    restart = False
     try:
         claim_console(True)
-        wizard()
+        ui.start()
+        restart = wizard().reboot
     except Cancelled:
         # The sentinel stays, so setup runs again on the next boot rather than
         # leaving the stick with no way in.
-        message(
-            "Setup postponed",
-            "\nSetup was cancelled. It will run again the next time this stick "
-            "boots.\n\nThere is no user account yet, so you cannot log in until "
-            "it is finished.",
-        )
+        ui.postpone_allowed = False
+        _say("Setup postponed", POSTPONE_TEXT)
         return 1
     except Exception:
         detail = traceback.format_exc()
-        log(detail)
-        message(
+        log(detail, force=True)
+        # stderr is the journal, for when the log cannot be written either.
+        print(detail, file=sys.stderr)
+        ui.postpone_allowed = False
+        _say(
             "Setup failed",
-            "\nSomething went wrong during setup.\n\n"
+            "Something went wrong during setup.\n\n"
             f"The details are in {LOG}.\n\n"
             "Setup will run again the next time this stick boots.",
         )
@@ -1372,7 +3401,10 @@ def main() -> int:
         # failure paths above, so a crash mid-setup does not leave it open.
         close_migration()
         # Always hand the console back, including on the failure paths above.
+        ui.stop()
         claim_console(False)
+    if restart:
+        run(["systemctl", "reboot"], check=False)
     return 0
 
 

@@ -12,8 +12,8 @@ Think Rufus' "Windows To Go", for Linux.
 sudo portlin create --target /dev/sdb --encrypt
 ```
 
-Boot the result anywhere and a first-run wizard asks for an account, keyboard, language and time
-zone, then offers to grow the system to fill the drive.
+Boot the result anywhere and a first-run wizard sets it up: account, keyboard, language, time zone,
+Wi-Fi, security, appearance, drivers, services, and growing the system to fill the drive.
 
 ## Requirements
 
@@ -280,9 +280,29 @@ having expanded, and the same three commands work later by hand.
 <summary><b>First boot in detail</b></summary>
 
 The image ships with no user, an empty machine-id, no SSH host keys and a locked root account.
-`portlin-firstboot.service` runs on tty1 before LightDM and collects the account, hostname, locale,
-keyboard, time zone and whether sudo should ask that account for a password. On an encrypted stick it also offers to change the LUKS passphrase, so the
-person holding the stick owns the key rather than whoever built it.
+`portlin-firstboot.service` runs on tty1 before LightDM. It is a full-screen curses program in
+portlin's colours (it repaints the Linux console palette with the brand tokens), with a step list
+down the side, Esc to go back to any earlier answer, and F10 to postpone. Every screen arrives with
+an answer already chosen, so Enter alone gets through it. It asks for:
+
+| Step | What it sets |
+|---|---|
+| Restore | Only shown when another portlin is plugged in; hands over to `portlin-migrate` |
+| Keyboard, Language | Searchable lists of every XKB layout and UTF-8 locale on the system |
+| Time zone | Searchable zone list, then whether the hardware clock keeps UTC or local time (preselected to local when the machine boots Windows, so the stick never shifts a Windows PC's clock) |
+| Network | Computer name; the hardware address networks see (random per network, random every time, or the real one); Wi-Fi, joined there and then with a profile kept in `/run` until the summary is accepted |
+| Account | Full name, username and password on one form |
+| Security | Automatic login, whether sudo asks for a password, screen lock delay and lock on suspend, a new LUKS passphrase (only when someone else chose the current one), and an "if found" message shown on the boot menu and above the passphrase prompt |
+| Appearance | Theme, icons, and display scale: automatic picks 100% or 200% at every login for whatever screen the stick is plugged into |
+| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network; compressed swap size |
+| Services | SSH server (off by default, host keys generated on first enable) and the ufw firewall (on by default, letting SSH through rate-limited when it is on) |
+| Storage | Growing the system to fill the drive, and the storage-wear switches `portlin-wear` owns |
+
+Nothing is written until the summary screen is accepted, apart from the keyboard layout, which
+takes effect straight away so everything after it is typed on the right keys. The summary lists
+every answer by section; choosing a line jumps to that step and straight back. Applying shows each
+task as it runs. Optional tasks (drivers, firewall, scale and so on) that fail are reported at the
+end without stopping setup; anything that would leave the stick without a working account stops it.
 
 If the wizard is cancelled or crashes its sentinel stays in place and it runs again next boot,
 rather than stranding you at a login screen with no accounts. On a stick encrypted during that boot

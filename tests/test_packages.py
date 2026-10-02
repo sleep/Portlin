@@ -83,8 +83,9 @@ class TestPortabilityRequirements:
         assert "network-manager" in packages.resolve(packages.MINIMAL_GROUPS)
 
     def test_the_first_boot_wizard_has_its_dependencies(self):
-        # The wizard is a python3 script driving whiptail. Missing either leaves
-        # the stick with no way to create an account.
+        # The wizard is a python3 curses program, and the migration screens it
+        # hands over to are whiptail. Missing either leaves the stick with no
+        # way to create an account.
         resolved = packages.resolve(packages.MINIMAL_GROUPS)
         assert "whiptail" in resolved
         assert "python3" in resolved
