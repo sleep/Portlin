@@ -11,6 +11,11 @@ like portlin-info -- everything is asked of the running system because a stick
 moves between machines. The themed ~/.bashrc runs this once per terminal
 (SHLVL 1); it never writes state and never fails loudly enough to matter: a
 banner is allowed to be missing, never to break shell startup.
+
+The whole banner fits the 80 columns a new terminal window opens with, and
+narrows in steps below that rather than letting lines wrap: the info column
+alone, then a single line. Values that would run past the right edge are cut
+with an ellipsis, optional details first.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, "/usr/lib/portlin")
@@ -31,21 +37,80 @@ RELEASE = Path("/etc/portlin-release")
 OS_RELEASE = Path("/etc/os-release")
 PROC_UPTIME = Path("/proc/uptime")
 
-# The mark's four bars in character cells, widths carrying the partition-map
-# rank order of the drawn mark (1 MiB EF02, 512 MiB ESP, 1 GiB /boot, root).
-# The fastfetch logo at ~/.config/fastfetch/portlin.txt is the same geometry
-# with {1}/{2} color placeholders, and a test holds the two in agreement.
-BAR_WIDTHS = (2, 5, 7, 12)
+# The mark in character cells: a rounded enclosure 26 cells wide inside,
+# holding four bars anchored at its left edge (the device start) with widths
+# in the drawn mark's proportions, 10/22/30/44 of its 50 units (1 MiB EF02,
+# 512 MiB ESP, 1 GiB /boot, root). Root's last cells are a dissolve, the
+# wallpaper's picture of the image growing into whatever drive it is on.
+# The fastfetch logo at ~/.config/fastfetch/portlin.txt is the plain glyphs
+# of this geometry with {1}/{2} color placeholders, and a test holds the two
+# in agreement.
+INNER_WIDTH = 26
+BAR_WIDTHS = (5, 11, 16, 23)
+DISSOLVE = "▓▒░"
+ASCII_DISSOLVE = "=-."
+# Inner rows top to bottom, by the bar each one holds: two empty rows above
+# and one below, as the drawn mark's 10.5-unit top and 6-unit bottom margins
+# sit, and a bar on every other row between.
+LAYOUT = (None, None, 0, None, 1, None, 2, None, 3, None)
 
-# SGR codes, indexed to the shipped 16-color terminal palette
-# (portlin/resources/runtime/theme/terminalrc). Plain codes, not truecolor:
-# the linux VT and minimal terminals understand exactly these.
-MUTED = "\033[37m"
-PAPER = "\033[97m"
-BOLD = "\033[1m"
-GREEN = "\033[32m"
-ACCENT = "\033[31m"  # Reserved for root: the last bar, the #, the LUKS state.
+# Palette roles: the SGR code that names each in the shipped 16-color
+# terminal palette (portlin/resources/runtime/theme/terminalrc), and the hex
+# it is set to there. 16-color codes are what the linux VT and minimal
+# terminals understand; the hex values let a truecolor terminal draw
+# gradients between the same colors, so both looks are one palette.
+PALETTE = {
+    "ink": ("30", "#12161C"),
+    "accent": ("31", "#FF3355"),  # Reserved for the encrypted root.
+    "green": ("32", "#4FBF8B"),
+    "blue": ("34", "#5AA9E6"),
+    "muted": ("37", "#7C8B9E"),
+    "line": ("90", "#2C3542"),
+    "paper": ("97", "#E8EDF3"),
+}
 RESET = "\033[0m"
+
+# Gradient stops. The enclosure is lit from its top-left corner; the system
+# bars brighten toward their growing end; root runs from deep crimson into
+# the accent and then dissolves toward the background.
+STROKE_RAMP = ("#B7C3D1", "#7C8B9E", "#3A4656")
+SYSTEM_RAMP = ("#4E5B6B", "#9FADBF")
+ROOT_RAMP = ("#A3142F", "#FF3355", "#FF6B82")
+PLAIN_ROOT_RAMP = ("#5E6C7E", "#C9D3DF")
+MEMORY_RAMP = ("#3D7FB8", "#83C4F2")
+DISK_USED_RAMP = ("#4E5B6B", "#7C8B9E")
+DISK_FREE_RAMP = ("#3E9A70", "#74D9AB")
+
+MARGIN = 2
+GAP = 4
+KEY_WIDTH = 9
+METER_CELLS = 10
+# Below this the info column alone is drawn, and below the next, one line.
+FULL_MIN_COLUMNS = 72
+COLUMN_MIN_COLUMNS = 44
+
+
+@dataclass(frozen=True)
+class Ink:
+    """One run's color: a palette role for 16-color terminals, and the
+    exact foreground (and, for half-block cells, background) to draw instead
+    on a truecolor terminal."""
+
+    role: str
+    fg: str | None = None
+    bg: str | None = None
+    bold: bool = False
+
+
+@dataclass
+class Row:
+    """One line of the info column. ``extra`` is drawn only when it fits
+    whole, so it carries details a narrow window can do without."""
+
+    key: str
+    value: list[tuple[str, Ink | None]]
+    extra: list[tuple[str, Ink | None]] = field(default_factory=list)
+    kind: str = "text"  # "text", "heading", "rule" or "swatches"
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -91,7 +156,7 @@ def shell_description() -> str:
     return name
 
 
-def gather() -> dict[str, str]:
+def gather() -> dict:
     """Every answer the banner needs, asked of the running system."""
     release = parse_env_file(RELEASE.read_text()) if RELEASE.exists() else {}
     os_release = parse_env_file(OS_RELEASE.read_text()) if OS_RELEASE.exists() else {}
@@ -102,7 +167,7 @@ def gather() -> dict[str, str]:
         uptime = float(PROC_UPTIME.read_text().split()[0])
     except (OSError, ValueError, IndexError):
         uptime = 0.0
-    return {
+    data = {
         "version": release.get("PORTLIN_VERSION", "unknown"),
         "encrypted": root_source().startswith("/dev/mapper/"),
         "os": os_release.get("PRETTY_NAME", "unknown"),
@@ -110,149 +175,338 @@ def gather() -> dict[str, str]:
         "firmware": host.firmware,
         "cpu": host.cpu,
         "threads": str(host.threads or ""),
-        "memory": f"{format_bytes(memory.used_bytes)} of {format_bytes(memory.total_bytes)}",
+        "memory": "",
         "disk_free": format_bytes(disk.total - disk.used),
         "disk_total": format_bytes(disk.total),
+        "disk_used_fraction": disk.used / disk.total if disk.total else None,
         "uptime": format_uptime(uptime),
         "shell": shell_description(),
     }
+    if memory and memory.total_bytes:
+        data["memory"] = f"{format_bytes(memory.used_bytes)} of {format_bytes(memory.total_bytes)}"
+        data["memory_fraction"] = memory.used_bytes / memory.total_bytes
+    return data
 
 
-def info_rows(data: dict[str, str]) -> list[tuple[str, list[tuple[str, str]]]]:
+# -- color ---------------------------------------------------------------------
+
+
+def rgb(color: str) -> tuple[int, int, int]:
+    return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+
+
+def mix(a: str, b: str, t: float) -> str:
+    """The color a fraction ``t`` of the way from ``a`` to ``b``."""
+    t = min(1.0, max(0.0, t))
+    return "#" + "".join(
+        f"{round(x + (y - x) * t):02X}" for x, y in zip(rgb(a), rgb(b))
+    )
+
+
+def ramp(stops: tuple[str, ...], t: float) -> str:
+    """A point along a multi-stop gradient, ``t`` from 0 to 1."""
+    t = min(1.0, max(0.0, t))
+    span = len(stops) - 1
+    index = min(int(t * span), span - 1)
+    return mix(stops[index], stops[index + 1], t * span - index)
+
+
+def spread(stops: tuple[str, ...], count: int) -> list[str]:
+    """``count`` evenly spaced colors along a gradient, ends included."""
+    if count <= 1:
+        return [stops[0]] * count
+    return [ramp(stops, i / (count - 1)) for i in range(count)]
+
+
+def paint(text: str, ink: Ink | None, mode: str) -> str:
+    """One run in its color for the terminal's mode: plain, ansi16 or truecolor."""
+    if mode == "plain" or ink is None or not text:
+        return text
+    codes = ["1"] if ink.bold else []
+    if mode == "truecolor":
+        codes.append("38;2;%d;%d;%d" % rgb(ink.fg or PALETTE[ink.role][1]))
+        if ink.bg:
+            codes.append("48;2;%d;%d;%d" % rgb(ink.bg))
+    else:
+        codes.append(PALETTE[ink.role][0])
+    return f"\033[{';'.join(codes)}m{text}{RESET}"
+
+
+def role(name: str, *, bold: bool = False) -> Ink:
+    return Ink(name, PALETTE[name][1], bold=bold)
+
+
+# -- the mark ------------------------------------------------------------------
+
+
+def mark_lines(*, mode: str = "plain", unicode_glyphs: bool = True,
+               encrypted: bool = True) -> list[list[tuple[str, Ink | None]]]:
+    """The mark as rows of (text, ink) runs: enclosure around four bars.
+
+    ``mode`` and ``unicode_glyphs`` are separate axes: NO_COLOR drops the
+    color but keeps the box-drawing art, while a non-UTF-8 locale swaps in
+    the ASCII fallback the build TUI uses the same way. Root is drawn in the
+    accent only when it really is encrypted, so the mark reads the drive it
+    is on. On a truecolor terminal every cell takes its own shade, and the
+    bars are half-block pairs, a lighter top over the base, so they read as
+    lit from above.
+    """
+    truecolor = mode == "truecolor"
+    if unicode_glyphs:
+        top_left, top_right, bot_left, bot_right = "╭", "╮", "╰", "╯"
+        across, down, block, dissolve = "─", "│", "█", DISSOLVE
+    else:
+        top_left = top_right = bot_left = bot_right = "+"
+        across, down, block, dissolve = "-", "|", "#", ASCII_DISSOLVE
+    if truecolor:
+        block = "▀"
+
+    outer_width = INNER_WIDTH + 2
+    outer_height = len(LAYOUT) + 2
+
+    def stroke(x: int, y: int) -> Ink:
+        t = (x / (outer_width - 1) + y / (outer_height - 1)) / 2
+        return Ink("muted", ramp(STROKE_RAMP, t))
+
+    def bar_cells(index: int) -> list[tuple[str, Ink | None]]:
+        width = BAR_WIDTHS[index]
+        is_root = index == len(BAR_WIDTHS) - 1
+        lit = is_root and encrypted
+        name = "accent" if lit else "muted"
+        solid = width - len(dissolve) if is_root else width
+        stops = (ROOT_RAMP if lit else PLAIN_ROOT_RAMP) if is_root else SYSTEM_RAMP
+        cells = []
+        for i, base in enumerate(spread(stops, solid)):
+            if truecolor:
+                cells.append((block, Ink(name, mix(base, "#FFFFFF", 0.22), base)))
+            else:
+                cells.append((block, Ink(name)))
+        if is_root:
+            end = stops[-1]
+            for i, glyph in enumerate(dissolve):
+                fade = mix(end, PALETTE["ink"][1], (i + 1) / (len(dissolve) + 1))
+                cells.append((glyph, Ink(name, fade)))
+        return cells
+
+    rows = []
+    top = [(top_left, stroke(0, 0))]
+    top += [(across, stroke(x, 0)) for x in range(1, outer_width - 1)]
+    top += [(top_right, stroke(outer_width - 1, 0))]
+    rows.append(top)
+    for y, bar in enumerate(LAYOUT, start=1):
+        cells = bar_cells(bar) if bar is not None else []
+        pad = INNER_WIDTH - len(cells)
+        rows.append([(down, stroke(0, y)), *cells, (" " * pad, None),
+                     (down, stroke(outer_width - 1, y))])
+    bottom_y = outer_height - 1
+    bottom = [(bot_left, stroke(0, bottom_y))]
+    bottom += [(across, stroke(x, bottom_y)) for x in range(1, outer_width - 1)]
+    bottom += [(bot_right, stroke(outer_width - 1, bottom_y))]
+    rows.append(bottom)
+    return [merge_runs(row, mode) for row in rows]
+
+
+def merge_runs(row: list[tuple[str, Ink | None]], mode: str) -> list[tuple[str, Ink | None]]:
+    """Join neighbouring runs that paint the same, so a 16-color or plain
+    row is a handful of escape codes rather than one per cell."""
+    merged: list[tuple[str, Ink | None]] = []
+    for text, ink in row:
+        key = _paint_key(ink, mode)
+        if merged and _paint_key(merged[-1][1], mode) == key:
+            merged[-1] = (merged[-1][0] + text, merged[-1][1])
+        else:
+            merged.append((text, ink))
+    return merged
+
+
+def _paint_key(ink: Ink | None, mode: str):
+    if ink is None or mode == "plain":
+        return None
+    if mode == "truecolor":
+        return ink
+    return (ink.role, ink.bold)
+
+
+# -- the info column -----------------------------------------------------------
+
+
+def meter(fraction: float | None, used: tuple[str, ...], free: tuple[str, ...],
+          used_role: str, free_role: str, *, unicode_glyphs: bool) -> list[tuple[str, Ink | None]]:
+    """A ten-cell gauge. Heavy cells are used and light cells are not, so it
+    still reads with no color at all."""
+    if fraction is None:
+        return []
+    filled = min(METER_CELLS, max(0, round(fraction * METER_CELLS)))
+    heavy, light = ("━", "─") if unicode_glyphs else ("#", "-")
+    cells = [(heavy, Ink(used_role, color)) for color in spread(used, filled)]
+    cells += [(light, Ink(free_role, color)) for color in spread(free, METER_CELLS - filled)]
+    return cells + [(" ", None)]
+
+
+def info_rows(data: dict, *, unicode_glyphs: bool = True) -> list[Row]:
     """The banner's key/value column. Keys muted; the accent carries LUKS state."""
-    rows: list[tuple[str, list[tuple[str, str]]]] = [
+    dot = " · " if unicode_glyphs else " - "
+    rows = [
         # The wordmark stands alone in the value column, aligned with the keys.
-        ("", [(f"portlin ", "bold-paper"), (data["version"], "muted")]),
-        ("os", [(data["os"], "paper")]),
+        Row("", [("portlin", role("paper", bold=True)), (" " + data["version"], role("muted"))],
+            kind="heading"),
+        Row("", [], kind="rule"),
+        Row("os", [(data["os"], role("paper"))]),
     ]
-    machine = [(data["machine"], "paper")]
-    if data["firmware"]:
-        machine += [("   ", "plain"), (data["firmware"], "muted")]
-    rows.append(("machine", machine))
-    if data["cpu"]:
-        cpu = [(data["cpu"], "paper")]
-        if data["threads"]:
-            cpu += [(f" ({data['threads']} threads)", "muted")]
-        rows.append(("cpu", cpu))
+    if data.get("machine"):
+        rows.append(Row("machine", [(data["machine"], role("paper"))],
+                        [(dot + data["firmware"], role("muted"))] if data.get("firmware") else []))
+    if data.get("cpu"):
+        rows.append(Row("cpu", [(data["cpu"], role("paper"))],
+                        [(f"{dot}{data['threads']} threads", role("muted"))] if data.get("threads") else []))
+    if data.get("memory"):
+        rows.append(Row("memory", [
+            *meter(data.get("memory_fraction"), MEMORY_RAMP, (PALETTE["line"][1],),
+                   "blue", "line", unicode_glyphs=unicode_glyphs),
+            (data["memory"], role("paper")),
+        ]))
+    # The row the banner exists to show: free space first, in green, and a
+    # gauge whose light cells are the free part in the same green.
+    rows.append(Row("disk", [
+        *meter(data.get("disk_used_fraction"), DISK_USED_RAMP, DISK_FREE_RAMP,
+               "muted", "green", unicode_glyphs=unicode_glyphs),
+        (data["disk_free"], role("green", bold=True)),
+        (" free of ", role("muted")),
+        (data["disk_total"], role("paper")),
+    ]))
+    rows.append(Row("root", [
+        ("LUKS2 encrypted", role("accent", bold=True)) if data["encrypted"]
+        else ("not encrypted", role("muted")),
+    ]))
     rows += [
-        ("memory", [(data["memory"], "paper")]),
-        # The row the banner exists to show: free space first, in green.
-        ("disk", [(data["disk_free"] + " ", "green-bold"),
-                  ("free of ", "muted"), (data["disk_total"], "paper")]),
-    ]
-    rows.append((
-        "root",
-        [("LUKS2 encrypted" if data["encrypted"] else "not encrypted",
-          "accent" if data["encrypted"] else "muted")],
-    ))
-    rows += [
-        ("uptime", [(data["uptime"], "paper")]),
-        ("shell", [(data["shell"], "paper")]),
+        Row("uptime", [(data["uptime"], role("paper"))]),
+        Row("shell", [(data["shell"], role("paper"))]),
     ]
     return rows
 
 
-def mark_lines(*, colored: bool, unicode_glyphs: bool) -> list[list[tuple[str, str]]]:
-    """The mark as text rows: enclosure around four bottom-anchored bars.
+def fit(runs: list[tuple[str, Ink | None]], width: int, *, ellipsis: str) -> list[tuple[str, Ink | None]]:
+    """Runs cut to ``width`` cells, the last visible one ending in an ellipsis."""
+    if sum(len(text) for text, _ in runs) <= width:
+        return runs
+    kept, room = [], max(0, width - len(ellipsis))
+    for text, ink in runs:
+        if len(text) <= room:
+            kept.append((text, ink))
+            room -= len(text)
+            continue
+        cut = text[:room].rstrip()
+        kept.append((cut + ellipsis, ink))
+        break
+    return kept
 
-    ``colored`` and ``unicode_glyphs`` are separate axes: NO_COLOR drops the
-    ANSI but keeps the box-drawing art, while a non-UTF-8 locale swaps in the
-    ASCII fallback the build TUI uses the same way.
-    """
-    stroke = MUTED if colored else ""
-    accent = ACCENT if colored else ""
-    bar_colors = [stroke, stroke, stroke, accent]
-    box = "─" if unicode_glyphs else "-"
-    vertical = "│" if unicode_glyphs else "|"
-    top_left, top_right = ("╭", "╮") if unicode_glyphs else ("+", "+")
-    bot_left, bot_right = ("╰", "╯") if unicode_glyphs else ("+", "+")
-    block = "█" if unicode_glyphs else "#"
-    gap = "   "
 
-    inner_width = sum(BAR_WIDTHS) + len(gap) * (len(BAR_WIDTHS) - 1)
-    bar_runs = []
-    for width, color in zip(BAR_WIDTHS, bar_colors):
-        bar_runs.append((block * width, color))
-        bar_runs.append((gap, ""))
-    bar_runs.pop()
+def row_text(row: Row, width: int, mode: str, unicode_glyphs: bool) -> str:
+    """One info row painted, never wider than ``width`` cells."""
+    if row.kind == "rule":
+        glyph = "─" if unicode_glyphs else "-"
+        cells = [(glyph, Ink("line", color))
+                 for color in spread(("#56657A", PALETTE["line"][1], PALETTE["ink"][1]), width)]
+        return "".join(paint(t, i, mode) for t, i in merge_runs(cells, mode))
+    if row.kind == "swatches":
+        # The terminal's own sixteen colors, normal over bright, by index:
+        # these are the palette, so they stay 16-color codes in every mode.
+        if width < KEY_WIDTH + 24:
+            return ""
+        return " " * KEY_WIDTH + "".join(
+            f"\033[{30 + i};{100 + i}m▀▀▀{RESET}" for i in range(8)
+        )
+    ellipsis = "…" if unicode_glyphs else "..."
+    if row.kind == "heading":
+        return "".join(paint(text, ink, mode) for text, ink in fit(row.value, width, ellipsis=ellipsis))
+    room = width - KEY_WIDTH
+    value = fit(row.value, room, ellipsis=ellipsis)
+    used = sum(len(text) for text, _ in value)
+    extra_width = sum(len(text) for text, _ in row.extra)
+    if row.extra and value is row.value and used + extra_width <= room:
+        value = value + row.extra
+    key = paint(f"{row.key:<{KEY_WIDTH}}", role("muted"), mode) if row.key else " " * KEY_WIDTH
+    return key + "".join(paint(text, ink, mode) for text, ink in value)
 
-    def bar_row() -> list[tuple[str, str]]:
-        return ([(vertical, stroke), (" ", "")] + bar_runs
-                + [(" " * (inner_width - sum(len(r[0]) for r in bar_runs)) + " ", ""),
-                   (vertical, stroke)])
 
-    empty = [(vertical, stroke), (" " * (inner_width + 2), ""), (vertical, stroke)]
-    return [
-        [(top_left + box * (inner_width + 2) + top_right, stroke)],
-        empty,
-        bar_row(),
-        bar_row(),
-        bar_row(),
-        [(bot_left + box * (inner_width + 2) + bot_right, stroke)],
+def one_line(data: dict, *, mode: str, columns: int, unicode_glyphs: bool) -> str:
+    dot = " · " if unicode_glyphs else " - "
+    root = "LUKS2 encrypted" if data["encrypted"] else "not encrypted"
+    runs = [
+        ("portlin", role("paper", bold=True)), (" " + data["version"], role("muted")),
+        (dot, role("muted")), (data["disk_free"], role("green", bold=True)),
+        (" free of " + data["disk_total"], role("muted")),
     ]
+    extra = [(dot + "root: ", role("muted")),
+             (root, role("accent") if data["encrypted"] else role("muted"))]
+    width = max(1, columns - 1)
+    if sum(len(text) for text, _ in runs + extra) <= width:
+        runs += extra
+    runs = fit(runs, width, ellipsis="…" if unicode_glyphs else "...")
+    return "".join(paint(text, ink, mode) for text, ink in runs)
 
 
-def paint(text: str, color: str, colored: bool) -> str:
-    """One run of banner text in its palette color, or nothing when plain."""
-    if not colored or color == "plain":
-        return text
-    codes = {
-        "muted": MUTED, "paper": PAPER, "green": GREEN, "accent": ACCENT,
-        "bold-paper": PAPER + BOLD, "green-bold": GREEN + BOLD,
-    }
-    return f"{codes[color]}{text}{RESET}"
+def render(data: dict, *, mode: str, columns: int, unicode_glyphs: bool = True) -> str:
+    """The full banner: the mark beside the info column, the column alone
+    when the window is too narrow for both, or one line below that."""
+    if columns < COLUMN_MIN_COLUMNS:
+        return one_line(data, mode=mode, columns=columns, unicode_glyphs=unicode_glyphs)
 
+    rows = info_rows(data, unicode_glyphs=unicode_glyphs)
+    full = columns >= FULL_MIN_COLUMNS
+    art = mark_lines(mode=mode, unicode_glyphs=unicode_glyphs, encrypted=data["encrypted"]) if full else []
+    if mode != "plain" and unicode_glyphs:
+        # The palette closes the column, on the mark's bottom row when the
+        # column is shorter than the mark, after a blank row either way.
+        rows.append(Row("", []))
+        while len(rows) < len(art) - 1:
+            rows.append(Row("", []))
+        rows.append(Row("", [], kind="swatches"))
 
-def render(data: dict[str, str], *, colored: bool, columns: int) -> str:
-    """The full banner: mark beside the info column, or one line when narrow."""
-    if columns < 78:
-        root = ("LUKS2 encrypted" if data["encrypted"] else "not encrypted")
-        line = (f"portlin {data['version']} · {data['os']} · "
-                f"{data['disk_free']} free of {data['disk_total']} · root: {root}")
-        if not colored:
-            return line
-        root_color = ACCENT if data["encrypted"] else MUTED
-        return f"{MUTED}portlin{RESET} {PAPER}{data['version']}{RESET}{MUTED} · " \
-            f"{data['os']} · {RESET}{data['disk']}{MUTED} · root: {RESET}{root_color}{root}{RESET}"
-
-    art = mark_lines(colored=colored, unicode_glyphs=True)
-    rows = info_rows(data)
-    art_width = max(sum(len(run[0]) for run in row) for row in art)
+    art_width = INNER_WIDTH + 2
+    indent = MARGIN + art_width + GAP if full else MARGIN
+    # The last column stays empty: writing it makes some terminals wrap.
+    width = columns - indent - 1
     offset = max(0, (len(rows) - len(art)) // 2)
 
-    lines = []
+    lines = [""]
     for i in range(max(len(rows), offset + len(art))):
-        left = art[i - offset] if offset <= i < offset + len(art) else []
-        right = rows[i] if i < len(rows) else None
-        text = "".join(run[0] for run in left)
-        if right is not None:
-            key, value = right
-            text += " " * (art_width + 6 - len(text))
-            text += paint(f"{key:<8} ", "muted", colored)
-            text += "".join(paint(part, color, colored) for part, color in value)
+        text = " " * MARGIN
+        if full:
+            left = art[i - offset] if offset <= i < offset + len(art) else []
+            text += "".join(paint(t, ink, mode) for t, ink in left) if left else " " * art_width
+            text += " " * GAP
+        if i < len(rows):
+            text += row_text(rows[i], width, mode, unicode_glyphs)
         lines.append(text.rstrip())
+    footer = [("run ", role("muted")), ("portlin-info", role("paper", bold=True)),
+              (" for the full report", role("muted"))]
+    footer = fit(footer, width, ellipsis="…" if unicode_glyphs else "...")
     lines.append("")
-    lines.append(
-        paint("run ", "muted", colored)
-        + paint("portlin-info", "paper", colored)
-        + paint(" for the full report", "muted", colored)
-    )
+    lines.append(" " * indent + "".join(paint(text, ink, mode) for text, ink in footer))
     return "\n".join(lines)
+
+
+def terminal_mode(environ=os.environ, *, unicode_glyphs: bool) -> str:
+    """plain, ansi16 or truecolor, from what the terminal says it can do.
+
+    The ASCII fallback is for VTs and serial consoles, so it stays plain.
+    """
+    if "NO_COLOR" in environ or environ.get("TERM") == "dumb" or not unicode_glyphs:
+        return "plain"
+    if environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        return "truecolor"
+    return "ansi16"
 
 
 def main() -> int:
     if not sys.stdout.isatty():
         return 0
-    colored = (
-        "NO_COLOR" not in os.environ
-        and os.environ.get("TERM") != "dumb"
-    )
-    unicode_glyphs = (sys.stdout.encoding or "").lower().startswith("utf-8")
-    if not unicode_glyphs:
-        colored = False  # the ASCII fallback is for VTs; keep them plain.
+    unicode_glyphs = (sys.stdout.encoding or "").lower().replace("-", "") == "utf8"
+    mode = terminal_mode(unicode_glyphs=unicode_glyphs)
     columns = shutil.get_terminal_size(fallback=(80, 24)).columns
     try:
-        banner = render(gather(), colored=colored, columns=columns)
+        banner = render(gather(), mode=mode, columns=columns, unicode_glyphs=unicode_glyphs)
     except Exception:
         # A missing banner is fine; a broken shell startup is not.
         return 0

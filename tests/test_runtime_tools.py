@@ -213,17 +213,24 @@ class TestWelcomeBanner:
         assert welcome.format_uptime((2 * 3600) + (14 * 60)) == "2 hours, 14 mins"
         assert welcome.format_uptime(3 * 86400 + 2 * 3600) == "3 days, 2 hours"
 
+    MODES = ("plain", "ansi16", "truecolor")
+
+    def _visible(self, text):
+        import re
+
+        return re.sub(r"\033\[[0-9;]*m", "", text)
+
     def test_every_mark_row_is_the_same_width(self, welcome):
-        for colored in (True, False):
+        for mode in self.MODES:
             for unicode_glyphs in (True, False):
-                rows = welcome.mark_lines(colored=colored, unicode_glyphs=unicode_glyphs)
+                rows = welcome.mark_lines(mode=mode, unicode_glyphs=unicode_glyphs)
                 widths = {sum(len(run[0]) for run in row) for row in rows}
-                assert len(widths) == 1, (colored, unicode_glyphs)
+                assert len(widths) == 1, (mode, unicode_glyphs)
 
     def test_the_ascii_fallback_draws_the_same_geometry(self, welcome):
         art = "\n".join(
             "".join(run[0] for run in row)
-            for row in welcome.mark_lines(colored=False, unicode_glyphs=False)
+            for row in welcome.mark_lines(mode="plain", unicode_glyphs=False)
         )
         assert "+" in art and "#" in art
         assert "╭" not in art and "█" not in art
@@ -237,39 +244,84 @@ class TestWelcomeBanner:
         logo = re.sub(r"\{[12]\}", "", logo)
         art = "\n".join(
             "".join(run[0] for run in row)
-            for row in welcome.mark_lines(colored=False, unicode_glyphs=True)
+            for row in welcome.mark_lines(mode="plain", unicode_glyphs=True)
         )
         assert logo.rstrip("\n") == art
 
+    def test_the_fastfetch_logo_lights_only_the_root_bar(self, welcome):
+        logo = (RUNTIME / "theme" / "fastfetch-logo.txt").read_text()
+        lit = [line for line in logo.splitlines() if "{2}" in line]
+        assert len(lit) == 1 and "▓▒░" in lit[0]
+
     def test_plain_output_carries_no_escape_codes(self, welcome):
-        banner = welcome.render(self._data(welcome), colored=False, columns=100)
+        banner = welcome.render(self._data(welcome), mode="plain", columns=100)
         assert "\033[" not in banner
         assert "╭" in banner  # NO_COLOR keeps the box-drawing art.
         assert "portlin 0.1.2" in banner
 
     def test_the_accent_only_appears_for_the_encrypted_root(self, welcome):
-        encrypted = welcome.render(self._data(welcome), colored=True, columns=100)
-        plain = welcome.render(
-            self._data(welcome, encrypted=False), colored=True, columns=100
-        )
-        assert welcome.ACCENT in encrypted
+        accent = "\033[" + welcome.PALETTE["accent"][0] + "m"
+        encrypted = welcome.render(self._data(welcome), mode="ansi16", columns=80)
+        plain = welcome.render(self._data(welcome, encrypted=False), mode="ansi16", columns=80)
+        assert accent in encrypted
         assert "LUKS2 encrypted" in encrypted
-        assert welcome.ACCENT not in plain
+        # The palette swatches show index 1 too, so only the art and the
+        # rows are checked here: the swatch row is the last of the column.
+        assert accent not in plain.split("▀▀▀")[0]
         assert "not encrypted" in plain
 
-    def test_the_disk_row_leads_with_free_space(self, welcome):
-        rows = welcome.info_rows(self._data(welcome))
-        disk = next(value for key, value in rows if key == "disk")
-        first_text, first_color = disk[0]
-        assert first_text == "41.2G "
-        assert first_color == "green-bold"
+    def test_truecolor_draws_gradients_and_16_colors_do_not(self, welcome):
+        true = welcome.render(self._data(welcome), mode="truecolor", columns=80)
+        ansi = welcome.render(self._data(welcome), mode="ansi16", columns=80)
+        assert "38;2;" in true and "48;2;" in true
+        assert "38;2;" not in ansi
+        assert self._visible(true).count("▀") > self._visible(ansi).count("▀")
 
-    def test_narrow_terminals_get_one_line(self, welcome):
-        banner = welcome.render(self._data(welcome), colored=False, columns=60)
+    def test_the_banner_fits_a_new_80_column_window(self, welcome):
+        long = self._data(
+            welcome,
+            machine="LENOVO ThinkPad X1 Carbon Gen 11 21HMCTO1WW",
+            cpu="13th Gen Intel(R) Core(TM) i7-1365U @ 5.20GHz",
+        )
+        for columns in (80, 72, 71, 60, 44, 43, 30):
+            for mode in self.MODES:
+                banner = welcome.render(long, mode=mode, columns=columns)
+                widest = max(len(self._visible(line)) for line in banner.splitlines())
+                assert widest < columns, (columns, mode, widest)
+
+    def test_long_values_are_cut_with_an_ellipsis_extras_first(self, welcome):
+        long = self._data(welcome, cpu="13th Gen Intel(R) Core(TM) i7-1365U @ 5.20GHz")
+        banner = welcome.render(long, mode="plain", columns=80)
+        cpu = next(line for line in banner.splitlines() if "cpu" in line)
+        assert cpu.endswith("…") and "threads" not in cpu
+        roomy = welcome.render(self._data(welcome), mode="plain", columns=80)
+        assert "Intel Core i5-7300U · 4 threads" in roomy
+
+    def test_the_disk_row_shows_free_space_in_green(self, welcome):
+        rows = welcome.info_rows(self._data(welcome))
+        disk = next(row for row in rows if row.key == "disk")
+        free = next((text, ink) for text, ink in disk.value if text == "41.2G")
+        assert free[1].role == "green" and free[1].bold
+
+    def test_meters_read_without_color(self, welcome):
+        data = self._data(welcome, memory_fraction=0.3, disk_used_fraction=0.7)
+        banner = welcome.render(data, mode="plain", columns=80)
+        memory = next(line for line in banner.splitlines() if "memory" in line)
+        assert "━━━───────" in memory
+
+    def test_narrow_terminals_drop_the_mark_then_go_to_one_line(self, welcome):
+        column = welcome.render(self._data(welcome), mode="plain", columns=60)
+        assert "╭" not in column and "41.2G free of 58.0G" in column
+        banner = welcome.render(self._data(welcome), mode="plain", columns=40)
         assert "\n" not in banner
         assert "41.2G free of 58.0G" in banner
-        assert "LUKS2 encrypted" in banner
+
+    def test_the_mode_follows_the_terminal(self, welcome):
+        assert welcome.terminal_mode({"COLORTERM": "truecolor"}, unicode_glyphs=True) == "truecolor"
+        assert welcome.terminal_mode({"TERM": "linux"}, unicode_glyphs=True) == "ansi16"
+        assert welcome.terminal_mode({"NO_COLOR": "1", "COLORTERM": "truecolor"}, unicode_glyphs=True) == "plain"
+        assert welcome.terminal_mode({"COLORTERM": "truecolor"}, unicode_glyphs=False) == "plain"
 
     def test_the_footer_points_at_the_full_report(self, welcome):
-        banner = welcome.render(self._data(welcome), colored=False, columns=100)
+        banner = welcome.render(self._data(welcome), mode="plain", columns=100)
         assert "portlin-info" in banner
