@@ -585,7 +585,7 @@ def _build_and_install_packages(chroot: Chroot) -> None:
     staging = "tmp/portlin-packages"
     names = list(pkg.PACKAGES)
     if not _has_desktop(chroot):
-        # 11.9 MB of wallpaper on a --minimal stick with no desktop to show it.
+        # 23 MB of wallpaper on a --minimal stick with no desktop to show it.
         # Recommends rather than Depends is what makes leaving it out legal.
         names.remove("portlin-desktop")
 

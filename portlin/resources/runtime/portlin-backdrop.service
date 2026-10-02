@@ -1,0 +1,17 @@
+[Unit]
+Description=Match the portlin wallpaper to whether root is encrypted
+Documentation=file:/etc/portlin-release
+# Early and before the display manager, because the greeter and the first
+# session both draw the path this sets. Nothing it needs is later than the
+# local filesystems: root is mounted, opened through LUKS or not, by then.
+DefaultDependencies=no
+After=local-fs.target
+Before=display-manager.service
+ConditionPathIsDirectory=/usr/share/backgrounds/portlin
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/portlin/portlin-backdrop
+
+[Install]
+WantedBy=multi-user.target

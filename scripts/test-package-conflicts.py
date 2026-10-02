@@ -155,6 +155,11 @@ def main() -> int:
         # nothing to undo and exits 0, so the removal below is the assertion
         # that actually matters.
         served = Path("/") / pkg.DEFAULT_BACKDROP
+        # The postinst runs portlin-backdrop, which makes the path a link to
+        # one of the two renders. A container's root is an overlay, not a
+        # LUKS mapping, so here it has to be the plain one.
+        if not served.is_symlink() or "portlin-plain-" not in os.readlink(served):
+            sys.exit(f"{served} is not portlin-backdrop's link to the plain render")
         if not served.read_bytes().startswith(b"\x89PNG"):
             sys.exit(f"{served} is not portlin's render; the diversion did not take")
         if not Path(f"{served}.distrib").exists():

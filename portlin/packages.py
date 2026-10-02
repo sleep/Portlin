@@ -214,6 +214,8 @@ DESKTOP = [
     # without which its SVG logo does not render.
     "python3-gi",
     "gir1.2-gtk-3.0",
+    # For the intro film, which draws through cairo from a GTK draw handler.
+    "python3-gi-cairo",
     "librsvg2-common",
     # For the Software app. pkexec is what it elevates through, and it is a
     # separate package from polkitd in trixie. mate-polkit is the agent that

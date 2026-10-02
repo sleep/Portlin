@@ -1,0 +1,1041 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""The welcome film every account sees once, at its first login.
+
+Full screen, about thirty seconds, skippable with any key or click. The
+portlin mark draws itself, then measures itself against the drive it is
+running from: its four bars take this stick's real partition sizes and each
+one is labelled the way lsblk would. Its root bar pulls away into a field of
+streaks, "welcome" flies past in the languages the installed fonts can draw,
+and the last one to arrive is in the language the account was set up with. It
+settles over the root bar again -- the wallpaper's own picture of root running
+off the edge of the drive -- while the machine the stick is plugged into
+introduces itself underneath, and the window fades away onto the desktop.
+
+Root is crimson only when it is encrypted, as it is everywhere else portlin
+draws it. Everything about the drive and the machine is read at start, from
+the running system, because both change every time the stick moves.
+
+Started by /etc/xdg/autostart with --once, which plays it only if this account
+has never seen it. Run by hand, with no arguments, it plays again.
+
+The whole picture is a pure function of the clock: Film.draw(cr, w, h, t)
+paints frame t onto any cairo context. The window is only a clock and a
+surface, which is what lets the frames be rendered and looked at without an X
+server, and what lets a slow machine drop frames without falling behind.
+"""
+
+from __future__ import annotations
+
+import argparse
+import bisect
+import math
+import os
+import pwd
+import random
+import shlex
+import shutil
+import socket
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from xml.sax.saxutils import escape
+
+import gi
+
+gi.require_version("Pango", "1.0")
+gi.require_version("PangoCairo", "1.0")
+
+import cairo  # noqa: E402
+from gi.repository import Pango, PangoCairo  # noqa: E402
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import (  # noqa: E402
+    backing_disk,
+    backing_partition,
+    command_output,
+    disk_tail_bytes,
+    root_source,
+    sysfs_sectors,
+    unclaimed_bytes,
+)
+from hostinfo import format_bytes, read_host  # noqa: E402
+
+# Per account rather than system-wide: the autostart entry runs for everyone
+# on the stick, and every account the wizard or Users and Groups adds is a
+# new person who has not seen it. Under XDG state, not config, because it is
+# a record of something that happened rather than a preference.
+STAMP_NAME = "portlin/intro-seen"
+
+# The brand tokens (docs/brand). Crimson is the encrypted root partition's
+# colour and is used for nothing else here; an unencrypted root is paper.
+INK = (0x12 / 255, 0x16 / 255, 0x1C / 255)
+PANEL = (0x1A / 255, 0x21 / 255, 0x2B / 255)
+LINE = (0x2C / 255, 0x35 / 255, 0x42 / 255)
+MUTED = (0x7C / 255, 0x8B / 255, 0x9E / 255)
+PAPER = (0xE8 / 255, 0xED / 255, 0xF3 / 255)
+ACCENT = (0xFF / 255, 0x33 / 255, 0x55 / 255)
+
+# The words are drawn in DejaVu's hairline weight, which fonts-dejavu-extra
+# installs. Scripts DejaVu does not cover fall back through fontconfig, and a
+# word no installed font can draw is dropped rather than flown past as boxes.
+WORD_FONT = "DejaVu Sans ExtraLight"
+LABEL_FONT = "DejaVu Sans Mono"
+# Words are laid out once at this size and scaled on the way to the screen.
+WORD_LAYOUT_PX = 100
+
+# "Welcome", keyed by the language part of a locale name. The order is the
+# order they fly past in, interleaving scripts so no two neighbours look
+# alike; the account's own language is taken out and saved for last.
+WELCOMES = [
+    ("en", "Welcome"),
+    ("ja", "ようこそ"),
+    ("fr", "Bienvenue"),
+    ("ru", "Добро пожаловать"),
+    ("de", "Willkommen"),
+    ("el", "Καλώς ήρθατε"),
+    ("es", "Bienvenido"),
+    ("ko", "환영합니다"),
+    ("it", "Benvenuto"),
+    ("he", "ברוכים הבאים"),
+    ("nl", "Welkom"),
+    ("zh", "欢迎"),
+    ("pt", "Bem-vindo"),
+    ("ar", "أهلاً وسهلاً"),
+    ("sv", "Välkommen"),
+    ("uk", "Ласкаво просимо"),
+    ("pl", "Witamy"),
+    ("hi", "स्वागत है"),
+    ("fi", "Tervetuloa"),
+    ("tr", "Hoş geldiniz"),
+    ("hy", "Բարի գալուստ"),
+    ("cs", "Vítejte"),
+    ("th", "ยินดีต้อนรับ"),
+    ("ga", "Fáilte"),
+    ("vi", "Chào mừng"),
+    ("da", "Velkommen"),
+    ("hu", "Üdvözöljük"),
+    ("ca", "Benvinguts"),
+    ("id", "Selamat datang"),
+    ("is", "Velkomin"),
+    ("ro", "Bun venit"),
+    ("cy", "Croeso"),
+]
+
+# How many words fly past before the last one arrives. More than this and the
+# middle of the film drags; the rest of the list is there so that dropping the
+# scripts with no font still leaves enough.
+FLYBY_COUNT = 13
+
+# The timeline, in seconds from the first frame. Everything from the launch
+# on is measured from the launch, which comes later when there is a drive to
+# measure and a partition table to read.
+GROUND_IN = (0.0, 1.4)
+ENCLOSURE_DRAW = (0.7, 1.3)
+BARS_START, BAR_STAGGER, BAR_GROW = 1.6, 0.26, 0.75
+MEASURE = (3.3, 1.1)       # the mark slides aside and its bars take real sizes
+ROW_START, ROW_GAP, ROW_TYPE = 3.8, 0.3, 0.45  # each lsblk row typing in
+LAUNCH_AT = 4.6            # the mark lets go and root pulls away to the right
+MEASURED_HOLD = 2.4        # how much later that is, with a table to read
+LAUNCH_LENGTH = 1.1
+WARP_LAG, WARP_RISE = 0.3, 1.6   # the streaks reach cruising speed
+FLYBY_LAG, FLYBY_GAP, FLYBY_LIFE = 0.7, 0.78, 3.3
+ARRIVAL = 3.2              # how long the last word takes to come to rest
+REST_BAR = 1.3             # the root bar's run under it, once it has landed
+FACT_GAP, FACT_TYPE = 0.28, 0.5  # the machine's rows typing in under it
+FADE_OUT = 1.6
+HOLD = 3.4                 # between the bar finishing and the fade beginning
+FACTS_HOLD = 4.8           # ... when there are machine facts to read as well
+SKIP_FADE = 0.55
+HINT = (1.6, 3.6)          # "press any key to skip", on and off again
+
+# The fly-by's virtual camera. A word starts at Z_FAR and passes the lens
+# just short of Z_NEAR; screen size goes as 1/z, which is what makes a
+# constant approach speed read as acceleration.
+Z_FAR = 9.0
+Z_NEAR = 0.32
+STAR_COUNT = 280
+STAR_DEPTH = 10.0
+
+# The mark's geometry, in the logo's own 64-unit square.
+MARK_BARS = [(17.5, 10), (27.0, 22), (36.5, 30), (46.0, 44)]
+MARK_BAR_X, MARK_BAR_H = 7.0, 5.0
+# How far a measured bar can reach: from the bars' anchor to just inside the
+# enclosure's right-hand stroke, which stands for the end of the drive.
+MARK_TRACK = 48.0
+# The thinnest a measured bar is drawn. A 1 MiB partition on a 64 GB drive is
+# real, and a bar too thin to see would say it is not there.
+MARK_MIN_BAR = 3.0
+
+# The GPT type GUID of a BIOS boot partition. It carries no filesystem for
+# lsblk to name, so its row is labelled with the type code the README's
+# partition table uses for it.
+BIOS_BOOT_GUID = "21686148-6449-6e6f-744e-656564454649"
+
+
+@dataclass(frozen=True)
+class Partition:
+    name: str     # the kernel's name: sdb4, nvme0n1p4
+    kind: str     # what lsblk says is on it: EF02, vfat, ext4, LUKS2
+    size: int     # bytes
+    mount: str    # where it is mounted, or ""
+    root: bool
+
+
+@dataclass(frozen=True)
+class Drive:
+    disk: str
+    size: int
+    partitions: tuple[Partition, ...]
+    unclaimed: int  # bytes portlin-expand could still claim, or 0
+    encrypted: bool
+
+
+def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def progress(t: float, start: float, duration: float) -> float:
+    """Where t falls in [start, start + duration], as 0..1."""
+    return clamp((t - start) / duration)
+
+
+def ease_out(p: float) -> float:
+    return 1 - (1 - p) ** 3
+
+
+def ease_in_out(p: float) -> float:
+    return 4 * p**3 if p < 0.5 else 1 - (-2 * p + 2) ** 3 / 2
+
+
+def lerp(a: float, b: float, p: float) -> float:
+    return a + (b - a) * p
+
+
+def mix(c1: tuple, c2: tuple, p: float) -> tuple:
+    return tuple(lerp(a, b, p) for a, b in zip(c1, c2))
+
+
+def language_of(environ: dict[str, str]) -> str:
+    """The language part of the locale messages are shown in: "pt" for pt_BR.UTF-8.
+
+    Looked up in the order gettext uses, so the answer is the language the
+    rest of the desktop is speaking.
+    """
+    for key in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        value = environ.get(key, "")
+        # LANGUAGE is a colon-separated preference list; its first entry wins.
+        value = value.split(":")[0]
+        if value and value not in ("C", "POSIX") and not value.startswith("C."):
+            return value.split("_")[0].split(".")[0].split("@")[0].lower()
+    return "en"
+
+
+def order_words(language: str) -> tuple[list[str], str]:
+    """The words that fly past, and the one that comes to rest.
+
+    The last word is the account's own language, or English for one the list
+    does not have. It is never also one of the fly-by.
+    """
+    table = dict(WELCOMES)
+    final_language = language if language in table else "en"
+    flyby = [word for code, word in WELCOMES if code != final_language]
+    return flyby, table[final_language]
+
+
+def account_label() -> str:
+    """user@host, as the prompt in the terminal spells it."""
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        user = os.environ.get("USER", "")
+    host = socket.gethostname().split(".")[0]
+    return f"{user}@{host}" if user else host
+
+
+def stamp_path(environ: dict[str, str]) -> Path:
+    base = environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / STAMP_NAME
+
+
+def parse_lsblk_pairs(text: str) -> list[dict[str, str]]:
+    """lsblk -P output: one KEY="value" row per device."""
+    rows = []
+    for line in text.splitlines():
+        row = {}
+        for token in shlex.split(line):
+            key, _, value = token.partition("=")
+            row[key] = value
+        if row:
+            rows.append(row)
+    return rows
+
+
+def partition_kind(row: dict[str, str]) -> str:
+    """The label lsblk's own columns give a partition: its filesystem, or
+    LUKS and its version, or EF02 for the BIOS boot partition that has none."""
+    fstype = row.get("FSTYPE", "")
+    if fstype == "crypto_LUKS":
+        version = row.get("FSVER", "")
+        return f"LUKS{version}" if version.isdigit() else "LUKS"
+    if fstype:
+        return fstype
+    if row.get("PARTTYPE", "").lower() == BIOS_BOOT_GUID:
+        return "EF02"
+    return "-"
+
+
+def read_drive() -> Drive | None:
+    """The stick this is running from, or None if it cannot be made out.
+
+    None is an answer, not a failure: in a container, under a debugger, or on
+    a layout portlin did not write, the film draws the mark as the logo has it
+    and skips the measuring.
+    """
+    try:
+        source = root_source()
+        partition = backing_partition(source) if source else ""
+        disk = backing_disk(partition) if partition else ""
+        if not disk or disk == partition:
+            return None
+        rows = parse_lsblk_pairs(command_output([
+            "lsblk", "-bnPo", "NAME,TYPE,SIZE,FSTYPE,FSVER,PARTTYPE,MOUNTPOINT",
+            f"/dev/{disk}",
+        ]))
+        partitions = tuple(
+            Partition(
+                name=row["NAME"],
+                kind=partition_kind(row),
+                size=int(row.get("SIZE") or 0),
+                # Root's own row has no mountpoint on an encrypted stick: the
+                # mapping on top of it is what is mounted.
+                mount="/" if row["NAME"] == partition else row.get("MOUNTPOINT", ""),
+                root=row["NAME"] == partition,
+            )
+            for row in rows if row.get("TYPE") == "part"
+        )
+        # The film draws four bars because the mark has four. A drive laid out
+        # some other way is not one this picture describes.
+        if len(partitions) != len(MARK_BARS) or not partitions[-1].root:
+            return None
+        root = partitions[-1]
+        tail = disk_tail_bytes(disk, partition)
+        return Drive(
+            disk=disk,
+            size=sysfs_sectors(disk, "size") * 512,
+            partitions=partitions,
+            unclaimed=unclaimed_bytes(shutil.disk_usage("/").total, root.size, tail),
+            encrypted=source.startswith("/dev/mapper/"),
+        )
+    except Exception:
+        return None
+
+
+def read_facts() -> list[tuple[str, str]]:
+    """The machine the stick is plugged into, keyed as the terminal banner keys it."""
+    try:
+        host = read_host()
+    except Exception:
+        return []
+    facts = []
+    if host.model:
+        facts.append(("machine", host.model))
+    if host.cpu:
+        threads = f" ({host.threads} threads)" if host.threads else ""
+        facts.append(("cpu", host.cpu + threads))
+    if host.memory_bytes:
+        facts.append(("memory", format_bytes(host.memory_bytes)))
+    if host.firmware:
+        facts.append(("firmware", host.firmware))
+    return facts
+
+
+def measured_widths(drive: Drive) -> list[float]:
+    """Each partition's bar, in mark units, on a log scale against the drive.
+
+    Linear would leave 1 MiB of BIOS boot as nothing beside root. On a log
+    scale the order and the gaps are both honest: 1 MiB is short, the two
+    boot partitions sit close together, and root reaches as far across the
+    enclosure as it reaches across the drive.
+    """
+    floor = 512 * 1024
+    span = math.log(max(drive.size, floor * 4) / floor)
+    return [
+        max(MARK_MIN_BAR, clamp(math.log(max(part.size, floor) / floor) / span) * MARK_TRACK)
+        for part in drive.partitions
+    ]
+
+
+def partition_rows(drive: Drive) -> list[str]:
+    """One line per partition, columns aligned, the way lsblk lays them out."""
+    name_w = max(len(part.name) for part in drive.partitions)
+    kind_w = max(len(part.kind) for part in drive.partitions)
+    sizes = [format_bytes(part.size) for part in drive.partitions]
+    size_w = max(len(size) for size in sizes)
+    rows = []
+    for part, size in zip(drive.partitions, sizes):
+        row = f"{part.name:<{name_w}}  {part.kind:<{kind_w}}  {size:>{size_w}}"
+        if part.mount:
+            row += f"  {part.mount}"
+        rows.append(row)
+    return rows
+
+
+class Film:
+    """Every frame of the intro, as a function of time.
+
+    Construction does the expensive, size-independent work once: laying out
+    each word, dropping the ones the fonts cannot draw, and scattering the
+    streaks. draw() does the rest per frame.
+    """
+
+    def __init__(self, flyby: list[str], final: str, label: str, *,
+                 drive: Drive | None = None, facts: list[tuple[str, str]] | None = None,
+                 seed: int = 7):
+        fontmap = PangoCairo.FontMap.get_default()
+        self._context = fontmap.create_context()
+        # Hinting snaps outlines to the pixel grid of the size the layout was
+        # made at. Every word here is drawn under a scale, sometimes a large
+        # one, and snapped outlines wobble as that scale changes.
+        options = cairo.FontOptions()
+        options.set_hint_style(cairo.HINT_STYLE_NONE)
+        options.set_hint_metrics(cairo.HINT_METRICS_OFF)
+        options.set_antialias(cairo.ANTIALIAS_GRAY)
+        PangoCairo.context_set_font_options(self._context, options)
+
+        self.drive = drive
+        self.root_colour = PAPER if drive and not drive.encrypted else ACCENT
+        self.launch = LAUNCH_AT + (MEASURED_HOLD if drive else 0.0)
+        self.flyby_start = self.launch + FLYBY_LAG
+        self.warp_ramp = (self.launch + WARP_LAG, WARP_RISE)
+        if drive:
+            self.bar_widths = measured_widths(drive)
+            self.rows = [
+                self._row_layout([(text, self.root_colour if part.root else MUTED)]
+                                 + ([(f"  +{format_bytes(drive.unclaimed)} unclaimed", MUTED)]
+                                    if part.root and drive.unclaimed else []))
+                for part, text in zip(drive.partitions, partition_rows(drive))
+            ]
+        key_w = max((len(key) for key, _ in facts or []), default=0)
+        self.facts = [
+            self._row_layout([(f"{key:<{key_w}}  ", MUTED), (value, PAPER)])
+            for key, value in facts or []
+        ]
+
+        drawable = [w for w in flyby if self._drawable(w)][:FLYBY_COUNT]
+        rng = random.Random(seed)
+        self.words = []
+        for index, text in enumerate(drawable):
+            # Scattered around the axis but never on it, so each word passes
+            # beside the camera rather than through it. Alternate sides, so the
+            # eye is pulled left and right instead of drifting one way.
+            angle = (index * 2.39996 + rng.uniform(-0.35, 0.35)) % (2 * math.pi)
+            radius = rng.uniform(0.32, 0.62)
+            self.words.append({
+                "layout": self._layout(text, WORD_FONT, WORD_LAYOUT_PX),
+                "x": math.cos(angle) * radius * 1.35,
+                "y": math.sin(angle) * radius * 0.8,
+                "start": self.flyby_start + index * FLYBY_GAP,
+            })
+        self.final = self._layout(final if self._drawable(final) else "Welcome",
+                                  WORD_FONT, WORD_LAYOUT_PX)
+        # Just after the last of the fly-by sets off, so nothing new appears
+        # behind the word while it is landing.
+        self.final_start = self.flyby_start + max(len(self.words) - 1, 0) * FLYBY_GAP + 0.3
+        self.warp_ease = (self.final_start + 1.0, 3.4)
+        self.label = self._layout(label, LABEL_FONT, 100)
+        self.hint = self._layout("press any key to skip", LABEL_FONT, 100)
+
+        self.stars = []
+        for _ in range(STAR_COUNT):
+            # Uniform over a disc that leaves a hole round the axis: a streak
+            # born on the axis never moves on screen, and reads as dead pixels.
+            angle = rng.uniform(0, 2 * math.pi)
+            radius = math.sqrt(rng.uniform(0.04, 1.0)) * 2.2
+            self.stars.append((
+                math.cos(angle) * radius * 1.4,
+                math.sin(angle) * radius * 0.9,
+                rng.uniform(0, STAR_DEPTH),
+                rng.random() < 0.06,  # a few in root's colour among the grey
+            ))
+        self._travel = self._integrate_travel()
+        self._ground: tuple[int, int, cairo.ImageSurface] | None = None
+
+    @property
+    def rest_time(self) -> float:
+        """When the last word has landed and the bar has run under it."""
+        return self.final_start + ARRIVAL + REST_BAR
+
+    @property
+    def duration(self) -> float:
+        return self.rest_time + (FACTS_HOLD if self.facts else HOLD) + FADE_OUT
+
+    def _layout(self, text: str, family: str, px: int) -> Pango.Layout:
+        layout = Pango.Layout.new(self._context)
+        desc = Pango.FontDescription.from_string(family)
+        desc.set_absolute_size(px * Pango.SCALE)
+        layout.set_font_description(desc)
+        layout.set_text(text, -1)
+        return layout
+
+    def _row_layout(self, runs: list[tuple[str, tuple]]) -> Pango.Layout:
+        """A line of label text in several colours, laid out at 100px."""
+        layout = self._layout("", LABEL_FONT, 100)
+        layout.set_markup("".join(
+            '<span foreground="#{:02X}{:02X}{:02X}">{}</span>'.format(
+                *(round(c * 255) for c in colour), escape(text))
+            for text, colour in runs
+        ), -1)
+        return layout
+
+    def _drawable(self, text: str) -> bool:
+        layout = self._layout(text, WORD_FONT, WORD_LAYOUT_PX)
+        return layout.get_unknown_glyphs_count() == 0
+
+    # -- motion ---------------------------------------------------------------
+
+    def warp_speed(self, t: float) -> float:
+        """How fast the streaks come at the camera, in depth units per second."""
+        cruise, drift = 3.4, 0.25
+        up = ease_in_out(progress(t, *self.warp_ramp))
+        down = ease_in_out(progress(t, *self.warp_ease))
+        return lerp(drift * up, cruise, up) * (1 - down) + drift * down
+
+    def _integrate_travel(self) -> tuple[list[float], list[float]]:
+        """Distance travelled by time t, tabulated once.
+
+        Integrated ahead of time rather than accumulated frame by frame, so a
+        frame depends only on its own t: a dropped frame cannot leave the
+        streaks somewhere a steady machine would not have put them.
+        """
+        step = 1 / 240
+        times, totals, total, t = [0.0], [0.0], 0.0, 0.0
+        while t < 60:
+            total += self.warp_speed(t + step / 2) * step
+            t += step
+            times.append(t)
+            totals.append(total)
+        return times, totals
+
+    def travel(self, t: float) -> float:
+        times, totals = self._travel
+        if t <= 0:
+            return 0.0
+        i = min(bisect.bisect_right(times, t), len(times) - 1)
+        t0, t1 = times[i - 1], times[i]
+        return lerp(totals[i - 1], totals[i], clamp((t - t0) / (t1 - t0 or 1)))
+
+    # -- drawing --------------------------------------------------------------
+
+    def draw(self, cr: cairo.Context, width: int, height: int, t: float,
+             *, opacity: float = 1.0, transparent: bool = False) -> None:
+        """Paint frame t. With transparent, the fade goes to the desktop beneath."""
+        if transparent:
+            cr.save()
+            cr.set_operator(cairo.OPERATOR_SOURCE)
+            cr.set_source_rgba(0, 0, 0, 0)
+            cr.paint()
+            cr.restore()
+            cr.push_group()
+
+        cr.set_source_rgb(*INK)
+        cr.paint()
+        self._draw_ground(cr, width, height, t)
+        self._draw_stars(cr, width, height, t)
+        self._draw_mark(cr, width, height, t)
+        self._draw_words(cr, width, height, t)
+        self._draw_root(cr, width, height, t)
+        self._draw_hint(cr, width, height, t)
+
+        if transparent:
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(opacity)
+        elif opacity < 1:
+            # Nothing underneath to show through: fade to the ground colour,
+            # which is at least what the desktop's own wallpaper is made of.
+            cr.set_source_rgba(*INK, 1 - opacity)
+            cr.paint()
+
+    def _ground_surface(self, width: int, height: int) -> cairo.ImageSurface:
+        """The wallpaper's ground: a 155deg ink-to-panel gradient under a
+        48px grid that fades out towards the edges. Drawn once per size."""
+        if self._ground and self._ground[:2] == (width, height):
+            return self._ground[2]
+        surface = cairo.ImageSurface(cairo.FORMAT_RGB24, width, height)
+        cr = cairo.Context(surface)
+        angle = math.radians(155 - 90)
+        cx, cy = width / 2, height / 2
+        reach = abs(width / 2 * math.cos(angle)) + abs(height / 2 * math.sin(angle))
+        dx, dy = math.cos(angle) * reach, math.sin(angle) * reach
+        gradient = cairo.LinearGradient(cx - dx, cy - dy, cx + dx, cy + dy)
+        gradient.add_color_stop_rgb(0, *INK)
+        gradient.add_color_stop_rgb(1, *PANEL)
+        cr.set_source(gradient)
+        cr.paint()
+
+        cell = max(32, round(48 * height / 1080))
+        cr.push_group()
+        cr.set_source_rgb(*LINE)
+        cr.set_line_width(1)
+        for x in range(cell, width, cell):
+            cr.move_to(x + 0.5, 0)
+            cr.line_to(x + 0.5, height)
+        for y in range(cell, height, cell):
+            cr.move_to(0, y + 0.5)
+            cr.line_to(width, y + 0.5)
+        cr.stroke()
+        cr.pop_group_to_source()
+        mask = cairo.RadialGradient(cx, cy, 0, cx, cy, math.hypot(cx, cy) * 0.85)
+        mask.add_color_stop_rgba(0, 0, 0, 0, 0.75)
+        mask.add_color_stop_rgba(1, 0, 0, 0, 0)
+        cr.mask(mask)
+        self._ground = (width, height, surface)
+        return surface
+
+    def _draw_ground(self, cr, width, height, t):
+        level = ease_in_out(progress(t, *GROUND_IN))
+        # The grid recedes while the streaks are fast, so the eye has one
+        # thing moving and one thing still, not one thing still and busy.
+        level *= lerp(1.0, 0.45, ease_in_out(progress(t, *self.warp_ramp)))
+        level = lerp(level, 1.0, ease_in_out(progress(t, self.final_start + 1.0, 2.5)))
+        cr.set_source_surface(self._ground_surface(width, height), 0, 0)
+        cr.paint_with_alpha(level)
+
+    def _project(self, width, height, x, y, z):
+        focal = min(width, height) * 0.62
+        return width / 2 + x / z * focal, height / 2 + y / z * focal
+
+    def _draw_stars(self, cr, width, height, t):
+        if t < self.warp_ramp[0] - 0.3:
+            return
+        speed = self.warp_speed(t)
+        travelled = self.travel(t)
+        # How much of the motion each streak shows: long at cruise, dots at drift.
+        trail = 0.05 + speed * 0.075
+        appear = ease_out(progress(t, self.warp_ramp[0] - 0.3, 1.0))
+        # Quieter once the word has landed: it is the thing to read now.
+        appear *= 1 - 0.55 * ease_in_out(progress(t, self.final_start + ARRIVAL - 1.0, 2.0))
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        for x, y, z0, rooted in self.stars:
+            z = (z0 - travelled) % STAR_DEPTH + 0.15
+            head = self._project(width, height, x, y, z)
+            tail = self._project(width, height, x, y, z + trail)
+            # Fog: far streaks are faint and grey, near ones bright.
+            near = clamp(1 - z / STAR_DEPTH)
+            alpha = near**1.6 * appear * clamp(z / 0.6)
+            if alpha < 0.01:
+                continue
+            colour = self.root_colour if rooted else mix(MUTED, PAPER, near)
+            cr.set_source_rgba(*colour, alpha * (0.9 if rooted else 0.75))
+            cr.set_line_width(max(0.8, 2.4 / z) * height / 1080)
+            cr.move_to(*tail)
+            cr.line_to(*head)
+            cr.stroke()
+
+    def _mark_rect(self, width, height, t):
+        """Where the 64-unit mark sits: a fifth of the short side, centred,
+        then slid aside to make room for the partition table beside it."""
+        size = min(width, height) * 0.2
+        unit = size / 64
+        x0 = width / 2 - size / 2
+        if self.drive:
+            gap = 10 * unit
+            label_w = max(row.get_pixel_extents()[1].width for row in self.rows)
+            table_w = label_w * self._row_scale(unit)
+            slid = width / 2 - (size + gap + table_w) / 2
+            x0 = lerp(x0, slid, ease_in_out(progress(t, *MEASURE)))
+        return x0, height / 2 - size / 2, unit
+
+    @staticmethod
+    def _row_scale(unit):
+        """Label text at a size that sits level with a 5-unit bar."""
+        return 4.6 * unit / 100
+
+    def _draw_mark(self, cr, width, height, t):
+        launch = progress(t, self.launch, LAUNCH_LENGTH)
+        if t < ENCLOSURE_DRAW[0] or launch >= 1:
+            return
+        x0, y0, unit = self._mark_rect(width, height, t)
+        held = 1 - ease_in_out(launch)
+
+        # The enclosure traces itself from the top-left corner, clockwise,
+        # the way a pen would.
+        draw = ease_in_out(progress(t, *ENCLOSURE_DRAW))
+        cr.save()
+        cr.translate(x0, y0)
+        cr.scale(unit, unit)
+        _rounded_rect(cr, 5, 5, 54, 54, 12)
+        cr.restore()
+        length = _rounded_rect_length(54 * unit, 54 * unit, 12 * unit)
+        cr.set_dash([length * draw, length], 0)
+        cr.set_line_width(4 * unit)
+        cr.set_source_rgba(*MUTED, held)
+        cr.stroke()
+        cr.set_dash([], 0)
+
+        measure = ease_in_out(progress(t, *MEASURE)) if self.drive else 0.0
+        for index, (y, logo_width) in enumerate(MARK_BARS):
+            grow = ease_out(progress(t, BARS_START + index * BAR_STAGGER, BAR_GROW))
+            if grow <= 0:
+                continue
+            root = index == len(MARK_BARS) - 1
+            bar_width = lerp(logo_width, self.bar_widths[index], measure) if self.drive else logo_width
+            left = x0 + MARK_BAR_X * unit
+            right = left + bar_width * unit * grow
+            top = y0 + y * unit
+            if root and self.drive and self.drive.unclaimed:
+                self._draw_unclaimed(cr, right, left + MARK_TRACK * unit, top, unit,
+                                     measure * held)
+            if root:
+                # Root lets go of the enclosure and runs off the right edge,
+                # out of the drive and into the rest of the stick: the picture
+                # the wallpaper is built around, played forwards.
+                run = ease_in_out(clamp(launch * 1.25))
+                right = lerp(right, width + 40, run)
+                left = lerp(left, max(left, width * 0.62), ease_in_out(clamp(launch * 1.4 - 0.3)))
+                alpha = 1 - clamp(launch * 1.6 - 0.6)
+                cr.set_source_rgba(*self.root_colour, alpha)
+            else:
+                cr.set_source_rgba(*MUTED, held)
+            cr.rectangle(left, top, right - left, MARK_BAR_H * unit)
+            cr.fill()
+
+        if self.drive:
+            self._draw_table(cr, x0, y0, unit, t, launch)
+
+    def _draw_unclaimed(self, cr, left, right, top, unit, alpha):
+        """Space portlin-expand could still claim: root's outline, not its fill."""
+        if right - left < unit or alpha <= 0:
+            return
+        line = max(1.0, 0.7 * unit)
+        cr.set_line_width(line)
+        cr.set_dash([1.6 * unit, 1.2 * unit], 0)
+        cr.set_source_rgba(*self.root_colour, 0.7 * alpha)
+        cr.rectangle(left + line / 2, top + line / 2, right - left - line, MARK_BAR_H * unit - line)
+        cr.stroke()
+        cr.set_dash([], 0)
+
+    def _draw_table(self, cr, x0, y0, unit, t, launch):
+        """The lsblk rows, typed in beside the bars they describe."""
+        scale = self._row_scale(unit)
+        x = x0 + 74 * unit
+        fade = 1 - ease_in_out(clamp(launch * 2.5))
+        for index, ((y, _), layout) in enumerate(zip(MARK_BARS, self.rows)):
+            typed = progress(t, ROW_START + index * ROW_GAP, ROW_TYPE)
+            if typed <= 0:
+                continue
+            _, logical = layout.get_pixel_extents()
+            top = y0 + (y + MARK_BAR_H / 2) * unit - logical.height * scale / 2
+            self._type(cr, layout, x, top, scale, typed, fade)
+
+    def _type(self, cr, layout, x, top, scale, typed, alpha):
+        """Draw a line as if being typed: revealed a character at a time, with
+        a block cursor at the edge until the line is done."""
+        if alpha <= 0:
+            return
+        _, logical = layout.get_pixel_extents()
+        chars = max(len(layout.get_text()), 1)
+        cell = logical.width / chars * scale
+        shown = math.floor(typed * chars)
+        cr.push_group()
+        cr.save()
+        cr.rectangle(x, top - logical.height * scale, shown * cell, logical.height * scale * 3)
+        cr.clip()
+        cr.translate(x, top)
+        cr.scale(scale, scale)
+        PangoCairo.update_layout(cr, layout)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+        if typed < 1:
+            cr.set_source_rgba(*PAPER, 0.85)
+            cr.rectangle(x + shown * cell, top + logical.height * scale * 0.12,
+                         cell * 0.9, logical.height * scale * 0.8)
+            cr.fill()
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(alpha)
+
+    def _show_layout(self, cr, layout, cx, cy, scale, colour, alpha):
+        """Draw a layout centred on (cx, cy) at scale times its laid-out size."""
+        _, logical = layout.get_pixel_extents()
+        cr.save()
+        cr.translate(cx, cy)
+        cr.scale(scale, scale)
+        cr.translate(-logical.width / 2 - logical.x, -logical.height / 2 - logical.y)
+        cr.set_source_rgba(*colour, alpha)
+        PangoCairo.update_layout(cr, layout)
+        PangoCairo.show_layout(cr, layout)
+        cr.restore()
+
+    def _final_scale(self, width, height):
+        """The last word's size at rest, as a multiple of its laid-out size.
+
+        Large, but never wider than three quarters of the screen: some
+        languages say this in two words.
+        """
+        _, logical = self.final.get_pixel_extents()
+        return min(min(width, height) * 0.13 / WORD_LAYOUT_PX,
+                   width * 0.75 / max(logical.width, 1))
+
+    def _word_y(self, height):
+        """Where the last word lands: a little higher when the machine's rows
+        need room under it, so the whole group sits in the middle."""
+        return height * (0.4 if self.facts else 0.46)
+
+    def _draw_words(self, cr, width, height, t):
+        """The fly-by and the last word, painted smallest to largest.
+
+        Size on screen stands in for depth, so a word further off than the
+        arriving one is drawn under it -- and faded, so the last word lands
+        on clear ground rather than on a crowd.
+        """
+        size = min(width, height) * 0.075 / WORD_LAYOUT_PX
+        arriving = progress(t, self.final_start, ARRIVAL)
+        final_scale = self._final_scale(width, height) / lerp(Z_FAR, 1.0, ease_out(arriving))
+        clearing = 1 - ease_in_out(progress(t, self.final_start, 1.4))
+
+        painters = []
+        for word in self.words:
+            p = progress(t, word["start"], FLYBY_LIFE)
+            if not 0 < p < 1:
+                continue
+            z = lerp(Z_FAR, Z_NEAR, p)
+            scale = size / z
+            alpha = clamp((Z_FAR - z) / 2.5) * clamp((z - Z_NEAR) / 0.7) * 0.95
+            if arriving > 0 and scale < final_scale:
+                alpha *= clearing
+            cx, cy = self._project(width, height, word["x"], word["y"], z)
+            colour = mix(MUTED, PAPER, clamp(1 - z / Z_FAR))
+            painters.append((scale, word["layout"], cx, cy, colour, alpha))
+        if arriving > 0:
+            z = lerp(Z_FAR, 1.0, ease_out(arriving))
+            painters.append((final_scale, self.final, width / 2, self._word_y(height),
+                             mix(MUTED, PAPER, ease_out(arriving)),
+                             clamp((Z_FAR - z) / 3.0)))
+        for scale, layout, cx, cy, colour, alpha in sorted(painters, key=lambda p: p[0]):
+            if alpha > 0.005:
+                self._show_layout(cr, layout, cx, cy, scale, colour, alpha)
+
+    def _draw_root(self, cr, width, height, t):
+        """Root again, under the landed word: anchored at the word's left edge
+        and running off the right of the screen through a crimson dissolve."""
+        bar = ease_in_out(progress(t, self.final_start + ARRIVAL - 0.5, REST_BAR + 0.5))
+        if bar <= 0:
+            return
+        rest = self._final_scale(width, height)
+        ink, logical = self.final.get_pixel_extents()
+        cx, cy = width / 2, self._word_y(height)
+        # Measured from the ink and the baseline rather than the logical box,
+        # which carries the side bearing and room for descenders: "Welcome"
+        # has none, and a bar placed off the box floats a line below it.
+        word_left = cx + (ink.x - logical.x - logical.width / 2) * rest
+        baseline = cy + (self.final.get_baseline() / Pango.SCALE
+                         - logical.y - logical.height / 2) * rest
+        ink_bottom = cy + (ink.y + ink.height - logical.y - logical.height / 2) * rest
+        label_px = max(12.0, height * 0.0165)
+        # A line's height below the baseline, or clear of the descenders when
+        # the word has them (д, у and friends drop well below it).
+        top = max(baseline + label_px * 3.4, ink_bottom + label_px * 2.6)
+        thickness = max(4.0, height * 0.0093)
+
+        right = lerp(word_left, width, bar)
+        dissolve = cairo.LinearGradient(word_left, 0, width, 0)
+        dissolve.add_color_stop_rgba(0, *self.root_colour, 1)
+        dissolve.add_color_stop_rgba(0.45, *self.root_colour, 1)
+        dissolve.add_color_stop_rgba(1, *self.root_colour, 0)
+        cr.set_source(dissolve)
+        cr.rectangle(word_left, top, right - word_left, thickness)
+        cr.fill()
+
+        # Its label sits above the bar, not beside it, as on the wallpaper:
+        # the bar has no end to sit beside.
+        alpha = ease_out(progress(t, self.final_start + ARRIVAL, 0.9))
+        scale = label_px / 100
+        label_baseline = self.label.get_baseline() / Pango.SCALE * scale
+        cr.save()
+        cr.translate(word_left, top - label_px * 0.7 - label_baseline)
+        cr.scale(scale, scale)
+        cr.set_source_rgba(*MUTED, alpha)
+        PangoCairo.update_layout(cr, self.label)
+        PangoCairo.show_layout(cr, self.label)
+        cr.restore()
+
+        # The machine underneath, introducing itself a row at a time.
+        line = label_px * 1.75
+        for index, layout in enumerate(self.facts):
+            typed = progress(t, self.rest_time - 0.4 + index * FACT_GAP, FACT_TYPE)
+            if typed > 0:
+                self._type(cr, layout, word_left, top + thickness + label_px * 2.2 + index * line,
+                           scale, typed, 1.0)
+
+    def _draw_hint(self, cr, width, height, t):
+        start, end = HINT
+        alpha = ease_in_out(progress(t, start, 0.6)) * (1 - ease_in_out(progress(t, end, 0.8)))
+        if alpha <= 0:
+            return
+        px = max(11.0, height * 0.0125)
+        self._show_layout(cr, self.hint, width / 2, height - px * 4,
+                          px / 100, MUTED, alpha * 0.8)
+
+
+def _rounded_rect(cr, x, y, w, h, r):
+    """A rounded rectangle path starting at the top-left, going clockwise."""
+    cr.new_path()
+    cr.move_to(x + r, y)
+    cr.line_to(x + w - r, y)
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.line_to(x + w, y + h - r)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.line_to(x + r, y + h)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.line_to(x, y + r)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def _rounded_rect_length(w, h, r):
+    return 2 * (w + h) - 8 * r + 2 * math.pi * r
+
+
+def make_film(environ: dict[str, str]) -> Film:
+    flyby, final = order_words(language_of(environ))
+    return Film(flyby, final, account_label(), drive=read_drive(), facts=read_facts())
+
+
+def play(film: Film) -> int:
+    """Show the film full screen until it ends or someone presses a key."""
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+
+    window = Gtk.Window(title="Welcome to Portlin")
+    window.set_decorated(False)
+    window.set_keep_above(True)
+    window.set_skip_taskbar_hint(True)
+    window.set_skip_pager_hint(True)
+    window.set_app_paintable(True)
+    window.set_icon_name("portlin")
+
+    # With a compositor the window can be see-through, so the closing fade
+    # lands on the real desktop. xfwm4 composites by default; without one the
+    # fade goes to the ground colour instead and the desktop appears on close.
+    screen = window.get_screen()
+    visual = screen.get_rgba_visual()
+    transparent = bool(visual and screen.is_composited())
+    if transparent:
+        window.set_visual(visual)
+
+    state = {"origin": None, "skip": None}
+    # The session is still starting underneath when autostart runs this:
+    # panel, desktop and applets all drawing at once. A moment of plain ground
+    # first lets them settle, so the opening is not the part that stutters.
+    settle = 0.8
+
+    def now(widget) -> float:
+        return widget.get_frame_clock().get_frame_time() / 1e6
+
+    def timeline(widget) -> tuple[float, float]:
+        """The film's t, and the window's opacity, for this frame."""
+        clock = now(widget)
+        if state["origin"] is None:
+            state["origin"] = clock + settle
+        t = clock - state["origin"]
+        opacity = 1 - ease_in_out(progress(t, film.duration - FADE_OUT, FADE_OUT))
+        if state["skip"] is not None:
+            opacity = min(opacity, 1 - ease_in_out(progress(clock, state["skip"], SKIP_FADE)))
+        return max(t, 0.0), opacity
+
+    def on_draw(widget, cr):
+        t, opacity = timeline(widget)
+        alloc = widget.get_allocation()
+        film.draw(cr, alloc.width, alloc.height, t,
+                  opacity=opacity, transparent=transparent)
+        return True
+
+    def on_tick(widget, _clock):
+        t, opacity = timeline(widget)
+        if opacity <= 0 or t >= film.duration:
+            Gtk.main_quit()
+            return GLib.SOURCE_REMOVE
+        widget.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def skip(*_):
+        if state["skip"] is None and window.get_realized():
+            state["skip"] = now(window)
+        return True
+
+    def hide_cursor(widget):
+        display = widget.get_display()
+        widget.get_window().set_cursor(Gdk.Cursor.new_from_name(display, "none"))
+
+    window.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.KEY_PRESS_MASK)
+    window.connect("realize", hide_cursor)
+    window.connect("draw", on_draw)
+    window.connect("key-press-event", skip)
+    window.connect("button-press-event", skip)
+    window.connect("delete-event", lambda *_: Gtk.main_quit())
+    window.add_tick_callback(on_tick)
+    # Sized to the monitor as well as asked to go full screen: fullscreen is
+    # a request to the window manager, and the session can still be bringing
+    # xfwm4 up when autostart starts this.
+    display = Gdk.Display.get_default()
+    monitor = display.get_primary_monitor() or display.get_monitor(0)
+    if monitor is not None:
+        area = monitor.get_geometry()
+        window.move(area.x, area.y)
+        window.set_default_size(area.width, area.height)
+    window.fullscreen()
+    window.show_all()
+    window.present()
+    Gtk.main()
+    return 0
+
+
+def can_play(*, once: bool) -> bool:
+    """Whether there is a display to play on, and nobody has asked not to."""
+    try:
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+    except (ImportError, ValueError):
+        return False
+    if not Gtk.init_check(sys.argv[:1])[0]:
+        return False
+    settings = Gtk.Settings.get_default()
+    if once and settings and not settings.props.gtk_enable_animations:
+        # Someone who has turned animation off has told every program not to
+        # do exactly this. Run by hand, it is a request, so it still plays.
+        return False
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--once", action="store_true",
+        help="play only if this account has never seen it (what login runs)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.once:
+        stamp = stamp_path(os.environ)
+        if stamp.exists():
+            return 0
+        # Written before playing rather than after, so a film that crashes, or
+        # a machine that cannot draw it, costs one login and not every one.
+        try:
+            stamp.parent.mkdir(parents=True, exist_ok=True)
+            stamp.touch()
+        except OSError:
+            return 0
+
+    if not can_play(once=args.once):
+        return 0
+    return play(make_film(os.environ))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
