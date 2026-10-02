@@ -73,6 +73,57 @@ def load_function(path: Path, name: str, namespace: dict) -> object:
     raise AssertionError(f"{path.name} has no top-level {name}()")
 
 
+def load_wizard():
+    """The whole wizard as a module, for tests that need its real objects.
+
+    Its module body only defines things -- the screen is not touched until
+    main() calls ui.start() -- so loading it needs no terminal and no root.
+    Each call loads a fresh copy, so a test can stub its functions freely.
+    """
+    import importlib.machinery
+    import importlib.util
+    import itertools
+
+    name = f"portlin_firstboot_{next(_LOADS)}"
+    loader = importlib.machinery.SourceFileLoader(name, str(WIZARD))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+_LOADS = __import__("itertools").count()
+
+
+def security_rows(fb, *, luks=None, **answers):
+    """The rows the security screen offers, by key, with their defaults."""
+    state = fb.State()
+    state.username, state.luks_device, state.has_desktop = "sam", luks, True
+    for key, value in answers.items():
+        setattr(state, key, value)
+    offered = {}
+
+    def settings(title, text, rows, **kwargs):
+        offered.update({row.key: row for row in rows})
+        return {row.key: row.value for row in rows}
+
+    fb.ui.settings = settings
+    fb.step_security(state)
+    return offered
+
+
+def summary_state(fb, **answers):
+    """A finished set of answers, as the review screen would see them."""
+    state = fb.State()
+    defaults = dict(layout="us", locale="en_US.UTF-8", timezone="Europe/London", rtc_local=False,
+                    hostname="portlin", username="sam", password="pw", has_desktop=True,
+                    theme="Numix", icon_theme="Papirus-Dark", autologin=False,
+                    sudo_password=True, swap=50)
+    for key, value in {**defaults, **answers}.items():
+        setattr(state, key, value)
+    return state
+
+
 class TestWizardScript:
     def test_it_parses(self):
         # A syntax error here is only discovered on a stranger's laptop, at the
@@ -93,8 +144,9 @@ class TestWizardScript:
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 imported.add(node.module.split(".")[0])
         allowed = {
-            "__future__", "grp", "json", "os", "re", "signal", "subprocess", "sys",
-            "traceback", "pathlib",
+            "__future__", "contextlib", "curses", "grp", "json", "locale", "os", "re",
+            "signal", "subprocess", "sys", "textwrap", "time", "traceback", "uuid",
+            "pathlib",
         }
         assert imported <= allowed, f"unexpected imports: {imported - allowed}"
 
@@ -119,7 +171,7 @@ class TestWizardScript:
         main_body = source[source.index("def main()"):]
         crash_handler = main_body[main_body.index("except Exception:"):main_body.index("finally:")]
         assert "unlink" not in crash_handler
-        assert "log(detail)" in crash_handler
+        assert "log(detail, force=True)" in crash_handler
 
     def test_it_rebuilds_the_initramfs_after_a_keymap_change_on_encrypted_sticks(self):
         # The LUKS prompt lives in the initramfs and would otherwise stay on a US
@@ -129,13 +181,40 @@ class TestWizardScript:
         assert "update-initramfs" in source
 
     def test_it_never_passes_a_passphrase_as_an_argument(self):
-        source = WIZARD.read_text()
-        assert "luksChangeKey" in source
-        change_key_line = next(
-            line for line in source.splitlines() if "luksChangeKey" in line and "run(" in line
-        )
-        assert "password" not in change_key_line
-        assert "key-file" not in change_key_line
+        # Run for real against a stand-in cryptsetup: the current passphrase
+        # has to arrive on stdin and the new one through the extra descriptor,
+        # and neither may appear anywhere in argv, which /proc shows to all.
+        seen = {}
+
+        class Proc:
+            returncode = 0
+
+            def __init__(self, argv, **kwargs):
+                seen["argv"], seen["kwargs"] = argv, kwargs
+                fd = int(argv[-1].rsplit("/", 1)[1])
+                seen["fd_passed"] = fd in kwargs["pass_fds"]
+                # What the child would inherit and keep open.
+                self.held = os.dup(fd)
+
+            def communicate(self, data):
+                seen["stdin"] = data
+                with os.fdopen(self.held) as handle:
+                    seen["new"] = handle.read()
+                return "", ""
+
+        class FakeSubprocess:
+            PIPE = subprocess.PIPE
+            Popen = Proc
+
+        namespace = {"os": os, "subprocess": FakeSubprocess, "log": lambda message: None}
+        change = load_function(WIZARD, "change_luks_passphrase", namespace)
+        assert change("/dev/sda4", "old secret", "new secret") is True
+        argv = " ".join(seen["argv"])
+        assert "old secret" not in argv and "new secret" not in argv
+        assert seen["argv"][:4] == ["cryptsetup", "luksChangeKey", "--key-file", "-"]
+        assert seen["stdin"] == "old secret"
+        assert seen["new"] == "new secret"
+        assert seen["fd_passed"]
 
     def test_console_commands_cannot_block_the_wizard(self):
         # plymouth quit blocks trying to reach a daemon that has already exited,
@@ -177,43 +256,19 @@ class TestWizardScript:
         restore = main_body[main_body.index("finally:"):]
         assert "claim_console(False)" in restore
 
-    def test_dialog_height_grows_with_the_content(self):
-        # whiptail clips silently rather than scrolling, so a fixed height eats
-        # the end of any longer message. The summary screen lost both its last
-        # row and the question its buttons were answering.
-        import re as _re
-
-        source = WIZARD.read_text()
-        namespace: dict = {}
-        body = source[source.index("def _box_height"):source.index("def message(")]
-        exec(body, namespace)
-        box_height = namespace["_box_height"]
-
-        summary = "\n".join(["line"] * 9)
-        assert box_height(summary) > 12, "a nine-line summary must not use the old height"
-        assert box_height("one line") == 12, "short messages keep a sane minimum"
-        # Never taller than an 80x25 console.
-        assert box_height("\n".join(["x"] * 200)) <= 22
-
-    def test_message_and_confirm_size_themselves_to_their_content(self):
-        source = WIZARD.read_text()
-        for call in ("--msgbox", "--yesno"):
-            line = next(l for l in source.splitlines() if call in l)
-            assert "_box_height" in line, f"{call} still uses a fixed height: {line.strip()}"
-
     def test_expansion_grows_the_layers_outside_in(self):
         # Each layer can only grow into space the layer beneath has claimed, so
         # partition then LUKS mapping then filesystem is the only correct order.
         source = WIZARD.read_text()
-        body = source[source.index("def apply_expand"):source.index("def step_autologin")]
+        body = source[source.index("def apply_expand"):source.index("def finalise_encryption")]
         assert body.index("growpart") < body.index("cryptsetup") < body.index("resize2fs")
 
     def test_expansion_runs_before_the_rest_of_setup(self):
         # Otherwise the account and locale data land in the few gigabytes the
         # image shipped with, and get copied again when the filesystem grows.
         source = WIZARD.read_text()
-        wizard_body = source[source.index("def wizard()"):source.index("def main()")]
-        assert wizard_body.index("apply_expand()") < wizard_body.index("apply_account(")
+        body = source[source.index("def apply_all("):source.index("def wizard()")]
+        assert body.index("apply_expand") < body.index("apply_account(")
 
     def test_expansion_tolerates_growpart_reporting_no_change(self):
         # growpart exits non-zero with NOCHANGE when the partition already fills
@@ -227,7 +282,7 @@ class TestWizardScript:
         # after it. Checking only the space after the partition would decide
         # there is nothing to do and never offer again.
         source = WIZARD.read_text()
-        body = source[source.index("def step_expand"):source.index("def apply_expand")]
+        body = source[source.index("def expansion_offer"):source.index("def apply_expand")]
         assert "_unused_inside_partition" in body
         assert "_free_space_bytes" in body
 
@@ -251,33 +306,33 @@ class TestWizardScript:
         # Numbers measured from an actual 8 GB portlin image on a loop device.
         source = WIZARD.read_text()
         namespace = {"Path": Path}
-        exec(source[source.index("def _sectors"):source.index("def step_expand")], namespace)
+        exec(source[source.index("def _sectors"):source.index("def expansion_offer")], namespace)
         namespace["_sectors"] = lambda name, attr: {
             ("sda", "size"): 62914560,      # 30 GiB stick
             ("sda4", "start"): 3149824,
             ("sda4", "size"): 13627359,     # root from an 8 GB image
         }.get((name, attr), 0)
-        exec(source[source.index("def _free_space_bytes"):source.index("def step_expand")], namespace)
+        exec(source[source.index("def _free_space_bytes"):source.index("def expansion_offer")], namespace)
         free = namespace["_free_space_bytes"]("/dev/sda", "/dev/sda4")
         assert 21 * 1024**3 < free < 23 * 1024**3, f"expected ~22 GiB, got {free}"
 
     def test_no_free_space_when_the_image_already_fills_the_disk(self):
         source = WIZARD.read_text()
         namespace = {"Path": Path}
-        exec(source[source.index("def _sectors"):source.index("def step_expand")], namespace)
+        exec(source[source.index("def _sectors"):source.index("def expansion_offer")], namespace)
         namespace["_sectors"] = lambda name, attr: {
             ("loop0", "size"): 16777216,
             ("loop0p4", "start"): 3149824,
             ("loop0p4", "size"): 13627359,
         }.get((name, attr), 0)
-        exec(source[source.index("def _free_space_bytes"):source.index("def step_expand")], namespace)
+        exec(source[source.index("def _free_space_bytes"):source.index("def expansion_offer")], namespace)
         assert namespace["_free_space_bytes"]("/dev/loop0", "/dev/loop0p4") == 0
 
     def test_a_skipped_expansion_says_why(self):
         # Silently vanishing is how this bug survived: the step simply never
         # appeared and left nothing behind to explain itself.
         source = WIZARD.read_text()
-        body = source[source.index("def step_expand"):source.index("def apply_expand")]
+        body = source[source.index("def expansion_offer"):source.index("def apply_expand")]
         assert "log(" in body
 
     def test_the_backing_device_is_found_through_sysfs_slaves(self):
@@ -415,30 +470,22 @@ class TestWizardScript:
         Proc.stdout = "garbage"
         assert load_function(WIZARD, "migration_candidates", namespace)() == []
 
-    def test_choose_preselects_a_default_when_given_one(self):
-        calls = []
-        namespace = {"_whiptail": lambda args, capture=False: calls.append(args) or "gb"}
-        choose = load_function(WIZARD, "choose", namespace)
-        choose("Keyboard", "Which?", [("us", "US"), ("gb", "UK")], default="gb")
-        assert "--default-item" in calls[0] and calls[0][calls[0].index("--default-item") + 1] == "gb"
-        choose("Keyboard", "Which?", [("us", "US"), ("gb", "UK")])
-        assert "--default-item" not in calls[1]
-
     def test_the_migration_screen_comes_after_welcome_and_before_the_keyboard(self):
-        body = WIZARD.read_text()
-        wizard = body[body.index("def wizard("):body.index("def main(")]
-        assert wizard.index("step_welcome()") < wizard.index("migration_candidates()") < wizard.index("step_keyboard(")
+        steps = [key for key, _, _ in load_wizard().STEPS]
+        assert steps.index("welcome") < steps.index("restore") < steps.index("keyboard")
 
     def test_the_copy_runs_right_after_the_account_exists(self):
         body = WIZARD.read_text()
-        wizard = body[body.index("def wizard("):body.index("def main(")]
-        assert wizard.index("apply_account(") < wizard.index("apply_migration()") < wizard.index("apply_sudo_password(")
+        apply = body[body.index("def apply_all("):body.index("def wizard(")]
+        assert apply.index("apply_account(") < apply.index("apply_migration()") < apply.index("apply_sudo_password(")
 
     def test_a_migrated_account_is_not_asked_for_a_password(self):
         body = WIZARD.read_text()
-        wizard = body[body.index("def wizard("):body.index("def main(")]
-        assert wizard.index("account_plan") < wizard.index("step_account()")
-        assert "if password is not None:" in wizard
+        step = body[body.index("def step_account("):body.index("def _suggest_username")]
+        assert step.index("if state.account_plan:") < step.index("ui.form(")
+        assert "state.password = None" in step
+        apply = body[body.index("def apply_all("):body.index("def wizard(")]
+        assert "if state.password is not None:" in apply
 
     def test_the_tools_source_is_released_on_every_exit(self):
         body = WIZARD.read_text()
@@ -451,13 +498,13 @@ class TestWizardScript:
         # tool stops writing must fall through to the ordinary screens, not
         # raise KeyError inside setup and make it start over on every boot.
         body = WIZARD.read_text()
-        wizard = body[body.index("def wizard("):body.index("def main(")]
-        assert 'account_plan["name"]' not in wizard and "account_plan['name']" not in wizard
-        assert 'migration["label"]' not in wizard and "migration['label']" not in wizard
-        assert "migration.get('label', 'the old drive')" in wizard
+        assert 'account_plan["name"]' not in body and "account_plan['name']" not in body
+        assert 'migration["label"]' not in body and "migration['label']" not in body
+        assert "migration.get('label', 'the old drive')" in body
         # A plan naming an account the wizard's own screen would refuse is
-        # treated as no account plan, so step_account() asks instead.
-        assert "USERNAME_RE.fullmatch" in wizard[:wizard.index("step_account()")]
+        # treated as no account plan, so the account screen asks instead.
+        step = body[body.index("def step_migration("):body.index("def apply_migration(")]
+        assert "USERNAME_RE.fullmatch" in step
 
     def test_closing_the_tool_is_bounded_and_its_failure_is_swallowed(self, tmp_path):
         plan = tmp_path / "plan.json"
@@ -639,7 +686,7 @@ class TestEncryptOnFirstBoot:
         # every boot and outlives the wizard disabling itself. The wizard now
         # only reads the breadcrumb it leaves, so it can tell the user.
         body = WIZARD.read_text()
-        finalise = body[body.index("def finalise_encryption"):body.index("def step_autologin")]
+        finalise = body[body.index("def finalise_encryption"):body.index("def _luks_device")]
         assert "/run/portlin/finalised" in finalise
         assert "crypttab" not in finalise
 
@@ -685,7 +732,7 @@ class TestNothingTheWizardRunsCanTakeTheConsole:
 
     systemd hands this wizard tty1 with StandardInput=tty-force, so a child that
     inherits stdin has a controlling terminal and can open /dev/tty and write
-    straight over the whiptail dialogs. cryptsetup does exactly that: given a
+    straight over the wizard's screens. cryptsetup does exactly that: given a
     terminal it asks "Enter passphrase for /dev/sda4:" and waits, which on an
     encrypted stick means the keyring probe in _resize_mapping never returns to
     let the stashed passphrase be tried at all.
@@ -757,7 +804,7 @@ class TestWizardConsumesTheStash:
         # crypttab is copied into the initramfs at build time, so dropping the
         # option after the rebuild would leave the old initramfs still using it.
         source = WIZARD.read_text()
-        body = source[source.index("def wizard()"):source.index("def main()")]
+        body = source[source.index("def apply_all("):source.index("def wizard()")]
         assert body.index("drop_passphrase_stash(") < body.index("refresh_initramfs_for_keymap(")
 
 
@@ -970,7 +1017,7 @@ class TestFinaliserBreadcrumbContract:
         wizard_finalise_encryption = WIZARD.read_text()
         wizard_finalise_encryption = wizard_finalise_encryption[
             wizard_finalise_encryption.index("def finalise_encryption"):
-            wizard_finalise_encryption.index("def step_autologin")
+            wizard_finalise_encryption.index("def _luks_device")
         ]
         assert "BREADCRUMB = Path(\"/run/portlin/finalised\")" in finalise_body
         assert "/run/portlin/finalised" in wizard_finalise_encryption
@@ -1007,10 +1054,10 @@ class TestKeyringUnderAutologin:
         # was doing. Without LUKS there is no such handover, and a passwordless
         # keyring would leave saved passwords readable to whoever finds the
         # stick -- on a device whose entire purpose is being carried around.
-        applying = source[source.index("    apply_autologin(username, autologin)"):source.index("SENTINEL.unlink")]
+        applying = source[source.index("        apply_autologin(state.username"):source.index("SENTINEL.unlink")]
         assert "apply_keyring_autounlock(" in applying, "nothing opens the keyring at all"
         guard = applying[:applying.index("apply_keyring_autounlock(")]
-        assert "luks_device" in guard, "the keyring must not be opened up on an unencrypted stick"
+        assert "encrypted" in guard, "the keyring must not be opened up on an unencrypted stick"
         assert "autologin" in guard, "a password login unlocks the keyring by itself"
 
     def test_the_keyring_password_is_never_an_argument(self, source):
@@ -1025,7 +1072,7 @@ class TestKeyringUnderAutologin:
         # This bug was invisible: autologin was offered, accepted, and the
         # consequence only showed up days later as browsers nagging for a
         # password the user had never knowingly set.
-        body = source[source.index("def step_autologin"):source.index("# ---", source.index("def step_autologin"))]
+        body = source[source.index("def _autologin_help"):source.index("def _sudo_help")]
         assert "encrypted" in body, "the warning has to know whether LUKS is there"
         assert "keyring" in body.lower(), "the cost has to be named where the choice is made"
 
@@ -1121,7 +1168,7 @@ class TestPassphraseOwnership:
         exec(
             source[
                 source.index("def _encrypted_at_boot"):
-                source.index("def step_change_passphrase")
+                source.index("def step_security")
             ],
             namespace,
         )
@@ -1145,44 +1192,24 @@ class TestPassphraseOwnership:
     def test_no_crypttab_at_all_is_not_a_boot_time_encryption(self, tmp_path):
         assert self._encrypted_at_boot(tmp_path / "absent") is False
 
-    def test_the_step_asks_nothing_when_the_user_chose_the_passphrase_this_boot(self):
-        # The whole point: no dialog, no cryptsetup, no clearing the screen.
-        source = WIZARD.read_text()
-        asked = []
-        namespace = {
-            "_encrypted_at_boot": lambda: True,
-            "confirm": lambda *a, **k: asked.append(a) or True,
-            "message": lambda *a, **k: asked.append(a),
-            "subprocess": _Refuse(),
-        }
-        exec(
-            source[
-                source.index("def step_change_passphrase"):
-                source.index("def _root_devices")
-            ],
-            namespace,
-        )
-        namespace["step_change_passphrase"]("/dev/sda3")
-        assert asked == []
+    def test_the_offer_is_not_made_when_the_user_chose_the_passphrase_this_boot(self):
+        # The whole point: no row offering to replace a passphrase the person
+        # typed into the initramfs minutes ago.
+        fb = load_wizard()
+        fb._encrypted_at_boot = lambda: True
+        rows = security_rows(fb, luks="/dev/sda3")
+        assert "change_passphrase" not in rows
 
-    def test_the_step_still_offers_on_a_stick_someone_else_encrypted(self, tmp_path):
-        source = WIZARD.read_text()
-        asked = []
-        namespace = {
-            "_encrypted_at_boot": lambda: False,
-            "confirm": lambda title, text, **k: asked.append(title) or False,
-            "message": lambda *a, **k: None,
-            "subprocess": _Refuse(),
-        }
-        exec(
-            source[
-                source.index("def step_change_passphrase"):
-                source.index("def _root_devices")
-            ],
-            namespace,
-        )
-        namespace["step_change_passphrase"]("/dev/sda3")
-        assert asked == ["Disk encryption"]
+    def test_the_offer_is_made_on_a_stick_someone_else_encrypted(self):
+        fb = load_wizard()
+        fb._encrypted_at_boot = lambda: False
+        rows = security_rows(fb, luks="/dev/sda3")
+        assert rows["change_passphrase"].value is True
+
+    def test_an_unencrypted_stick_is_never_offered_one(self):
+        fb = load_wizard()
+        fb._encrypted_at_boot = lambda: False
+        assert "change_passphrase" not in security_rows(fb, luks=None)
 
 
 class _Refuse:
@@ -1232,7 +1259,7 @@ class TestThemePicker:
         assert offered == set(packages.THEME_PACKAGES)
 
     def test_it_offers_the_shipped_default_first(self):
-        # whiptail preselects the first row, so the order is the default.
+        # The settings row starts on the first entry, so the order is the default.
         assert module_constant(WIZARD, "THEMES")[0][0] == packages.DEFAULT_THEME
 
     @pytest.mark.parametrize("filename", NAMES_A_THEME)
@@ -1284,9 +1311,9 @@ class TestThemePicker:
 
     def test_the_wizard_asks_and_applies(self):
         source = WIZARD.read_text()
-        wizard = source[source.index("def wizard("):source.index("def main(")]
-        assert "step_theme()" in wizard
-        assert "apply_theme(" in wizard
+        step = source[source.index("def step_appearance("):source.index("def hardware_scan(")]
+        assert 'Row("theme"' in step
+        assert "apply_theme(" in source[source.index("def apply_all("):source.index("def wizard(")]
 
     def test_it_skips_the_picker_on_a_stick_with_no_desktop(self):
         # --minimal installs no portlin-desktop, so not one of these files
@@ -1297,8 +1324,9 @@ class TestThemePicker:
         assert "_desktop_installed()" in body
 
     def test_the_summary_shows_the_chosen_theme(self):
-        source = WIZARD.read_text()
-        assert "Theme:" in source
+        fb = load_wizard()
+        state = summary_state(fb, theme="Blackbird")
+        assert "Blackbird" in dict((k, v) for k, _, v in fb.summary_groups(state))["appearance"]
 
 
 class TestIconThemePicker:
@@ -1319,7 +1347,7 @@ class TestIconThemePicker:
         assert offered == set(packages.ICON_THEME_PACKAGES)
 
     def test_it_offers_the_shipped_default_first(self):
-        # whiptail preselects the first row, so the order is the default.
+        # The settings row starts on the first entry, so the order is the default.
         offered = module_constant(WIZARD, "ICON_THEMES")
         assert offered[0][0] == packages.DEFAULT_ICON_THEME
 
@@ -1398,17 +1426,20 @@ class TestIconThemePicker:
 
     def test_the_wizard_asks_and_applies(self):
         source = WIZARD.read_text()
-        wizard = source[source.index("def wizard("):source.index("def main(")]
-        assert "step_icon_theme()" in wizard
-        assert "apply_icon_theme(" in wizard
+        step = source[source.index("def step_appearance("):source.index("def hardware_scan(")]
+        assert 'Row("icon_theme"' in step
+        assert "apply_icon_theme(" in source[source.index("def apply_all("):source.index("def wizard(")]
 
     def test_it_skips_the_picker_on_a_stick_with_no_desktop(self):
-        source = WIZARD.read_text()
-        wizard = source[source.index("def wizard("):source.index("def main(")]
-        assert "step_icon_theme() if has_desktop" in wizard
+        fb = load_wizard()
+        state = fb.State()
+        state.has_desktop = False
+        assert fb.step_appearance(state) is False
 
     def test_the_summary_shows_the_chosen_set(self):
-        assert "Icons:" in WIZARD.read_text()
+        fb = load_wizard()
+        state = summary_state(fb, icon_theme="Adwaita")
+        assert "Adwaita" in dict((k, v) for k, _, v in fb.summary_groups(state))["appearance"]
 
 
 class TestSudoPasswordChoice:
@@ -1427,21 +1458,24 @@ class TestSudoPasswordChoice:
 
     @pytest.fixture
     def step(self, source):
-        return source[source.index("def step_sudo_password"):source.index("def apply_", source.index("def step_sudo_password"))]
+        return source[source.index("def _sudo_help"):source.index("def _found_help")]
 
     @pytest.fixture
     def apply(self, source):
         start = source.index("def apply_sudo_password")
         return source[start:source.index("\ndef ", start + 1)]
 
-    def test_the_wizard_asks(self, source):
-        wizard = source[source.index("def wizard()"):source.index("def main()")]
-        assert "step_sudo_password(" in wizard
+    def test_the_wizard_asks(self):
+        assert "sudo_password" in security_rows(load_wizard())
 
-    def test_requiring_a_password_is_the_default(self, step):
-        # whiptail preselects Yes unless told otherwise, and the safe answer is
-        # the one a hurried person gets by pressing Enter.
-        assert "default_yes=False" not in step
+    def test_requiring_a_password_is_the_default(self):
+        # The safe answer is the one a hurried person gets by pressing Enter.
+        assert security_rows(load_wizard())["sudo_password"].value is True
+
+    def test_a_migrated_waiver_is_carried_over(self):
+        fb = load_wizard()
+        rows = security_rows(fb, account_plan={"name": "sam", "sudo_nopasswd": True})
+        assert rows["sudo_password"].value is False
 
     def test_the_warning_names_what_is_given_up(self, step):
         assert "root" in step, "the prompt must say what a waived password buys an attacker"
@@ -1453,7 +1487,7 @@ class TestSudoPasswordChoice:
         assert "autologin" in step and "encrypted" in step
 
     def test_privilege_is_only_granted_once_the_account_exists(self, source):
-        applying = source[source.index("def wizard()"):source.index("SENTINEL.unlink")]
+        applying = source[source.index("def apply_all("):source.index("SENTINEL.unlink")]
         assert applying.index("apply_account(") < applying.index("apply_sudo_password(")
 
     def test_the_rule_names_the_account_and_not_a_group(self, source):
@@ -1484,7 +1518,8 @@ class TestSudoPasswordChoice:
         # Re-running setup must be able to take the waiver back.
         assert "unlink" in apply
 
-    def test_the_summary_says_which_was_chosen(self, source):
-        start = source.index('"Ready to apply"')
-        summary = source[start:source.index("raise Cancelled()", start)]
-        assert "sudo" in summary.lower()
+    def test_the_summary_says_which_was_chosen(self):
+        fb = load_wizard()
+        for required, words in ((True, "asks for a password"), (False, "never asks")):
+            groups = dict((k, v) for k, _, v in fb.summary_groups(summary_state(fb, sudo_password=required)))
+            assert f"sudo {words}" in groups["security"]

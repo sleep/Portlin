@@ -123,12 +123,23 @@ class TestTheLogsNeverSeeIt:
         # passphrase reaches cryptsetup on stdin precisely so that this log,
         # and /proc, only ever see "cryptsetup resize --key-file -".
         source = WIZARD.read_text()
-        body = source[source.index("def run(argv"):source.index("def _whiptail")]
+        body = source[source.index("def run(argv"):source.index("def _write_private")]
         logged = [line for line in body.splitlines() if "log(" in line]
         assert logged, "the wizard is expected to log the commands it runs"
         assert not any("stdin" in line for line in logged), (
             "the command log must never render stdin, which carries the passphrase"
         )
+
+    def test_changing_the_passphrase_logs_the_command_and_nothing_it_was_fed(self):
+        # luksChangeKey is run outside run(), because the new passphrase needs
+        # a descriptor of its own, so it logs for itself and must not log what
+        # it writes.
+        source = WIZARD.read_text()
+        start = source.index("def change_luks_passphrase")
+        body = source[start:source.index("\ndef ", start + 1)]
+        logged = [line for line in body.splitlines() if "log(" in line]
+        assert logged
+        assert not any("current" in line or "new" in line.replace("newline", "") for line in logged)
 
     def test_the_passphrase_only_ever_travels_by_stdin(self):
         # Every cryptsetup call that needs it uses --key-file - and hands the

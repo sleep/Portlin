@@ -62,9 +62,6 @@ class Guest:
         self.command(f"sendkey {name}")
 
     def enter(self, times: int = 1) -> None:
-        # Pressed more than once because a keystroke arriving while a dialog is
-        # still initialising is silently dropped, and re-accepting a default is
-        # harmless.
         for _ in range(times):
             self.key("ret")
             time.sleep(1.0)
@@ -99,7 +96,9 @@ IFS=: read -r ma mi < /sys/class/block/$(basename $p)/dev; mknod -m 0660 "$p" b 
 echo "PARTITION_BYTES=$(( $(cat /sys/class/block/$(basename $p)/size) * 512 ))"
 ROOTDEV="$p"
 if cryptsetup isLuks "$p" 2>/dev/null; then
-    if ! echo "{PASSPHRASE}" | cryptsetup open --key-file - "$p" portlin_root 2>&1; then
+    # printf, not echo: with --key-file - a trailing newline is part of the
+    # key, and the hook created the container without one.
+    if ! printf '%s' "{PASSPHRASE}" | cryptsetup open --key-file - "$p" portlin_root 2>&1; then
         echo "OPEN_FAILED"; losetup -d "$DEV"; exit 0
     fi
     ROOTDEV=/dev/mapper/portlin_root
@@ -109,7 +108,14 @@ dumpe2fs -h "$ROOTDEV" 2>/dev/null | grep -E "^Block count|^Block size"
 M=$(mktemp -d)
 if mount "$ROOTDEV" "$M" 2>&1; then
     echo "MOUNTED"
-    grep -c '^proof' "$M/etc/passwd" 2>/dev/null | sed 's/^/ACCOUNTS=/'
+    grep -c '^user:' "$M/etc/passwd" 2>/dev/null | sed 's/^/ACCOUNTS=/'
+    [ -e "$M/var/lib/portlin/firstboot-pending" ] && echo "SENTINEL_LEFT" || echo "SENTINEL_GONE"
+    # The defaults the new settings screens apply when every answer is Enter.
+    grep -q '^ENABLED=yes' "$M/etc/ufw/ufw.conf" 2>/dev/null && echo "FIREWALL_ON"
+    [ -e "$M/etc/systemd/system/multi-user.target.wants/ssh.service" ] && echo "SSH_ENABLED"
+    [ -s "$M/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml" ] && echo "SCREEN_LOCK"
+    grep -q '^scale=auto' "$M/etc/portlin/display.conf" 2>/dev/null && echo "SCALE_AUTO"
+    [ -s "$M/etc/NetworkManager/conf.d/50-portlin-mac.conf" ] && echo "MAC_RULE"
     echo "--- wizard log ---"
     tail -25 "$M/var/log/portlin-firstboot.log" 2>/dev/null || echo "(no log)"
     umount "$M"
@@ -177,32 +183,40 @@ def main() -> int:
         guest.screenshot("02-after-encryption")
 
         log("driving the wizard")
+        # One Enter per screen: the wizard is curses, so an early key waits for
+        # the next screen instead of being dropped, and a spare one would answer
+        # a question nobody looked at. qemu's network is wired, so there is no
+        # Wi-Fi list, and the passphrase was chosen at boot, so no offer to
+        # change it.
         steps = [
             ("welcome", None, 8),
             ("keyboard", None, 25),
-            ("language", None, 30),
-            ("timezone region", None, 12),
-            ("timezone city", None, 10),
-            ("hostname", None, 10),
-            ("full name", None, 8),
-            ("username", None, 8),
-            ("password", ACCOUNT_PASSWORD, 8),
+            ("language", None, 10),
+            ("time zone", None, 10),
+            ("hardware clock", None, 10),
+            ("network", None, 20),
+            ("full name", None, 5),
+            ("username", None, 5),
+            ("password", ACCOUNT_PASSWORD, 5),
             ("password again", ACCOUNT_PASSWORD, 12),
-            ("autologin", None, 12),
-            ("EXPAND offer", None, 15),
+            ("security", None, 10),
+            ("appearance", None, 10),
+            ("hardware", None, 25),
+            ("services", None, 10),
+            ("storage", None, 20),
         ]
         for index, (label, text, wait) in enumerate(steps, start=3):
             log(f"  step: {label}")
             guest.screenshot(f"{index:02d}-{label.replace(' ', '-')}")
             if text is None:
-                guest.enter(2)
+                guest.enter()
             else:
                 guest.answer(text)
             time.sleep(wait)
 
-        guest.screenshot("15-summary")
+        guest.screenshot(f"{len(steps) + 3:02d}-summary")
         log("  step: summary -> apply")
-        guest.enter(3)
+        guest.enter()
 
         # The expansion asks for the passphrase when the kernel keyring cannot
         # supply the volume key. Answering it is the whole reason this run
@@ -216,7 +230,7 @@ def main() -> int:
         log("waiting for setup to finish (~5 min)")
         time.sleep(300)
         guest.screenshot("17-final")
-        guest.enter(2)
+        guest.enter()
         time.sleep(60)
         guest.screenshot("18-after-final")
 
@@ -255,6 +269,21 @@ def main() -> int:
             verdict.append(f"filesystem is {gib:.1f} GiB; it did not expand")
     if "MOUNTED" not in output:
         verdict.append("the root filesystem would not mount")
+    else:
+        if "ACCOUNTS=1" not in output:
+            verdict.append("setup did not create the account")
+        if "SENTINEL_GONE" not in output:
+            verdict.append("setup did not finish: its sentinel is still there")
+        for marker, problem in (
+            ("FIREWALL_ON", "the firewall was not switched on"),
+            ("SCREEN_LOCK", "the screen-lock defaults were not written"),
+            ("SCALE_AUTO", "the display-scale setting was not written"),
+            ("MAC_RULE", "the hardware-address rule was not written"),
+        ):
+            if marker not in output:
+                verdict.append(problem)
+        if "SSH_ENABLED" in output:
+            verdict.append("the SSH server is enabled although setup was told to leave it off")
 
     print()
     if verdict:
@@ -262,7 +291,7 @@ def main() -> int:
             print(f"FAIL: {problem}")
         print(f"\nScreenshots: {SHOTS}")
         return 1
-    print("PASS: booted, encrypted, ran setup, expanded, and mounts clean")
+    print(f"PASS: booted, {'encrypted, ' if encrypt else ''}ran setup, expanded, and mounts clean")
     return 0
 
 

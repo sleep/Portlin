@@ -6,6 +6,9 @@ Documentation=file:/etc/portlin-release
 # stick with no user account.
 ConditionPathExists=/var/lib/portlin/firstboot-pending
 After=local-fs.target systemd-tmpfiles-setup.service
+# The network screen asks NetworkManager what adapters there are and joins
+# Wi-Fi through it, so it has to be answering by the time setup starts.
+After=NetworkManager.service
 # Deliberately NOT ordered against plymouth-quit-wait.service. That service
 # waits for plymouth to die; plymouth dies when the display manager starts; the
 # display manager waits for this unit. Ordering after it closes that loop into a

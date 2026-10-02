@@ -84,10 +84,8 @@ def wizard_functions() -> dict:
         "Path": pathlib.Path, "re": re, "os": os, "subprocess": subprocess,
         "log": lambda message: print(f"    wizard: {message}", flush=True),
     })
-    exec(source[source.index("def _root_devices"):source.index("def step_expand")], namespace)
-    exec(source[source.index("def _unused_inside_partition"):source.index("def step_expand")], namespace)
-    exec(source[source.index("def _resize_mapping"):source.index("def step_autologin")], namespace)
-    exec(source[source.index("def apply_expand"):source.index("def step_autologin")], namespace)
+    # Discovery, the offer, apply_expand and _resize_mapping, as one block.
+    exec(source[source.index("def _root_devices"):source.index("def finalise_encryption")], namespace)
     namespace["ask_password"] = lambda *args, **kwargs: PASSPHRASE
     namespace["message"] = lambda *args, **kwargs: None
 
