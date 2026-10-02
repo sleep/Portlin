@@ -170,8 +170,154 @@ class TestFailureFeedback:
         fake.sources = type("Sources", (), {"get_children": lambda self: []})()
         seen = {}
         fake.sources_note = type("Note", (), {"set_text": lambda self, text: seen.setdefault("text", text)})()
+        fake._set_source_state = lambda name: seen.setdefault("state", name)
         window.MigrationWindow._on_candidates(fake, 1)
         assert seen["text"] == "the passphrase did not open the drive"
+        assert seen["state"] == "empty"
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+OUTLINE = json.dumps([
+    {"text": "Creating the account ann", "bytes": 0},
+    {"text": "Copying Documents", "bytes": 3000},
+    {"text": "Copying Pictures", "bytes": 1000},
+    {"text": "Installing vlc", "bytes": 0},
+])
+
+
+class TestRunTracker:
+    """The copy page's numbers, from the protocol alone."""
+
+    def _tracker(self, window):
+        clock = Clock()
+        tracker = window.RunTracker(clock=clock)
+        tracker.on_stages(OUTLINE)
+        return tracker, clock
+
+    def test_every_phase_is_listed_before_the_first_starts(self, window):
+        tracker, _ = self._tracker(window)
+        assert [stage.text for stage in tracker.stages][1:3] == ["Copying Documents", "Copying Pictures"]
+        assert all(stage.state == "pending" for stage in tracker.stages)
+        assert tracker.total == 4000
+        assert tracker.position() == (1, 4)
+
+    def test_steps_move_through_the_phases_and_time_each(self, window):
+        tracker, clock = self._tracker(window)
+        tracker.on_step("Creating the account ann")
+        clock.now += 2
+        tracker.on_step("Copying Documents")
+        first, second = tracker.stages[:2]
+        assert first.state == "done" and first.finished - first.started == 2
+        assert second.state == "active"
+        assert tracker.position() == (2, 4)
+
+    def test_a_repeated_step_is_the_same_phase(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_step("Copying Documents")
+        tracker.on_step("Copying Documents")
+        assert tracker.active == 1 and tracker.stages[1].state == "active"
+        # The account phase was skipped over: it is done, not left waiting.
+        assert tracker.stages[0].state == "done"
+
+    def test_a_childs_own_step_becomes_detail(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_step("Installing vlc")
+        tracker.on_step("Downloading vlc")
+        assert tracker.stages[3].state == "active"
+        assert tracker.stages[3].detail == "Downloading vlc"
+        assert len(tracker.stages) == 4
+
+    def test_without_an_outline_each_step_becomes_a_phase(self, window):
+        tracker = window.RunTracker(clock=Clock())
+        tracker.on_step("Copying A")
+        tracker.on_step("Copying B")
+        assert [stage.state for stage in tracker.stages] == ["done", "active"]
+
+    def test_bytes_give_a_fraction_a_speed_and_time_left(self, window):
+        tracker, clock = self._tracker(window)
+        tracker.on_step("Copying Documents")
+        tracker.on_bytes("0 4000")
+        clock.now += 1
+        tracker.on_bytes("100 4000")
+        assert tracker.rate == pytest.approx(100)
+        assert tracker.remaining() is None  # too early to promise anything
+        clock.now += 4
+        tracker.on_bytes("500 4000")
+        assert tracker.fraction() == pytest.approx(500 / 4000)
+        assert tracker.remaining() == pytest.approx(3500 / tracker.rate)
+        assert tracker.stage_fraction(1) == pytest.approx(500 / 3000)
+
+    def test_samples_closer_than_half_a_second_do_not_move_the_speed(self, window):
+        tracker, clock = self._tracker(window)
+        tracker.on_bytes("0 4000")
+        clock.now += 0.1
+        tracker.on_bytes("2000 4000")
+        assert tracker.rate is None and tracker.copied == 2000
+
+    def test_the_strip_is_divided_where_each_copy_ends(self, window):
+        tracker, _ = self._tracker(window)
+        assert tracker.boundaries() == [0.75]
+
+    def test_files_and_warnings_are_counted(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_files("12408")
+        tracker.on_warn("ignoring the source's software 'x'")
+        assert tracker.files == 12408 and len(tracker.warnings) == 1
+
+    def test_finishing_well_fills_everything(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_step("Copying Pictures")
+        tracker.finish(True)
+        assert tracker.fraction() == 1.0
+        assert all(stage.state == "done" for stage in tracker.stages)
+        assert tracker.remaining() is None
+
+    def test_failing_marks_where_it_stopped_and_leaves_the_rest(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_step("Copying Documents")
+        tracker.finish(False, "rsync exited with status 11")
+        assert [stage.state for stage in tracker.stages] == ["done", "failed", "pending", "pending"]
+        assert tracker.message == "rsync exited with status 11"
+
+    def test_garbage_is_ignored(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_stages("not json")
+        tracker.on_bytes("lots")
+        tracker.on_progress("most")
+        tracker.on_files("many")
+        assert len(tracker.stages) == 4 and tracker.copied == 0
+
+
+class TestWording:
+    def test_times_and_speeds(self, window):
+        assert window.format_clock(7) == "0:07"
+        assert window.format_clock(252) == "4:12"
+        assert window.format_clock(3729) == "1:02:09"
+        assert window.format_remaining(30) == "under a minute"
+        assert window.format_remaining(61) == "about 2 min"
+        assert window.format_remaining(3600 * 2 + 60 * 5) == "about 2 h 5 min"
+        assert window.format_span(0.42) == "0.4 s"
+        assert window.format_span(41) == "41 s"
+        assert window.format_rate(84_200_000) == "84.2 MB/s"
+
+    def test_a_card_splits_what_describe_says_on_one_line(self, window):
+        stick = {"kind": "stick", "path": "/dev/sdb4", "model": "SanDisk Ultra", "size": "57.3G",
+                 "encrypted": True, "version": "0.1.2"}
+        assert window.card_text(stick) == ("SanDisk Ultra 57.3G", "portlin 0.1.2 · /dev/sdb4")
+        archive = {"kind": "archive", "path": "/media/x/D/office.portlin-backup.tar.zst", "model": "D"}
+        assert window.card_text(archive) == ("office.portlin-backup.tar.zst", "backup on D")
+
+    def test_the_space_line_says_whether_it_fits(self, window):
+        assert window.space_summary(1_000_000_000, 5_000_000_000) == ("4 GB free here afterwards", True)
+        text, fits = window.space_summary(6_000_000_000, 5_000_000_000)
+        assert not fits and text == "needs 1 GB more than is free here"
 
 
 class TestMenuEntry:

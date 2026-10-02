@@ -23,10 +23,16 @@ opened read-only, so even a bug here cannot touch it.
 apply prints the line protocol portlin-install established, so the Migrate
 window reads it with the same code Software uses:
 
+    ::stages <json>          every phase to come, [{"text", "bytes"}], once
     ::step <text>            a phase began
     ::progress <0-100>       bytes copied over bytes planned
+    ::bytes <copied> <total> the same, in bytes, for rates and estimates
+    ::files <count>          files written so far, where rsync counts them
     ::warn <text>            something was skipped and the run went on
     ::result ok|failed [text]
+
+A reader that knows only step, progress, warn and result loses nothing it
+needs by skipping the rest.
 
 Everything else is rsync, tar and apt talking, passed through for the log.
 """
@@ -85,6 +91,7 @@ from migrate import (  # noqa: E402
     overall_percent,
     parse_blkid_export,
     parse_lsblk,
+    parse_rsync_files,
     parse_rsync_progress,
     parse_tar_checkpoint,
     plan_archive,
@@ -96,6 +103,7 @@ from migrate import (  # noqa: E402
     selected_bytes,
     shortfall,
     software_steps,
+    stage_outline,
     tar_list_argv,
     tar_manifest_argv,
     theme_steps,
@@ -482,6 +490,10 @@ def run_steps(steps, *, total: int, out=None, execute=None,
     execute = execute or _execute
     warnings: list[str] = []
     done = 0
+    # Files rsync reports written: the finished steps' total, plus the
+    # running count of the step under way, which restarts with each rsync.
+    files = {"before": 0, "current": 0}
+    emit("stages", json.dumps(stage_outline(steps)), out=out)
     for step in steps:
         if step.warn:
             emit("warn", step.warn, out=out)
@@ -512,12 +524,19 @@ def run_steps(steps, *, total: int, out=None, execute=None,
                     percent = parse_rsync_progress(line)
                     if percent is not None:
                         emit("progress", str(overall_percent(done, step.weight, percent, total)), out=out)
+                        emit("bytes", str(done + step.weight * percent // 100), str(total), out=out)
+                        count = parse_rsync_files(line)
+                        if count is not None and count != files["current"]:
+                            files["current"] = count
+                            emit("files", str(files["before"] + count), out=out)
                         return
                 elif step.progress == "tar":
                     records = parse_tar_checkpoint(line)
                     if records is not None:
+                        copied = min(step.weight, checkpoint_bytes(records))
                         percent = min(100, checkpoint_bytes(records) * 100 // max(step.weight, 1))
                         emit("progress", str(overall_percent(done, step.weight, percent, total)), out=out)
+                        emit("bytes", str(done + copied), str(total), out=out)
                         return
                 print(line, file=out, flush=True)
             before = len(warnings)
@@ -542,8 +561,11 @@ def run_steps(steps, *, total: int, out=None, execute=None,
                     else:
                         return RunResult(False, tuple(warnings), f"{step.argv[0]} exited with status {code}")
         done += step.weight
+        files["before"] += files["current"]
+        files["current"] = 0
         if total > 0:
             emit("progress", str(overall_percent(done, 0, 0, total)), out=out)
+            emit("bytes", str(min(done, total)), str(total), out=out)
     return RunResult(True, tuple(warnings))
 
 
@@ -728,6 +750,12 @@ def gauge_feed(kind: str, rest: str, percent: int) -> str | None:
     return None
 
 
+# Detail for the Migrate window that a gauge has no place for. They come
+# many times a second, so they are not logged either; ::progress carries
+# the same news to the gauge and the log.
+GAUGE_SILENT = ("stages", "bytes", "files")
+
+
 class Gauge:
     """An ``out`` for run_steps that draws a whiptail gauge instead of printing.
 
@@ -760,6 +788,8 @@ class Gauge:
             log(line)
             return
         kind, _, rest = line[2:].partition(" ")
+        if kind in GAUGE_SILENT:
+            return
         if kind == "progress" and rest.isdigit():
             self.percent = int(rest)
         update = gauge_feed(kind, rest, self.percent)

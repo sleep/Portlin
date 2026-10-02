@@ -505,6 +505,8 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     # binding this carries: the window opens and stays black.
                     "python3-gi-cairo",
                     "librsvg2-common",
+                    # The Migrate window's progress strip is drawn with cairo.
+                    "python3-gi-cairo",
                     "x11-xserver-utils",
                     "systemd",
                     # Every icon theme the first-boot picker can offer. Not
