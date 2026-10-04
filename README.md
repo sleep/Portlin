@@ -224,7 +224,9 @@ third-party repository's) are named in a warning. Under **Package sources**, the
 old stick's third-party apt sources (each file in `/etc/apt/sources.list.d` that is
 not Debian's or portlin's) can come too, with the keyring each one's `Signed-By`
 names. They are off until ticked, because a source is trust in whoever signs it;
-one ticked is copied before the packages install, so its packages install too.
+one ticked is copied before the packages install, so its packages install too. A
+source never replaces a keyring or source file the new stick already has, and a key
+in `trusted.gpg.d`, which apt trusts for every source, never comes at all.
 An archive holds the password hash and every saved wifi password, so `export`
 writes it `0600` and says so.
 
