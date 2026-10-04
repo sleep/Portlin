@@ -12,6 +12,7 @@
     portlin-migrate export FILE                this stick, everything, to an archive
     portlin-migrate restore [SOURCE]           plan and apply, on the console
     portlin-migrate close                      release a source plan kept open
+    portlin-migrate install-packages NAME...   what apply runs for other packages
 
 SOURCE is a root partition (/dev/sdb4), an archive, or "auto" for the one
 candidate when there is exactly one. A LUKS source's passphrase is read from
@@ -77,6 +78,7 @@ from migrate import (  # noqa: E402
     ARCHIVE_SUFFIX,
     BACKUP_DIRNAME,
     CATEGORIES,
+    DPKG_STATUS,
     EXIT_NO_SPACE,
     EXIT_PAUSED,
     MANIFEST,
@@ -90,14 +92,18 @@ from migrate import (  # noqa: E402
     checkpoint_bytes,
     describe,
     dpkg_status_lines,
+    drop_unwanted_packages,
     entry_within,
     human,
     mark_existing_account,
     identity_steps,
+    installed_packages,
     lsblk_argv,
     newer_version,
     no_space_message,
+    offerable_package,
     overall_percent,
+    package_steps,
     parse_blkid_export,
     parse_lsblk,
     parse_rsync_bytes,
@@ -108,6 +114,7 @@ from migrate import (  # noqa: E402
     plan_export,
     plan_stick,
     read_accounts,
+    read_image_packages,
     read_manifest,
     selected,
     selected_bytes,
@@ -387,12 +394,23 @@ def source_inventory(source: Source, *, firstboot: bool, run=subprocess.run) -> 
         inventory, _ = read_manifest(proc.stdout)
         listing = run(list(tar_list_argv(Path(source.path))), capture_output=True, text=True, check=False)
         source.listing = listing.stdout
-        return inventory
+        return without_local_packages(inventory)
     try:
-        status = (source.root / "var/lib/dpkg/status").read_text()
+        status = (source.root / DPKG_STATUS).read_text()
     except OSError:
         status = ""
-    return build_inventory(source.root, dpkg_status=dpkg_status_lines(status), firstboot=firstboot)
+    return without_local_packages(
+        build_inventory(source.root, dpkg_status=dpkg_status_lines(status), firstboot=firstboot)
+    )
+
+
+def without_local_packages(inventory: Inventory) -> Inventory:
+    """The source's other packages, less what this system has or ships."""
+    try:
+        status = (LOCAL_ROOT / DPKG_STATUS).read_text()
+    except OSError:
+        status = ""
+    return drop_unwanted_packages(inventory, set(installed_packages(status)), read_image_packages())
 
 
 # -- the running system ---------------------------------------------------------
@@ -688,6 +706,7 @@ def apply_steps(inventory: Inventory, ids: list[str], source: Source, target: Ta
         for value in software if value not in known
     ]
     steps += software_steps([value for value in software if value in known])
+    steps += package_steps([item.value for item in selected(inventory, ids) if item.category == "packages"])
     return steps
 
 
@@ -1176,6 +1195,63 @@ def cmd_close(args) -> int:
     return EXIT_OK
 
 
+# portlin-install's apt flags: never a prompt or a conffile question, and a
+# wait rather than a failure while something else holds the lock.
+APT = (
+    "apt-get", "-y", "-q",
+    "-o", "Dpkg::Options::=--force-confdef",
+    "-o", "Dpkg::Options::=--force-confold",
+    "-o", "DPkg::Lock::Timeout=300",
+)
+
+
+def parse_policy_candidates(text: str) -> set[str]:
+    """The names apt-cache policy gives an installable candidate. A name apt
+    has never heard of prints nothing at all; a virtual one says (none)."""
+    available, name = set(), ""
+    for line in text.splitlines():
+        if line and not line[0].isspace() and line.endswith(":"):
+            name = line[:-1]
+        elif line.strip().startswith("Candidate:") and name:
+            if line.split(":", 1)[1].strip() != "(none)":
+                available.add(name)
+    return available
+
+
+def cmd_install_packages(args, run=subprocess.run) -> int:
+    """Install packages by name from this stick's own sources.
+
+    The old stick may have run another release or had third-party sources,
+    and apt-get refuses a whole install over one name it cannot find, so
+    the names are first checked against the refreshed lists and the ones
+    missing are named in a warning rather than failing the rest.
+    """
+    names = [name for name in dict.fromkeys(args.names) if offerable_package(name)]
+    for name in args.names:
+        if not offerable_package(name):
+            emit("warn", f"not a package name it can install: {name!r}")
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    emit("step", "Refreshing the package lists")
+    if run([*APT, "update"], stdin=subprocess.DEVNULL, env=env, check=False).returncode != 0:
+        emit("result", "failed", "the package lists could not be refreshed; is there a network?")
+        return EXIT_FAILED
+    policy = run(["apt-cache", "policy", *names], stdin=subprocess.DEVNULL, capture_output=True,
+                 text=True, env=env, check=False)
+    available = [name for name in names if name in parse_policy_candidates(policy.stdout)]
+    missing = [name for name in names if name not in available]
+    if missing:
+        emit("warn", "not in this stick's package sources, so not installed: " + ", ".join(missing))
+    if not available:
+        emit("result", "ok", "nothing to install")
+        return EXIT_OK
+    emit("step", f"Installing {', '.join(available)}")
+    if run([*APT, "install", *available], stdin=subprocess.DEVNULL, env=env, check=False).returncode != 0:
+        emit("result", "failed", "apt-get could not install them; the details say why")
+        return EXIT_FAILED
+    emit("result", "ok", f"installed {len(available)} package{'s' if len(available) != 1 else ''}")
+    return EXIT_OK
+
+
 def summary(count: int, target: Target, stamp: str, warnings: list[str]) -> str:
     text = f"Brought over {count} item{'s' if count != 1 else ''}."
     backup = Path("/") / target.home / BACKUP_DIRNAME / stamp if target.home else None
@@ -1244,6 +1320,8 @@ def build_parser() -> argparse.ArgumentParser:
     restore = verbs.add_parser("restore")
     restore.add_argument("source", nargs="?")
     verbs.add_parser("close")
+    install_packages = verbs.add_parser("install-packages")
+    install_packages.add_argument("names", nargs="+")
     return parser
 
 
@@ -1255,6 +1333,7 @@ VERBS = {
     "plan": cmd_plan,
     "restore": cmd_restore,
     "close": cmd_close,
+    "install-packages": cmd_install_packages,
 }
 
 

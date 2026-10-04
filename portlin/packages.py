@@ -352,6 +352,18 @@ MINIMAL_GROUPS = ["boot", "system", "storage", "network"]
 DEFAULT_GROUPS = list(GROUPS)
 
 
+def image_names() -> list[str]:
+    """Every package any build of the image installs or refuses, whatever the
+    groups chosen. portlin-runtime ships the list, and portlin-migrate never
+    offers one of these as an old stick's own choice: the new stick has it,
+    or its setup removed it (the desktop it was not given) on purpose."""
+    names: set[str] = {*BOOTSTRAP_INCLUDE, *SEED_FIRST, *NEVER_INSTALL,
+                       *THEME_PACKAGES.values(), *ICON_THEME_PACKAGES.values()}
+    for group in GROUPS.values():
+        names.update(group)
+    return sorted(names)
+
+
 def resolve(
     groups: list[str] | None = None,
     *,

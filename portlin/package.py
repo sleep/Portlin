@@ -43,6 +43,11 @@ TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install",
 # tool but the tool and the tests both import the module.
 SHARED_MODULES = ["devices.py", "catalog.py", "hostinfo.py", "migrate.py"]
 
+# Every package the image can contain, for portlin-migrate to leave out of an
+# old stick's "Other packages". In portlin-runtime so that it updates with the
+# tool that reads it, and is the list of the image this stick now runs.
+IMAGE_PACKAGES = "usr/share/portlin/image-packages"
+
 # The polkit action the Software and Drivers apps elevate through. It ships in
 # portlin-runtime, beside the program its exec.path annotation names, so the
 # two cannot end up in different packages naming different paths.
@@ -541,6 +546,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             ).read_text()
         for tool in TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
+        files[IMAGE_PACKAGES] = "".join(f"{name}\n" for name in packages.image_names())
         for source, destination in POLKIT_ACTIONS.items():
             files[destination] = (RESOURCES / "runtime" / source).read_text()
     elif package == "portlin-desktop":

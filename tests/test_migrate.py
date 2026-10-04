@@ -1363,3 +1363,126 @@ class TestPartitionNumberWithoutUdev:
             assert migrate._partition_number({"partn": None, "name": name}) == number
         assert migrate._partition_number({"partn": None, "name": "sda"}) is None
         assert migrate._partition_number({"partn": None}) is None
+
+
+DPKG_STATUS = """\
+Package: htop
+Status: install ok installed
+Architecture: amd64
+Description: interactive processes viewer
+ A longer description that is not the summary.
+
+Package: libncursesw6
+Status: install ok installed
+Architecture: amd64
+Description: shared library for terminal handling
+
+Package: cowsay
+Status: hold ok installed
+Architecture: amd64
+Description: configurable talking cow
+
+Package: removed-thing
+Status: deinstall ok config-files
+Architecture: amd64
+
+Package: wine32
+Status: install ok installed
+Architecture: i386
+
+Package: linux-image-6.12.38+deb13-amd64
+Status: install ok installed
+Architecture: amd64
+
+Package: libssl3t64
+Status: install ok installed
+Architecture: amd64
+
+Package: libssl-dev
+Status: install ok installed
+Architecture: amd64
+Description: Secure Sockets Layer toolkit - development files
+
+Package: pulled-in
+Status: install ok installed
+Architecture: all
+
+Package: mullvad-vpn
+Status: install ok installed
+Architecture: amd64
+
+Package: xfce4
+Status: install ok installed
+Architecture: all
+"""
+
+EXTENDED_STATES = """\
+Package: pulled-in
+Architecture: all
+Auto-Installed: 1
+
+Package: htop
+Architecture: amd64
+Auto-Installed: 0
+"""
+
+
+class TestOtherPackages:
+    @pytest.fixture
+    def source(self, tmp_path):
+        root = tmp_path / "source"
+        make_source(root)
+        (root / "var/lib/dpkg").mkdir(parents=True)
+        (root / "var/lib/dpkg/status").write_text(DPKG_STATUS)
+        (root / "var/lib/apt").mkdir(parents=True)
+        (root / "var/lib/apt/extended_states").write_text(EXTENDED_STATES)
+        return root
+
+    def packages(self, migrate, source, **kwargs):
+        return {item.value: item for item in migrate.build_inventory(source, **kwargs).items
+                if item.category == "packages"}
+
+    def test_what_someone_installed_is_offered_and_the_rest_is_not(self, migrate, source):
+        offered = self.packages(migrate, source)
+        assert "htop" in offered and "cowsay" in offered and "libssl-dev" in offered
+        # Dependencies apt pulled in, packages removed, foreign architectures,
+        # kernels, and libraries whose names change between releases.
+        for name in ("pulled-in", "removed-thing", "wine32", "linux-image-6.12.38+deb13-amd64",
+                     "libssl3t64", "libncursesw6"):
+            assert name not in offered, name
+
+    def test_a_catalog_program_is_left_to_the_software_items(self, migrate, source):
+        catalog = load_tool("catalog.py")
+        mullvad = next(e for e in catalog.ENTRIES if e.id == "mullvad")
+        assert "mullvad-vpn" in (*mullvad.packages, *mullvad.check.values)
+        assert "mullvad-vpn" not in self.packages(migrate, source)
+
+    def test_each_is_labelled_with_its_summary_and_ticked_outside_setup(self, migrate, source):
+        htop = self.packages(migrate, source)["htop"]
+        assert htop.label == "htop - interactive processes viewer"
+        assert htop.default and htop.category == "packages" and htop.id == "packages.htop"
+        during_setup = self.packages(migrate, source, firstboot=True)["htop"]
+        assert not during_setup.default and "network" in during_setup.note
+
+    def test_what_is_here_or_in_the_image_is_taken_off_on_the_target(self, migrate, source):
+        inventory = migrate.build_inventory(source)
+        kept = migrate.drop_unwanted_packages(inventory, installed_here={"cowsay"}, image={"xfce4"})
+        names = {item.value for item in kept.items if item.category == "packages"}
+        # xfce4 is the image's: setup on the new stick may have removed it on purpose.
+        assert "htop" in names and "cowsay" not in names and "xfce4" not in names
+        assert len(kept.items) - len(names) == len(inventory.items) - len(
+            [i for i in inventory.items if i.category == "packages"])
+
+    def test_they_are_installed_in_one_run_after_the_software(self, migrate):
+        steps = migrate.package_steps(["htop", "cowsay", "--option", "linux-image-amd64"])
+        warned = [step.warn for step in steps if step.warn]
+        assert len(warned) == 2
+        install = steps[-1]
+        assert install.argv == (migrate.PACKAGE_INSTALLER, "install-packages", "htop", "cowsay")
+        assert install.passthrough and install.optional
+        assert install.text == "Installing 2 other packages"
+        assert migrate.package_steps([]) == []
+
+    def test_the_heading_sits_after_software(self, migrate):
+        order = [key for key, _ in migrate.CATEGORIES]
+        assert order.index("packages") == order.index("software") + 1
