@@ -1144,3 +1144,21 @@ class TestOtherPackagesInThePlan:
             migrate.Item(f"packages.{n}", "packages", n, value=n) for n in ("vim", "xfce4", "htop")))
         kept = tool.without_local_packages(inventory)
         assert [item.value for item in kept.items] == ["htop"]
+
+
+class TestPackageSourcesAtApply:
+    def test_a_keyring_this_stick_has_is_never_copied_over(self, tool, migrate, tmp_path):
+        source_root, target_root = tmp_path / "old", tmp_path / "new"
+        for root, key in ((source_root, b"attacker"), (target_root, b"debian")):
+            (root / "usr/share/keyrings").mkdir(parents=True)
+            (root / "usr/share/keyrings/debian-archive-keyring.gpg").write_bytes(key)
+        (source_root / "etc/apt/sources.list.d").mkdir(parents=True)
+        (source_root / "etc/apt/sources.list.d/evil.list").write_text("deb https://evil.example.com/ x main\n")
+        inventory = migrate.Inventory("0.1.2", "h", "home/u", (migrate.Item(
+            "repos.evil.list", "repos", "evil", paths=(
+                "etc/apt/sources.list.d/evil.list", "usr/share/keyrings/debian-archive-keyring.gpg")),))
+        target = migrate.Target(root=target_root, user="alice", uid=1000, gid=1000, home="home/alice")
+        steps = tool.apply_steps(inventory, ["repos.evil.list"], tool.Source("stick", "/dev/sdb4", root=source_root),
+                                 target, "stamp", firstboot=False, hosts_text="", icon_theme_installed=lambda n: True)
+        assert not any(step.argv for step in steps)
+        assert any(step.warn and "debian-archive-keyring.gpg" in step.warn for step in steps)
