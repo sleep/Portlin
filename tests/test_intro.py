@@ -143,8 +143,27 @@ class TestOnce:
                 (tmp_path / "portlin" / "intro-seen").exists()) or 0,
         )
         monkeypatch.setattr(intro, "can_play", lambda once: True)
+        monkeypatch.setattr(intro, "nouveau_lights_a_screen", lambda: False)
         intro.main(["--once"])
         assert seen_when_played == [True]
+
+    def test_login_waits_for_a_proper_driver_without_stamping(self, intro, tmp_path, monkeypatch):
+        # Setup's NVIDIA driver only loads after a restart, which can be put
+        # off; the first login that has it should still get the film.
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        monkeypatch.setattr(intro, "nouveau_lights_a_screen", lambda: True)
+        monkeypatch.setattr(intro, "play", lambda film: pytest.fail("played on nouveau"))
+        assert intro.main(["--once"]) == 0
+        assert not (tmp_path / "portlin" / "intro-seen").exists()
+
+    def test_by_hand_it_plays_on_nouveau_too(self, intro, monkeypatch):
+        played = []
+        monkeypatch.setattr(intro, "nouveau_lights_a_screen", lambda: True)
+        monkeypatch.setattr(intro, "can_play", lambda once: True)
+        monkeypatch.setattr(intro, "make_film", lambda environ: object())
+        monkeypatch.setattr(intro, "play", lambda film: played.append(film) or 0)
+        intro.main([])
+        assert len(played) == 1
 
 
 class TestAutostart:

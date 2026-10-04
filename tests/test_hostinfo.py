@@ -357,3 +357,36 @@ class TestGpuSelection:
 
     def test_nvidia_answers_when_there_is_no_drm_card_at_all(self, hostinfo, tmp_path):
         assert hostinfo.read_gpu(tmp_path, nvidia=31).label == "31%"
+
+
+class TestNouveau:
+    def _card(self, root: Path, name: str, driver: str, connectors: dict[str, str]) -> None:
+        drm = root / "sys/class/drm"
+        bound = root / "sys/bus/pci/drivers" / driver
+        bound.mkdir(parents=True, exist_ok=True)
+        (drm / name / "device").mkdir(parents=True)
+        (drm / name / "device/driver").symlink_to(bound)
+        for connector, enabled in connectors.items():
+            _write(drm / f"{name}-{connector}" / "enabled", enabled + "\n")
+
+    def test_a_screen_on_nouveau(self, hostinfo, tmp_path):
+        self._card(tmp_path, "card0", "nouveau", {"DP-1": "enabled", "HDMI-A-1": "disabled"})
+        assert hostinfo.nouveau_lights_a_screen(tmp_path)
+
+    def test_the_proprietary_driver_is_not_nouveau(self, hostinfo, tmp_path):
+        self._card(tmp_path, "card0", "nvidia", {"DP-1": "enabled"})
+        assert not hostinfo.nouveau_lights_a_screen(tmp_path)
+
+    def test_a_hybrid_laptops_idle_discrete_card_does_not_count(self, hostinfo, tmp_path):
+        # The panel is on the integrated GPU; nouveau has the card but no screen.
+        self._card(tmp_path, "card0", "nouveau", {"HDMI-A-1": "disabled"})
+        self._card(tmp_path, "card1", "i915", {"eDP-1": "enabled"})
+        assert not hostinfo.nouveau_lights_a_screen(tmp_path)
+
+    def test_another_cards_connector_is_not_mistaken_for_its_own(self, hostinfo, tmp_path):
+        self._card(tmp_path, "card1", "nouveau", {})
+        self._card(tmp_path, "card10", "i915", {"eDP-1": "enabled"})
+        assert not hostinfo.nouveau_lights_a_screen(tmp_path)
+
+    def test_no_drm_at_all(self, hostinfo, tmp_path):
+        assert not hostinfo.nouveau_lights_a_screen(tmp_path)
