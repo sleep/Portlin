@@ -146,6 +146,12 @@ class TestPanel:
                                         "custom/apps", "image"):
                 assert module in config, module
 
+    def test_the_launcher_hides_entries_that_only_work_under_xfce(self):
+        # fuzzel ignores NotShowIn unless told otherwise, and Caffeine relies
+        # on it to stay out of a session where it cannot work.
+        assert "filter-desktop=yes" in (THEME / "fuzzel.ini").read_text().splitlines()
+        assert "NotShowIn=labwc;" in (RUNTIME / "portlin-caffeine.desktop").read_text()
+
     def test_the_mark_is_the_one_portlin_installs(self):
         config = jsonc((THEME / "waybar-config.jsonc").read_text())
         assert config["image#mark"]["path"] == f"/{package.HICOLOR_APP_ICON}"
@@ -234,8 +240,8 @@ class TestDisplayScale:
 
 
 class TestWizard:
-    def test_it_offers_the_choice_only_when_lite_is_installed(self):
-        for has_lite in (True, False):
+    def test_it_offers_the_choice_only_while_both_are_installed(self):
+        for choose_desktop in (True, False):
             fb = load_wizard()
             seen = {}
 
@@ -244,9 +250,9 @@ class TestWizard:
                 return {row.key: row.value for row in rows}
 
             fb.ui.settings = settings
-            state = summary_state(fb, has_lite=has_lite)
+            state = summary_state(fb, choose_desktop=choose_desktop)
             fb.step_appearance(state)
-            assert ("desktop" in seen["keys"]) is has_lite
+            assert ("desktop" in seen["keys"]) is choose_desktop
 
     def test_choosing_lite_sets_both_greeter_and_autologin_sessions(self, tmp_path):
         fb = load_wizard()
@@ -266,12 +272,12 @@ class TestWizard:
 
     def test_the_summary_names_the_desktop(self):
         fb = load_wizard()
-        state = summary_state(fb, has_lite=True, desktop="lite")
+        state = summary_state(fb, choose_desktop=True, desktop="lite")
         assert "Lite (labwc)" in dict((k, v) for k, _, v in fb.summary_groups(state))["appearance"]
 
-    def test_the_summary_says_nothing_of_it_without_lite(self):
+    def test_the_summary_says_nothing_of_it_without_a_choice(self):
         fb = load_wizard()
-        state = summary_state(fb, has_lite=False)
+        state = summary_state(fb, choose_desktop=False)
         appearance = dict((k, v) for k, _, v in fb.summary_groups(state))["appearance"]
         assert "Xfce" not in appearance
 
@@ -279,3 +285,82 @@ class TestWizard:
         source = WIZARD.read_text()
         applying = source[source.index("def apply_all("):source.index("def wizard(")]
         assert "apply_desktop(state.desktop)" in applying
+
+    def test_the_choice_needs_both_desktops_still_installed(self):
+        # A setup re-run after a removal must not offer the one that is gone.
+        source = WIZARD.read_text()
+        body = source[source.index("def wizard("):source.index("def main(")]
+        assert "_lite_installed()" in body and "_xfce_installed()" in body
+
+    def test_the_xfce_session_entry_is_the_one_xfce_ships(self):
+        # Debian's xfce4-session installs this path; it is how the wizard
+        # tells that Xfce is still here.
+        assert module_constant_path("XFCE_SESSION_ENTRY") == "/usr/share/xsessions/xfce.desktop"
+
+
+def module_constant_path(name: str) -> str:
+    match = re.search(rf'^{name} = Path\("([^"]+)"\)', WIZARD.read_text(), re.M)
+    assert match, name
+    return match.group(1)
+
+
+GSETTINGS = {"libglib2.0-bin", "dconf-gsettings-backend", "gsettings-desktop-schemas"}
+
+# What the lite session runs that comes from the Xfce side of the package
+# list, and what the login screen needs whichever desktop follows it.
+SHARED = {
+    "thunar", "thunar-archive-plugin", "xfce4-terminal", "mousepad", "ristretto",
+    "mate-polkit", "network-manager-gnome", "pavucontrol", "lightdm",
+    "lightdm-gtk-greeter", "xserver-xorg", "xinit", "x11-xserver-utils", "xfconf",
+}
+
+
+class TestRemovingTheOtherDesktop:
+    @pytest.fixture
+    def lists(self):
+        return module_constant(WIZARD, "DESKTOP_PACKAGES")
+
+    def test_the_lite_list_is_the_lite_group_less_what_others_need(self, lists):
+        assert set(lists["lite"]) == set(packages.LITE) - GSETTINGS
+
+    def test_removing_xfce_spares_what_the_lite_session_runs(self, lists):
+        assert not set(lists["xfce"]) & (SHARED | set(packages.LITE))
+
+    def test_removing_lite_spares_what_xfce_runs(self, lists):
+        assert not set(lists["lite"]) & (SHARED | set(packages.DESKTOP))
+
+    def test_neither_removal_takes_portlin_desktop_with_it(self, lists):
+        # A Depends on anything purged here would purge portlin's own package:
+        # the wallpaper, the panel readout and every tool in the menu.
+        control = package.text_files("portlin-desktop")["DEBIAN/control"]
+        depends = {d.strip() for d in control.split("Depends: ")[1].splitlines()[0].split(",")}
+        assert not depends & (set(lists["xfce"]) | set(lists["lite"]))
+
+    def test_it_purges_only_what_is_installed_then_autoremoves(self):
+        fb = load_wizard()
+        calls = []
+
+        class Done:
+            def __init__(self, stdout=""):
+                self.stdout, self.returncode = stdout, 0
+
+        def run(argv, check=True, stdin=None):
+            calls.append(argv)
+            if argv[0] == "dpkg-query":
+                return Done("labwc ii \nwaybar ii \nfuzzel un \n")
+            return Done()
+
+        fb.run = run
+        fb.log = lambda *a, **k: None
+        fb.remove_desktop("lite")
+        apt = [argv[argv.index("apt-get"):] for argv in calls if "apt-get" in argv]
+        assert apt == [["apt-get", "-y", "purge", "labwc", "waybar"],
+                       ["apt-get", "-y", "--purge", "autoremove"]]
+        assert all("DEBIAN_FRONTEND=noninteractive" in argv for argv in calls if "apt-get" in argv)
+
+    def test_the_removal_is_optional_and_after_the_session_is_set(self):
+        source = WIZARD.read_text()
+        applying = source[source.index("def apply_all("):source.index("def wizard(")]
+        assert applying.index("apply_desktop(") < applying.index("remove_desktop(")
+        line = next(l for l in applying.splitlines() if "remove_desktop(" in l)
+        assert line.rstrip().endswith("True)")

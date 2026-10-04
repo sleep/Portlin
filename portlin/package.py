@@ -554,12 +554,6 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     # icon was. First boot has no network, so it cannot be
                     # fetched then either.
                     *dict.fromkeys(packages.ICON_THEME_PACKAGES.values()),
-                    # The two panel plugins the shipped layout names. Not
-                    # derivable from the file list: they are named inside a
-                    # data file this package ships, which is the same reason
-                    # the icon theme above is here.
-                    "xfce4-genmon-plugin",
-                    "xfce4-whiskermenu-plugin",
                     # What the Software app becomes root through. It runs
                     # portlin-install and nothing else, so without pkexec the
                     # window opens, lists everything, and installs none of it.
@@ -570,7 +564,13 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                 # someone running a different one should not have to remove
                 # portlin-desktop to do it. Without one, pkexec exits 127 and
                 # the app says that an agent is what is missing.
-                recommends=["mate-polkit"],
+                #
+                # The two plugins the shipped Xfce panel layout names are here
+                # for a different reason. The build installs them through
+                # packages.DESKTOP either way, but first boot removes Xfce
+                # from a stick whose owner picks the lite session, and a
+                # Depends would take this whole package out with it.
+                recommends=["mate-polkit", "xfce4-genmon-plugin", "xfce4-whiskermenu-plugin"],
             ),
         }
         for destination, source in THEME_FILES.items():
