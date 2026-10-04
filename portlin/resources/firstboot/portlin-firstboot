@@ -99,7 +99,7 @@ ZRAM_CONFIG = Path("/etc/default/zramswap")
 SWAPFILE = Path("/swapfile")
 FSTAB = Path("/etc/fstab")
 SWAPFILE_PRIORITY = 10
-SWAPFILE_SIZES = [2, 4, 8, 16, 32]
+SWAPFILE_SIZES = [2, 4, 8, 16, 32, 64, 128]
 # Left free on the drive after the swap file, so it never fills the system.
 SWAPFILE_HEADROOM = 4 * 1024**3
 

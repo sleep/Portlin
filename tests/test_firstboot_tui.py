@@ -716,7 +716,11 @@ class TestHardwareScreen:
     def test_swap_on_the_drive_is_off_unless_chosen(self, fb):
         row = self.offered(fb, online=False)["swapfile"]
         assert row.value == 0
-        assert [size for size, _ in row.choices] == [0, 2, 4, 8, 16, 32]
+        assert [size for size, _ in row.choices] == [0, 2, 4, 8, 16, 32, 64]
+
+    def test_swap_on_the_drive_goes_up_to_128_gb(self, fb):
+        row = self.offered(fb, online=False, drive={"kind": "ssd", "free": 1024**4})["swapfile"]
+        assert [size for size, _ in row.choices] == [0, 2, 4, 8, 16, 32, 64, 128]
 
     def test_swap_file_sizes_leave_the_drive_headroom(self, fb):
         row = self.offered(fb, online=False, drive={"kind": "hdd", "free": 10 * 1024**3})["swapfile"]
