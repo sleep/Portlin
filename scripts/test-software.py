@@ -408,7 +408,7 @@ def check_the_scan() -> None:
     except ValueError:
         bad(f"the scan did not print JSON:\n{result.stdout[:400]}")
         return
-    if set(report) != {"gpus", "wifi", "suggestions", "notes"}:
+    if set(report) != {"machine", "gpus", "wifi", "suggestions", "notes"}:
         bad(f"the scan reported unexpected keys: {sorted(report)}")
     elif report["suggestions"]:
         bad(f"a container was told it needs drivers: {report['suggestions']}")
