@@ -370,6 +370,40 @@ class Back(Exception):
     """Esc: return to the previous screen."""
 
 
+# The framebuffer the console draws on, and the console fonts console-setup
+# ships. The kernel draws its 8x16 font whatever the resolution, which on a 4K
+# panel leaves setup a band of text too small to read from arm's length.
+FRAMEBUFFER_SIZE = Path("/sys/class/graphics/fb0/virtual_size")
+CONSOLE_FONTS = Path("/usr/share/consolefonts")
+# The Terminus sizes console-setup carries, as (height, width), largest first.
+TERMINUS_SIZES = [(32, 16), (28, 14), (24, 12), (22, 11), (20, 10), (18, 10)]
+
+
+def console_font(size_file: Path = FRAMEBUFFER_SIZE, fonts: Path = CONSOLE_FONTS) -> Path | None:
+    """The console font that keeps setup legible on this screen, if a change is due.
+
+    Scaled the way a desktop scales: 8x16 at 1080 lines and proportionally
+    taller from there, so 1440 gets 20 or 22 pixels and 2160 gets 32. None
+    when the screen is 1080 lines or fewer, or its size or the fonts cannot be
+    found, which leaves the kernel's font in place.
+    """
+    try:
+        _width, height = (int(n) for n in size_file.read_text().strip().split(","))
+    except (OSError, ValueError):
+        return None
+    wanted = 16 * height // 1080
+    if wanted <= 16:
+        return None
+    for glyph_height, glyph_width in TERMINUS_SIZES:
+        if glyph_height > wanted:
+            continue
+        for face in ("TerminusBold", "Terminus"):
+            path = fonts / f"Uni2-{face}{glyph_height}x{glyph_width}.psf.gz"
+            if path.exists():
+                return path
+    return None
+
+
 def claim_console(quiet: bool) -> None:
     """Take sole possession of tty1, or hand it back.
 
@@ -407,6 +441,12 @@ def claim_console(quiet: bool) -> None:
         # mode here -- it looks exactly like a hung boot -- so it is worth
         # asserting from both sides.
         attempt(["chvt", "1"])
+        # Before curses starts, so it reads the console's size in the new font.
+        # Not undone on the way out: the larger font serves the login prompt on
+        # tty1 just as well.
+        font = console_font()
+        if font is not None:
+            attempt(["setfont", str(font)])
     attempt(["setterm", "--msg", "off" if quiet else "on"])
     try:
         # SIGRTMIN+21 disables systemd's console status output, +20 re-enables it.
