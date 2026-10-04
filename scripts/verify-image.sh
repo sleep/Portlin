@@ -432,8 +432,10 @@ if test -x "$MNT/usr/bin/startxfce4"; then
 
     # Without this, X-Xfce-Toplevel still keeps the entry out of a submenu,
     # but it lands wherever the generic merge puts it rather than right above
-    # About Xfce.
-    test -f "$MNT/etc/xdg/menus/xfce-applications-merged/portlin-about.menu" \
+    # About Xfce. applications-merged, not xfce-applications-merged: garcon
+    # strips the "xfce-" prefix before adding "-merged", so the longer name is
+    # a directory nothing reads.
+    test -f "$MNT/etc/xdg/menus/applications-merged/portlin-about.menu" \
         && pass "About Portlin is positioned above About Xfce in the menu" \
         || fail "portlin-about.menu is missing (About Portlin lands away from About Xfce)"
 
