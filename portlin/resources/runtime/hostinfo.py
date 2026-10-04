@@ -391,6 +391,28 @@ def read_gpu(root: Path = Path("/"), *, nvidia: int | None = None) -> Gpu | None
     return None
 
 
+def nouveau_lights_a_screen(root: Path = Path("/")) -> bool:
+    """Whether a screen in use right now is driven by the open nouveau driver.
+
+    Asks about screens rather than cards, so the sleeping discrete GPU of a
+    hybrid laptop does not count until something is plugged into it. A
+    connector's "enabled" says whether the compositor is scanning out to it,
+    and reading it does not probe the output, so a suspended card stays asleep.
+    """
+    drm = root / "sys/class/drm"
+    for card in _drm_cards(root):
+        try:
+            driver = os.path.basename(os.readlink(card / "device/driver"))
+        except OSError:
+            continue
+        if driver != "nouveau":
+            continue
+        for connector in drm.glob(f"{card.name}-*"):
+            if _read(connector / "enabled").strip() == "enabled":
+                return True
+    return False
+
+
 def read_nvidia_percent() -> int | None:
     """Ask nvidia-smi, if it is there at all.
 

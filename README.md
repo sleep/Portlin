@@ -359,7 +359,8 @@ crimson only if it is encrypted. "Welcome" flies past in every language the inst
 draw, the last word to arrive is in the language that account chose, and the machine the stick is
 plugged into types itself in underneath. Any key or click skips it. It runs once per account
 (a stamp in `~/.local/state/portlin`), stays quiet when animations are turned off in Appearance,
-and replays any time by running `portlin-intro` by hand.
+waits while the open nouveau driver runs the screen (it plays at the first login on the NVIDIA
+driver instead), and replays any time by running `portlin-intro` by hand.
 
 </details>
 

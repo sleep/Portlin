@@ -20,7 +20,9 @@ draws it. Everything about the drive and the machine is read at start, from
 the running system, because both change every time the stick moves.
 
 Started by /etc/xdg/autostart with --once, which plays it only if this account
-has never seen it. Run by hand, with no arguments, it plays again.
+has never seen it, and holds it back while the open nouveau driver runs the
+screen, which cannot keep up with it. Run by hand, with no arguments, it plays
+again, whatever the driver.
 
 The whole picture is a pure function of the clock: Film.draw(cr, w, h, t)
 paints frame t onto any cairo context. The window is only a clock and a
@@ -63,7 +65,7 @@ from devices import (  # noqa: E402
     sysfs_sectors,
     unclaimed_bytes,
 )
-from hostinfo import format_bytes, read_host  # noqa: E402
+from hostinfo import format_bytes, nouveau_lights_a_screen, read_host  # noqa: E402
 
 # Per account rather than system-wide: the autostart entry runs for everyone
 # on the stick, and every account the wizard or Users and Groups adds is a
@@ -1023,6 +1025,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         stamp = stamp_path(os.environ)
         if stamp.exists():
+            return 0
+        # nouveau stutters through the film, so it waits for a proper driver.
+        # Not stamped: setup can install one that only loads after a restart
+        # the person may put off, and the first login on it should still play.
+        if nouveau_lights_a_screen():
             return 0
         # Written before playing rather than after, so a film that crashes, or
         # a machine that cannot draw it, costs one login and not every one.
