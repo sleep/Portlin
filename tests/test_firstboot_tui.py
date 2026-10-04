@@ -20,6 +20,7 @@ from portlin import packages
 from test_firstboot import UNIT, WIZARD, load_wizard
 
 REPO = Path(__file__).resolve().parent.parent
+THEME = REPO / "portlin" / "resources" / "runtime" / "theme"
 
 
 class OutOfKeys(Exception):
@@ -550,6 +551,7 @@ class TestFoundMessage:
 class TestScreenLock:
     def written(self, fb, tmp_path, minutes, suspend):
         fb.XFCONF_DEFAULTS = tmp_path
+        fb.SCREEN_LOCK_CONFIG = tmp_path / "screen-lock.conf"
         fb.apply_screen_lock(minutes, suspend)
         return (tmp_path / "xfce4-screensaver.xml").read_text(), (tmp_path / "xfce4-power-manager.xml").read_text()
 
@@ -568,6 +570,17 @@ class TestScreenLock:
         lock = saver[saver.index('name="lock"'):]
         assert self.value(lock, "enabled") == "true"
         assert self.value(saver[saver.index('name="saver"'):], "enabled") == "false"
+
+    def test_the_lite_session_gets_the_same_answer(self, fb, tmp_path):
+        # swayidle in the lite session reads this rather than xfconf, so a
+        # choice made once has to land in both.
+        self.written(fb, tmp_path, 15, False)
+        assert (tmp_path / "screen-lock.conf").read_text() == "minutes=15\nsuspend=0\n"
+
+    def test_the_lite_autostart_reads_the_keys_the_wizard_writes(self):
+        autostart = (THEME / "labwc-autostart").read_text()
+        assert "/etc/portlin/screen-lock.conf" in autostart
+        assert "s/^minutes=//p" in autostart and "s/^suspend=//p" in autostart
 
     def test_the_channels_written_are_not_ones_portlin_already_ships(self, fb):
         # xfconf takes a whole channel from the first directory that has it, so

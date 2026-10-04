@@ -948,6 +948,7 @@ class TestThemeSteps:
         (tmp_path / "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf").write_text(
             "theme-name=Numix\nicon-theme-name=Papirus-Dark\n"
         )
+        (tmp_path / "etc/xdg/xdg-portlin/fuzzel/fuzzel.ini").write_text("[main]\nicon-theme=Papirus-Dark\n")
         target = migrate.Target(root=tmp_path)
         steps = migrate.theme_steps({"theme": "Greybird-dark", "icons": "Papirus"}, target, icon_theme_installed=True)
         written = {path: text for step in steps for path, text in step.write}
@@ -956,6 +957,7 @@ class TestThemeSteps:
         )
         assert "Greybird-dark" in written[str(tmp_path / "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf")]
         assert "Papirus\n" in written[str(tmp_path / "etc/xdg/xdg-portlin/gtk-4.0/settings.ini")]
+        assert "icon-theme=Papirus\n" in written[str(tmp_path / "etc/xdg/xdg-portlin/fuzzel/fuzzel.ini")]
         # A greeter file that does not take the name means the widget theme is
         # not applied anywhere: three of four is worse than none.
         (tmp_path / "etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf").write_text("nothing\n")

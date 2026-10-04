@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Portlin lite
+Comment=labwc, a light Wayland session, with portlin's panel and look
+Exec=/usr/bin/portlin-lite-session
+# The greeter hides the session when labwc is missing, which is what a stick
+# built without the lite package group has.
+TryExec=labwc
+DesktopNames=labwc;wlroots

@@ -73,6 +73,10 @@ DESKTOP_TOOLS = [
     # The intro film each account sees at its first login. GTK and cairo,
     # started by the autostart entry below.
     "portlin-intro",
+    # What the login screen runs for the lite session. A shell script, here
+    # because the session it starts only exists where this package's theme
+    # files do.
+    "portlin-lite-session",
 ]
 
 # The panel id genmon is given, which is also the id in the filename genmon
@@ -122,6 +126,16 @@ AUTOSTART_ENTRIES = {
     "portlin-caffeine-autostart.desktop": "etc/xdg/autostart/portlin-caffeine.desktop",
     "portlin-intro-autostart.desktop": "etc/xdg/autostart/portlin-intro.desktop",
 }
+
+# The lite session: labwc instead of Xfce, offered by the first-boot wizard
+# and listed on the login screen beside Xfce. Its packages are the "lite"
+# group in packages.py, and the entry's TryExec hides it from the greeter on
+# a stick built without them, so neither is a Depends here.
+LITE_SESSION_ENTRY = "usr/share/wayland-sessions/portlin-lite.desktop"
+
+# Run once by the lite session's autostart to scale each screen. Not on PATH,
+# like BACKDROP_TOOL: nobody has a reason to run it by hand.
+LITE_DISPLAY_TOOL = "usr/lib/portlin/portlin-lite-display"
 
 # This runs in the X session, where XDG_RUNTIME_DIR is available.  It is a
 # conffile because it is an ordinary /etc Xsession hook.
@@ -176,6 +190,16 @@ XDG_DEFAULTS = {
     "gtk-4.0/settings.ini": "gtk-4.0-settings.ini",
     "xfce4/terminal/terminalrc": "terminalrc",
     f"xfce4/panel/genmon-{STATS_PLUGIN_ID}.rc": "genmon-stats.rc",
+    # The lite session's. labwc finds its own three along XDG_CONFIG_DIRS;
+    # the rest are named by path from labwc's autostart.
+    "labwc/rc.xml": "labwc-rc.xml",
+    "labwc/menu.xml": "labwc-menu.xml",
+    "labwc/autostart": "labwc-autostart",
+    "labwc/themerc-override": "labwc-themerc-override",
+    "waybar/config.jsonc": "waybar-config.jsonc",
+    "waybar/style.css": "waybar-style.css",
+    "fuzzel/fuzzel.ini": "fuzzel.ini",
+    "mako/config": "mako-config",
 }
 
 # Portlin ships the panel layout in full rather than layering properties onto
@@ -571,6 +595,8 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         }.items():
             files[destination] = (RESOURCES / "runtime" / source).read_text()
         files[BACKDROP_TOOL] = (RESOURCES / "runtime" / "portlin-backdrop").read_text()
+        files[LITE_SESSION_ENTRY] = (RESOURCES / "runtime" / "portlin-lite.desktop").read_text()
+        files[LITE_DISPLAY_TOOL] = (RESOURCES / "runtime" / "portlin-lite-display").read_text()
         files[BACKDROP_UNIT] = (RESOURCES / "runtime" / "portlin-backdrop.service").read_text()
         for action, script in (("add", "preinst"), ("remove", "postrm")):
             files[f"DEBIAN/{script}"] = render_diversion_script(action)
@@ -622,7 +648,8 @@ def executable_paths(package: str) -> set[str]:
     if package == "portlin-runtime":
         return {f"usr/bin/{tool}" for tool in TOOLS}
     if package == "portlin-desktop":
-        return {"DEBIAN/preinst", "DEBIAN/postinst", "DEBIAN/postrm", BACKDROP_TOOL} | {
+        return {"DEBIAN/preinst", "DEBIAN/postinst", "DEBIAN/postrm", BACKDROP_TOOL,
+                LITE_DISPLAY_TOOL} | {
             f"usr/bin/{tool}" for tool in DESKTOP_TOOLS
         }
     return set()

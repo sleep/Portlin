@@ -109,6 +109,19 @@ you click it again, or for a span you pick from `Activate for`. It holds a login
 `idle:sleep:handle-lid-switch`, so a closed lid does not suspend either. Right-click for
 preferences; untick it in Settings > Session and Startup to stop it appearing at all.
 
+### Lite session
+
+For older machines, first boot's Appearance step offers **Lite (labwc)** in place of Xfce. It is
+labwc, a small Wayland compositor, with waybar along the top carrying the same readout, fuzzel as
+the applications menu (also on Super+Space and Alt+F2), mako for notifications, and swayidle with
+swaylock for the screen lock the wizard set. Right-click the desktop for everything else. The same
+applications run in it, Thunar and the terminal included, in the same theme and icons.
+
+What it leaves out: Xfce's settings app, desktop icons and the Caffeine cup. Both sessions stay
+installed, since first boot has no network to fetch the other one with, and the login screen
+lists both, so switching is one click either way. The packages are the `lite` group, which
+`--groups` can leave out; the login screen then hides the session.
+
 ## Software
 
 **Software**, in the Portlin menu, installs the things people go looking for on a fresh

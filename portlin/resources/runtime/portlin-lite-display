@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Set each screen's scale in the lite session, from /etc/portlin/display.conf.
+
+The Wayland counterpart of the script the first-boot wizard installs for Xfce,
+reading the same file with the same rule: scale=1 or scale=2 is fixed, and
+anything else picks 200% for a screen at least 2560 pixels wide and about 180
+pixels per inch, 100% for the rest. Screens that report no physical size, as
+projectors and virtual machines do, stay at 100%.
+
+Run once from the session's autostart. It never fails the session: a screen
+it cannot read is left at whatever scale labwc gave it.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+CONFIG = Path("/etc/portlin/display.conf")
+
+
+def configured(path: Path = CONFIG) -> str:
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith("scale="):
+                return line.partition("=")[2].strip()
+    except OSError:
+        pass
+    return "auto"
+
+
+def automatic(width_px: int, width_mm: int) -> int:
+    if width_px < 2560 or width_mm <= 0:
+        return 1
+    return 2 if width_px * 254 // (width_mm * 10) >= 180 else 1
+
+
+def scales(outputs: list[dict], mode: str) -> dict[str, int]:
+    """The scale each enabled output should have."""
+    chosen = {}
+    for output in outputs:
+        if not output.get("enabled"):
+            continue
+        if mode in ("1", "2"):
+            chosen[output["name"]] = int(mode)
+            continue
+        current = next((m for m in output.get("modes", []) if m.get("current")), None)
+        width_mm = (output.get("physical_size") or {}).get("width") or 0
+        chosen[output["name"]] = automatic(current["width"] if current else 0, width_mm)
+    return chosen
+
+
+def main() -> int:
+    try:
+        listing = subprocess.run(["wlr-randr", "--json"], capture_output=True, text=True,
+                                 timeout=10, check=True).stdout
+        outputs = json.loads(listing)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
+    for name, scale in scales(outputs, configured()).items():
+        subprocess.run(["wlr-randr", "--output", name, "--scale", str(scale)], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
