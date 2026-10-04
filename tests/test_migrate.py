@@ -905,7 +905,7 @@ class TestIdentitySteps:
         keyboard, setupcon, link, tz = steps
         assert keyboard.write[0][0] == "/etc/default/keyboard"
         assert 'XKBLAYOUT="gb"' in keyboard.write[0][1]
-        assert keyboard.argv == ("setupcon", "--save") and keyboard.optional
+        assert keyboard.argv == ("setupcon", "--keyboard-only", "--save") and keyboard.optional
         assert setupcon.argv == ("localectl", "set-x11-keymap", "gb") and setupcon.optional
         assert link.write == (("/etc/timezone", "Europe/London\n"),)
         assert link.argv == ("ln", "-sf", "/usr/share/zoneinfo/Europe/London", "/etc/localtime")

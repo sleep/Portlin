@@ -1199,9 +1199,11 @@ def identity_steps(identity: Identity, ids: list[str], *, hosts_text: str) -> li
             "XKBMODEL=pc105", f'XKBLAYOUT="{identity.keyboard}"', 'XKBVARIANT=""',
             'XKBOPTIONS=""', 'BACKSPACE="guess"', "",
         ])
+        # Keyboard only, so a migration run from first-boot setup does not
+        # reload the console font and undo the one setup sized to the screen.
         steps.append(Step(f"Setting the keyboard layout to {identity.keyboard}",
                           write=(("/etc/default/keyboard", keyboard),),
-                          argv=("setupcon", "--save"), optional=True))
+                          argv=("setupcon", "--keyboard-only", "--save"), optional=True))
         steps.append(Step("Recording the keyboard layout for X",
                           argv=("localectl", "set-x11-keymap", identity.keyboard), optional=True))
     if "identity.timezone" in ids and identity.timezone:
