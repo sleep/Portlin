@@ -2,6 +2,8 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
+# The venv is built with pip (make venv); a uv run leaves this behind.
+uv.lock
 build/
 dist/
 
