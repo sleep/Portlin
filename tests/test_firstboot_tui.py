@@ -425,6 +425,115 @@ class TestNavigation:
         assert order == [("applied", True)] and not sentinel.exists()
 
 
+class TestUpgrade:
+    """Upgrade from an old portlin: the welcome screen hands over to the
+    Migrate window, and setup finishes from what it brought over."""
+
+    def test_it_is_offered_only_where_the_window_and_x_are_installed(self, fb, tmp_path, monkeypatch):
+        paths = {}
+        for name in ("MIGRATE_TOOL", "MIGRATION_WINDOW", "LIVE_SESSION", "XINIT"):
+            paths[name] = tmp_path / name
+            paths[name].touch()
+            monkeypatch.setattr(fb, name, str(paths[name]))
+        assert fb.live_upgrade_available()
+        paths["XINIT"].unlink()
+        assert not fb.live_upgrade_available()
+
+    def test_the_window_gets_its_own_x_server_away_from_the_gettys(self, fb):
+        argv = fb.live_upgrade_argv()
+        assert argv[:3] == [fb.XINIT, fb.LIVE_SESSION, "--"]
+        assert "vt7" in argv and "-nolisten" in argv
+
+    def test_only_a_note_naming_a_real_account_counts_as_finished(self, fb, tmp_path, monkeypatch):
+        note = tmp_path / "live-result.json"
+        monkeypatch.setattr(fb, "_user_exists", lambda name: name == "ann")
+        assert fb.read_live_result(note) is None
+        note.write_text("{broken")
+        assert fb.read_live_result(note) is None
+        note.write_text('{"account": "bob"}')
+        assert fb.read_live_result(note) is None
+        note.write_text('{"account": "ann; rm -rf /"}')
+        assert fb.read_live_result(note) is None
+        note.write_text('{"account": "ann", "sudo_nopasswd": true}')
+        assert fb.read_live_result(note)["account"] == "ann"
+
+    def test_welcome_hands_over_to_the_upgrade(self, fb, monkeypatch):
+        monkeypatch.setattr(fb, "live_upgrade_available", lambda: True)
+        monkeypatch.setattr(fb, "step_upgrade", lambda state: True)
+        window = screen(fb, [key(fb, "RIGHT"), ENTER])
+        state = fb.State()
+        fb.step_welcome(state)
+        assert state.upgraded
+        assert "Upgrade from an old portlin" in window.frames[0]
+
+    def test_without_the_window_welcome_is_one_button(self, fb, monkeypatch):
+        monkeypatch.setattr(fb, "live_upgrade_available", lambda: False)
+        window = screen(fb, [ENTER])
+        fb.step_welcome(fb.State())
+        assert "Upgrade" not in window.frames[0]
+
+    @pytest.fixture
+    def upgrade(self, fb, monkeypatch):
+        calls = []
+        monkeypatch.setattr(fb, "step_keyboard", lambda state: calls.append("keyboard"))
+        monkeypatch.setattr(fb, "expansion_offer", lambda: 8 * 1024**3)
+        monkeypatch.setattr(fb, "apply_expand", lambda: calls.append("expand"))
+        return calls
+
+    def test_the_keyboard_and_the_whole_drive_come_before_the_window(self, fb, upgrade, monkeypatch):
+        results = iter([None, {"account": "ann", "full_name": "Ann", "sudo_nopasswd": True, "autologin": False}])
+        monkeypatch.setattr(fb, "run_live_upgrade", lambda: upgrade.append("window") or next(results))
+        screen(fb, [ENTER])  # "Open Migrate again" after the first, unfinished, run
+        state = fb.State()
+        assert fb.step_upgrade(state) is True
+        assert upgrade == ["keyboard", "expand", "window", "window"]
+        assert (state.username, state.full_name, state.sudo_password, state.autologin) == ("ann", "Ann", False, False)
+
+    def test_giving_up_on_the_window_means_setting_up_normally(self, fb, upgrade, monkeypatch):
+        monkeypatch.setattr(fb, "run_live_upgrade", lambda: None)
+        screen(fb, [key(fb, "RIGHT"), ENTER])
+        assert fb.step_upgrade(fb.State()) is False
+
+    def test_a_finished_upgrade_skips_every_other_step(self, fb, tmp_path):
+        applied = []
+
+        def welcome(state):
+            state.upgraded = True
+            state.username = "ann"
+
+        fb.STEPS = [("welcome", "Welcome", welcome),
+                    ("account", "Account", lambda state: pytest.fail("asked after the upgrade"))]
+        fb.migration_candidates = lambda: []
+        fb._luks_device = lambda: None
+        fb._desktop_installed = lambda: False
+        fb.apply_all = lambda state: pytest.fail("the whole of setup applied after an upgrade")
+        fb.apply_upgrade = lambda state: applied.append(state.username)
+        fb.SENTINEL = tmp_path / "pending"
+        fb.run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "", "")
+        fb.ui.screen = FakeScreen([ENTER])
+        fb.wizard()
+        assert applied == ["ann"]
+
+    def test_finishing_an_upgrade_applies_the_old_answers_and_the_boot_files(self, fb, monkeypatch):
+        done = []
+        state = fb.State()
+        state.username, state.sudo_password, state.autologin = "ann", False, True
+        state.luks_device = "/dev/sda4"
+        monkeypatch.setattr(fb, "finalise_encryption", lambda: False)
+        monkeypatch.setattr(fb, "apply_sudo_password", lambda name, required: done.append(("sudo", name, required)) or True)
+        monkeypatch.setattr(fb, "apply_autologin", lambda name, on: done.append(("autologin", name, on)))
+        monkeypatch.setattr(fb, "apply_keyring_autounlock", lambda name: done.append(("keyring", name)))
+        monkeypatch.setattr(fb, "apply_network", lambda wifi, mac: done.append(("network", mac)))
+        monkeypatch.setattr(fb, "drop_passphrase_stash", lambda: done.append(("stash",)))
+        monkeypatch.setattr(fb, "refresh_initramfs_for_keymap", lambda encrypted: done.append(("initramfs", encrypted)))
+        monkeypatch.setattr(fb, "apply_account", lambda *a: pytest.fail("the account came over already"))
+        monkeypatch.setattr(fb, "apply_locale", lambda *a: pytest.fail("the language came over already"))
+        fb.ui.screen = FakeScreen([])
+        fb.apply_upgrade(state)
+        assert done == [("sudo", "ann", False), ("autologin", "ann", True), ("keyring", "ann"),
+                        ("network", "stable"), ("stash",), ("initramfs", True)]
+
+
 # --------------------------------------------------------------------------
 # Network
 # --------------------------------------------------------------------------

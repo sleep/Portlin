@@ -63,6 +63,17 @@ SUDOERS_NOPASSWD_RULE = "{username} ALL=(ALL) NOPASSWD: ALL\n"
 # boundary that survives the two moving at different speeds.
 MIGRATE_TOOL = "/usr/bin/portlin-migrate"
 MIGRATION_PLAN = Path("/run/portlin/migrate/plan.json")
+# The upgrade path: the Migrate window alone, as root, on a bare X server
+# that xinit starts for it. Probed like the tool, and offered only where all
+# of it is installed: a --minimal stick has neither X nor the window.
+MIGRATION_WINDOW = "/usr/bin/portlin-migration"
+LIVE_SESSION = "/usr/lib/portlin/portlin-migrate-live"
+XINIT = "/usr/bin/xinit"
+# What the window leaves once the copy has finished, and all setup reads.
+LIVE_RESULT = Path("/run/portlin/migrate/live-result.json")
+# vt7 is past the six consoles logind starts gettys on, so nothing else
+# claims it; the display manager waits for this unit and takes it after.
+LIVE_SERVER_ARGS = [":9", "vt7", "-nolisten", "tcp"]
 
 # The other packaged tools setup hands work to, probed for the same reason.
 # portlin-install knows which drivers fit this hardware and how to install
@@ -1558,6 +1569,7 @@ class State:
         self.wear_initial: dict | None = None
         self.wear_checked = False
         self.reboot = False
+        self.upgraded = False
         self.warnings: list[str] = []
 
 
@@ -1605,7 +1617,100 @@ def step_welcome(state: State):
         text += f"\n\nThis machine: {machine}"
     if state.luks_device:
         text += "\nThis stick's storage is encrypted."
-    ui.dialog("Welcome to Portlin", text, ["Start setup"], back=False)
+    buttons = ["Start setup"]
+    if live_upgrade_available():
+        text += ("\n\nUpgrading from an older portlin? Upgrade brings its account, files and "
+                 "settings over in the Migrate window, and skips the rest of setup.")
+        buttons.append("Upgrade from an old portlin")
+    while True:
+        if ui.dialog("Welcome to Portlin", text, buttons, back=False) == 0:
+            return None
+        try:
+            state.upgraded = step_upgrade(state)
+        except Back:
+            continue
+        return None
+
+
+def live_upgrade_available() -> bool:
+    return all(Path(path).exists() for path in (MIGRATE_TOOL, MIGRATION_WINDOW, LIVE_SESSION, XINIT))
+
+
+def live_upgrade_argv() -> list[str]:
+    return [XINIT, LIVE_SESSION, "--", *LIVE_SERVER_ARGS]
+
+
+def read_live_result(path: Path = LIVE_RESULT) -> dict | None:
+    """The window's note that the copy finished, if the account it names is
+    really here now. Anything else means the upgrade did not happen."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    name = data.get("account") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not USERNAME_RE.fullmatch(name) or not _user_exists(name):
+        return None
+    return data
+
+
+def run_live_upgrade() -> dict | None:
+    """Show the Migrate window until it is closed, and say what it did.
+
+    The window draws on X, not on this console, so curses lets go of tty1
+    while it runs; the X server switches back to tty1 when it exits.
+    """
+    LIVE_RESULT.unlink(missing_ok=True)
+    argv = live_upgrade_argv()
+    log(f"run: {' '.join(argv)}")
+    # The unit gives this wizard no HOME, and the window keeps an unfinished
+    # plan under root's own cache so it can be resumed on a later boot.
+    env = {**os.environ, "HOME": "/root"}
+    with ui.suspended():
+        try:
+            subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, env=env)
+        except OSError as exc:
+            log(f"could not start the Migrate window: {exc}")
+        try:
+            subprocess.run(["chvt", "1"], capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return read_live_result()
+
+
+def step_upgrade(state: State) -> bool:
+    """The upgrade path from the welcome screen.
+
+    The keyboard first, because the old drive's passphrase is typed in the
+    window. Then the whole drive, before anything is copied: the image is a
+    few gigabytes and the old stick's files usually are not. Then the window,
+    as often as it takes. Returns whether the upgrade finished; False means
+    set up normally instead. Esc on the keyboard screen raises Back, to the
+    welcome screen.
+    """
+    step_keyboard(state)
+    if expansion_offer():
+        ui.busy("Upgrade", "Growing the system to fill the drive, so there is room for everything.")
+        apply_expand()
+    while True:
+        ui.busy("Upgrade", "Opening Migrate.")
+        result = run_live_upgrade()
+        if result:
+            state.username = result["account"]
+            state.full_name = str(result.get("full_name") or "")
+            state.sudo_password = not result.get("sudo_nopasswd")
+            state.autologin = bool(result.get("autologin"))
+            log(f"upgraded from an old portlin as {state.username}")
+            return True
+        choice = ui.dialog(
+            "Upgrade",
+            "The migration did not finish, so this stick is not set up yet.\n\n"
+            "A copy that was paused or stopped can be resumed from Migrate, and it "
+            "carries on from where it stopped.",
+            ["Open Migrate again", "Set up normally"], back=False,
+        )
+        if choice == 1:
+            return False
 
 
 def migration_candidates() -> list[dict]:
@@ -3582,19 +3687,8 @@ def apply_all(state: State) -> None:
                 raise RuntimeError(f"the account {state.username} was not created by the restore")
         task(f"Restoring from {state.migration.get('label', 'the old drive')}", restore)
 
-    def privilege():
-        if not apply_sudo_password(state.username, state.sudo_password):
-            state.warnings.append("The rule that skips the sudo password could not be installed, "
-                                  f"so sudo asks {state.username} for one after all.")
-    task("Administrator access", privilege)
-
-    def login():
-        apply_autologin(state.username, state.autologin)
-        # Only together: a password login unlocks the keyring by itself, and
-        # without LUKS a passwordless keyring trades away real protection.
-        if state.autologin and encrypted:
-            apply_keyring_autounlock(state.username)
-    task("Login", login)
+    task("Administrator access", lambda: apply_privilege(state))
+    task("Login", lambda: apply_login(state, encrypted))
     if state.has_desktop:
         def appearance():
             if state.theme:
@@ -3632,6 +3726,52 @@ def apply_all(state: State) -> None:
     task("Boot files", lambda: (drop_passphrase_stash(), refresh_initramfs_for_keymap(encrypted)))
 
     progress = Progress(ui, "Applying", "Setting the stick up. Do not remove it.", [t[0] for t in tasks])
+    run_tasks(progress, tasks, state)
+
+
+def apply_privilege(state: State) -> None:
+    if not apply_sudo_password(state.username, state.sudo_password):
+        state.warnings.append("The rule that skips the sudo password could not be installed, "
+                              f"so sudo asks {state.username} for one after all.")
+
+
+def apply_login(state: State, encrypted: bool) -> None:
+    apply_autologin(state.username, state.autologin)
+    # Only together: a password login unlocks the keyring by itself, and
+    # without LUKS a passwordless keyring trades away real protection.
+    if state.autologin and encrypted:
+        apply_keyring_autounlock(state.username)
+
+
+def apply_upgrade(state: State) -> None:
+    """What setup still owes a stick upgraded through the Migrate window.
+
+    The account, its files, the computer name, language, keyboard and time
+    zone all came over already. What is left is the two answers the old
+    drive recorded, which go through the same checks a fresh answer does,
+    and the boot files, which carry the old drive's keyboard layout to the
+    passphrase prompt.
+    """
+    encrypted = state.luks_device is not None
+    tasks: list[tuple[str, object, bool]] = []
+    if finalise_encryption():
+        tasks.append(("Encryption recorded during boot", lambda: None, False))
+    tasks += [
+        ("Administrator access", lambda: apply_privilege(state), False),
+        ("Login", lambda: apply_login(state, encrypted), False),
+        ("Network", lambda: apply_network(None, state.mac), True),
+        ("Boot files", lambda: (drop_passphrase_stash(), refresh_initramfs_for_keymap(encrypted)), False),
+    ]
+    progress = Progress(ui, "Applying", "Finishing the upgrade. Do not remove the stick.", [t[0] for t in tasks])
+    run_tasks(progress, tasks, state)
+
+
+def run_tasks(progress: Progress, tasks, state: State) -> None:
+    """Run (label, function, optional) tasks in order on the progress screen.
+
+    An essential task's failure stops setup, and it runs again next boot; an
+    optional one's is reported at the end and the rest still happen.
+    """
     for index, (label, function, optional) in enumerate(tasks):
         progress.start(index)
         try:
@@ -3694,6 +3834,8 @@ def wizard() -> State:
                 index = shown.pop()
             continue
         ui.visited.add(key)
+        if state.upgraded:
+            break
         if isinstance(outcome, str):
             review_at, index = index, keys.index(outcome)
             continue
@@ -3708,9 +3850,12 @@ def wizard() -> State:
 
     ui.current = ""
     ui.postpone_allowed = False
-    apply_all(state)
-    if state.luks_device and state.change_passphrase:
-        step_change_passphrase(state.luks_device)
+    if state.upgraded:
+        apply_upgrade(state)
+    else:
+        apply_all(state)
+        if state.luks_device and state.change_passphrase:
+            step_change_passphrase(state.luks_device)
 
     SENTINEL.unlink(missing_ok=True)
     run(["systemctl", "disable", "portlin-firstboot.service"], check=False)

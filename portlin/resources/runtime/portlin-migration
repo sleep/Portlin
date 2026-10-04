@@ -22,6 +22,11 @@ A copy can be paused: the window writes "pause" down the tool's stdin, the
 tool stops between files and unmounts the old drive. The plan file stays,
 so the copy can be resumed, now or the next time the window opens; rsync
 skips what is already here.
+
+With --live it is the whole of an upgrade from first-boot setup: started by
+portlin-migrate-live as root in a bare X server, with no account on this
+stick yet. It runs the tool directly, insists the old account comes over,
+and on success leaves a note at LIVE_RESULT for setup to finish from.
 """
 
 from __future__ import annotations
@@ -71,6 +76,9 @@ APP_ID = "org.portlin.Migration"
 TOOL = "/usr/bin/portlin-migrate"
 ICON_NAME = "portlin"
 PLAN_PATH = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "portlin" / "migrate-plan.json"
+# What a finished --live run leaves for first-boot setup: the account that
+# came over and the two answers setup would otherwise have asked about.
+LIVE_RESULT = Path("/run/portlin/migrate/live-result.json")
 # The Details log keeps this many lines. rsync names every file it writes,
 # and a home holds hundreds of thousands of them.
 LOG_LINES = 5000
@@ -186,7 +194,10 @@ CSS = f"""
 
 def elevation_argv(passwordless_sudo: bool) -> list[str]:
     """As in Software: pkexec draws a password dialog; someone who waived the
-    sudo password at first boot has said they do not want one."""
+    sudo password at first boot has said they do not want one. Already root,
+    as in the live session setup starts, there is nothing to ask for."""
+    if os.geteuid() == 0:
+        return []
     return ["sudo", "-n"] if passwordless_sudo else ["pkexec"]
 
 
@@ -194,8 +205,11 @@ def candidates_argv(*, passwordless_sudo: bool) -> list[str]:
     return [*elevation_argv(passwordless_sudo), TOOL, "candidates", "--json"]
 
 
-def inventory_argv(source: str, *, passwordless_sudo: bool) -> list[str]:
-    return [*elevation_argv(passwordless_sudo), TOOL, "inventory", source, "--json"]
+def inventory_argv(source: str, *, passwordless_sudo: bool, firstboot: bool = False) -> list[str]:
+    """--firstboot leaves software unticked: during setup there may be no
+    network yet to install it with."""
+    return [*elevation_argv(passwordless_sudo), TOOL, "inventory", source, "--json",
+            *(["--firstboot"] if firstboot else [])]
 
 
 def apply_argv(plan: str, *, passwordless_sudo: bool) -> list[str]:
@@ -300,6 +314,26 @@ def read_plan_file(path: Path) -> dict | None:
     if not isinstance(plan, dict) or not plan.get("source") or not isinstance(plan.get("ids"), list):
         return None
     return plan
+
+
+def live_result(plan: dict) -> dict | None:
+    """What setup needs to finish after a --live run: the account brought
+    over, with its sudo and autologin answers. None when the plan brought
+    no account, which a live run does not allow to start."""
+    ids = set(plan.get("ids") or [])
+    for account in (plan.get("inventory") or {}).get("accounts") or []:
+        if f"account.{account.get('name')}" in ids:
+            return {
+                "account": account["name"],
+                "full_name": str(account.get("gecos") or "").split(",")[0],
+                "sudo_nopasswd": bool(account.get("sudo_nopasswd")),
+                "autologin": bool(account.get("autologin")),
+            }
+    return None
+
+
+def has_account(ids: list[str]) -> bool:
+    return any(item_id.startswith("account.") for item_id in ids)
 
 
 def has_passwordless_sudo(run=subprocess.run) -> bool:
@@ -904,13 +938,15 @@ class StageRow:
 
 
 class MigrationWindow(Gtk.ApplicationWindow):
-    def __init__(self, application=None, *, sudo=None) -> None:
+    def __init__(self, application=None, *, sudo=None, live: bool = False) -> None:
         super().__init__(application=application, title="Migrate")
         self.set_default_size(860, 680)
         self.set_icon_name(ICON_NAME)
         self.get_style_context().add_class("migration")
-        self.passwordless_sudo = has_passwordless_sudo() if sudo is None else sudo
-        # The plan the copy under way is running.
+        self.live = live
+        self.passwordless_sudo = False if live else has_passwordless_sudo() if sudo is None else sudo
+        # The plan the copy under way is running, for what a live run
+        # reports to setup when it is done.
         self.run_plan: dict | None = None
         self.candidates: list[dict] = []
         self.candidate: dict | None = None
@@ -945,7 +981,9 @@ class MigrationWindow(Gtk.ApplicationWindow):
         box.show_all()
         popover.add(box)
         menu.set_popover(popover)
-        self.header.pack_end(menu)
+        # Backing up a stick that has not been set up yet backs up nothing.
+        if not self.live:
+            self.header.pack_end(menu)
         self.set_titlebar(self.header)
 
         self.stack = Gtk.Stack()
@@ -979,8 +1017,13 @@ class MigrationWindow(Gtk.ApplicationWindow):
 
     def _source_page(self) -> Gtk.Widget:
         page = self._page()
-        self._hero(page, "Where should things come from?",
-                   "Another portlin drive plugged in now, or a backup made with Back up this stick.")
+        if self.live:
+            self._hero(page, "Which portlin are you upgrading from?",
+                       "Its account, files and settings come over to this stick, and setup "
+                       "finishes with them.")
+        else:
+            self._hero(page, "Where should things come from?",
+                       "Another portlin drive plugged in now, or a backup made with Back up this stick.")
         page.pack_start(self._resume_banner(), False, False, 0)
         self.source_state = Gtk.Stack()
         self.source_state.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
@@ -1310,13 +1353,15 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self._set_source_state("loading")
         self.collected = []
         self._run(
-            inventory_argv(candidate["path"], passwordless_sudo=self.passwordless_sudo),
+            inventory_argv(candidate["path"], passwordless_sudo=self.passwordless_sudo, firstboot=self.live),
             on_done=self._on_inventory,
             stdin_text=self.passphrase,
         )
 
     def _ask_passphrase(self) -> str | None:
         dialog = Gtk.Dialog(title="Unlock the old drive", transient_for=self, modal=True)
+        # Placed by GTK rather than a window manager: the live session has none.
+        dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
         box = dialog.get_content_area()
         box.set_spacing(8)
@@ -1412,7 +1457,14 @@ class MigrationWindow(Gtk.ApplicationWindow):
         context = self.space_text.get_style_context()
         (context.remove_class if fits else context.add_class)("amber")
         self.space_meter.update(disk.used, selected, disk.total)
-        self.start_button.set_sensitive(bool(ids))
+        # This stick has no account yet in a live run, and setup finishes
+        # with the one that comes over, so the run cannot start without it.
+        missing = self.live and not has_account(ids)
+        self.choose_note.set_text(
+            "Tick the account: this stick has none yet, and setup finishes with the one that comes over."
+            if missing else "Files already here with the same names are moved aside, not deleted."
+        )
+        self.start_button.set_sensitive(bool(ids) and not missing)
 
     def _start_apply(self) -> None:
         if self.job is not None:
@@ -1471,6 +1523,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
         if self.run_kind == "apply":
             if ok:
                 PLAN_PATH.unlink(missing_ok=True)
+                if self.live:
+                    self._write_live_result()
             else:
                 # The plan stays either way: a failing drive or a pulled cable
                 # is exactly when carrying on is worth more than starting over.
@@ -1486,6 +1540,16 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self._append(message)
         self._render_run()
         self._stop_clock()
+
+    def _write_live_result(self) -> None:
+        result = live_result(self.run_plan or {})
+        if result is None:
+            return
+        try:
+            LIVE_RESULT.parent.mkdir(parents=True, exist_ok=True)
+            LIVE_RESULT.write_text(json.dumps(result) + "\n")
+        except OSError as exc:
+            self._append(f"could not tell setup the copy finished: {exc}")
 
     # -- backing up --------------------------------------------------------
 
@@ -1655,6 +1719,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self.status.set_text("  ·  ".join(parts) or self.run_subtitle)
             self.phase_text.set_text(self.result_text)
             self.percent_label.set_text("100")
+            if self.live:
+                self.close_button.set_label("Finish setup")
             self.close_button.get_style_context().add_class("suggested-action")
         elif tracker.outcome == "paused":
             self.status_title.set_text("Paused")
@@ -1782,7 +1848,21 @@ def install_css() -> None:
     )
 
 
+def cover_screen(window: Gtk.Window) -> None:
+    """Fill the first monitor. The live session has no window manager to
+    honour fullscreen or maximise, so the window places itself."""
+    display = Gdk.Display.get_default()
+    monitor = display.get_primary_monitor() or display.get_monitor(0) if display else None
+    if monitor is None:
+        return
+    area = monitor.get_geometry()
+    window.set_decorated(False)
+    window.move(area.x, area.y)
+    window.set_default_size(area.width, area.height)
+
+
 def main() -> int:
+    live = "--live" in sys.argv[1:]
     application = Gtk.Application(application_id=APP_ID)
     windows: dict[str, MigrationWindow] = {}
 
@@ -1792,14 +1872,17 @@ def main() -> int:
             return
         Gtk.Window.set_default_icon_name(ICON_NAME)
         install_css()
-        window = windows["window"] = MigrationWindow(application=app)
+        window = windows["window"] = MigrationWindow(application=app, live=live)
+        if live:
+            cover_screen(window)
         window.show_all()
         # After show_all, which shows the banner whether or not there is
         # anything to resume.
         window._check_unfinished()
 
     application.connect("activate", on_activate)
-    return application.run(sys.argv)
+    # GApplication would refuse an option it does not know.
+    return application.run(sys.argv[:1])
 
 
 if __name__ == "__main__":
