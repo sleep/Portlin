@@ -117,7 +117,12 @@ the applications menu (also on Super+Space and Alt+F2), mako for notifications, 
 swaylock for the screen lock the wizard set. Right-click the desktop for everything else. The same
 applications run in it, Thunar and the terminal included, in the same theme and icons.
 
-What it leaves out: Xfce's settings app, desktop icons and the Caffeine cup. The image carries
+The coffee cup is there too, beside the readout: click to toggle, right-click for `Activate for`
+and the preferences. It takes the same logind lock as the Xfce one and shares its settings, and
+since swayidle is the only thing that blanks or locks the screen under labwc, it keeps the screen
+on by stopping swayidle until it is turned off.
+
+What it leaves out: Xfce's settings app and desktop icons. The image carries
 both desktops, since first boot has no network to fetch either with, and setup removes the one
 not picked, along with whatever only it needed. Thunar, the terminal and the other applications
 stay either way, because both sessions run them. The packages are the `lite` group, which

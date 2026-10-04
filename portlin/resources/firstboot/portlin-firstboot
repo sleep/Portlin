@@ -194,10 +194,10 @@ DESKTOPS = [
     ("lite", "Lite (labwc)"),
 ]
 DESKTOP_HELP = {
-    "xfce": "The full desktop: a settings app for everything, desktop icons and the "
-            "Caffeine cup. The lite session is removed.",
-    "lite": "labwc, a light Wayland session: the same panel readout and apps, more memory "
-            "left for them. Fewer settings and no Caffeine cup. For older machines. "
+    "xfce": "The full desktop: a settings app for everything and desktop icons. "
+            "The lite session is removed.",
+    "lite": "labwc, a light Wayland session: the same panel, readout, Caffeine cup and "
+            "apps, with more memory left for them. Fewer settings. For older machines. "
             "Xfce is removed, which frees disk space too.",
 }
 

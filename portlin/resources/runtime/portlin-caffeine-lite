@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Caffeine for the lite session: the same cup, in waybar, under labwc.
+
+The Xfce applet is a tray icon that blanks the screen through xset and two
+Xfce D-Bus services. None of the three exist here. waybar has no tray for an
+X icon, there is no X server to ask, and the only thing that blanks or locks
+the screen is swayidle. So this keeps the part that carries over, the logind
+lock over idle, sleep and the lid switch, and replaces the rest: it stops
+swayidle while active and starts it again after.
+
+One program, several commands, because waybar runs a command per click and
+per redraw while the lock has to be held by something that lives for the
+whole session:
+
+    run      The holder. Started once by the session's autostart. Holds the
+             lock while active, owns swayidle, and wakes for clicks, for the
+             end of a timed session, and for logout.
+    toggle   Left click on the cup. Asks the holder to switch.
+    menu     Right click. Activate for a span, or change a preference, in a
+             fuzzel list styled like the applications menu.
+    icon     What waybar draws: the cup's path, then the tooltip.
+
+The commands reach the holder by signal, with the pid in a file under
+XDG_RUNTIME_DIR, and a menu choice travels as a small request file beside it.
+Settings are caffeine.ini, shared with the Xfce applet through caffeine.py.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import replace
+from pathlib import Path
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from caffeine import (  # noqa: E402
+    DURATIONS,
+    ICONS,
+    WHO,
+    WHY,
+    Settings,
+    die_with_parent,
+    inhibit_argv,
+    load_settings,
+    save_settings,
+    status_text,
+)
+
+IDLE_TOOL = "/usr/lib/portlin/portlin-lite-idle"
+
+# The waybar module that draws the cup refreshes on SIGRTMIN plus this, so a
+# click shows at once rather than at the next poll. The config names it too.
+WAYBAR_SIGNAL = 8
+
+# What the holder waits on. Blocked and taken with sigtimedwait rather than
+# handled, so a signal that lands between two checks waits its turn instead
+# of interrupting one half-done.
+TOGGLE = signal.SIGUSR1
+REQUEST = signal.SIGUSR2
+STOP = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+WAITED = {TOGGLE, REQUEST, *STOP}
+
+# Woken at least this often, so the tooltip's countdown is never stale by
+# more than a minute even with no clicks and no deadline due.
+TICK = 60
+
+
+def runtime_dir() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(base) / "portlin-caffeine"
+
+
+def _write_atomically(path: Path, text: str) -> None:
+    draft = path.with_name(path.name + ".draft")
+    draft.write_text(text)
+    draft.replace(path)
+
+
+# -- the menu ----------------------------------------------------------------
+
+def menu_entries(settings: Settings) -> list[tuple[str, dict]]:
+    """The right-click menu, as (label, request) pairs, in order.
+
+    The status line is not an entry: fuzzel shows it as the placeholder in the
+    search field, where it reads as a heading and cannot be picked.
+    """
+    entries: list[tuple[str, dict]] = []
+    if settings.active:
+        entries.append(("Turn off", {"active": False}))
+    for seconds, label in DURATIONS:
+        text = "Activate until turned off" if seconds is None else f"Activate for {label}"
+        entries.append((text, {"active": True, "duration": seconds}))
+    default = dict(DURATIONS).get(settings.default_duration, DURATIONS[-1][1])
+    entries.append((f"Clicking the cup: {default.lower()}", {"choose": "default_duration"}))
+    entries.append((f"Restore at login: {'on' if settings.restore_at_login else 'off'}",
+                    {"restore_at_login": not settings.restore_at_login}))
+    entries.append((f"Tell me when time runs out: {'on' if settings.notify_on_expiry else 'off'}",
+                    {"notify_on_expiry": not settings.notify_on_expiry}))
+    entries.append(("About Portlin", {"run": "portlin-about"}))
+    return entries
+
+
+def duration_entries() -> list[tuple[str, dict]]:
+    return [(label, {"default_duration": seconds}) for seconds, label in DURATIONS]
+
+
+def choose(entries: list[tuple[str, dict]], placeholder: str) -> dict | None:
+    """Show a list in fuzzel and hand back the request behind the pick.
+
+    fuzzel's own colours and font come from the shipped fuzzel.ini, so this
+    looks like the applications menu without restating any of it.
+    """
+    try:
+        proc = subprocess.run(
+            ["fuzzel", "--dmenu", "--index", f"--lines={len(entries)}",
+             f"--placeholder={placeholder}", "--prompt=> "],
+            input="\n".join(label for label, _ in entries) + "\n",
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        return entries[int(proc.stdout.strip())][1]
+    except (ValueError, IndexError):
+        # Escape, or nothing picked.
+        return None
+
+
+# -- the holder --------------------------------------------------------------
+
+def _child_setup() -> None:
+    """Run in each child before exec: no inherited blocked signals.
+
+    The holder blocks the signals it waits on, and a mask survives exec, so
+    without this systemd-inhibit would ignore the SIGTERM that releases the
+    lock and swayidle the one that stops it.
+    """
+    signal.pthread_sigmask(signal.SIG_SETMASK, [])
+
+
+def _lock_child_setup() -> None:
+    _child_setup()
+    die_with_parent()
+
+
+class Holder:
+    def __init__(self, settings: Settings, directory: Path) -> None:
+        self.settings = settings
+        self.directory = directory
+        self.inhibitor: subprocess.Popen | None = None
+        self.idle: subprocess.Popen | None = None
+
+    # -- the two refusals ------------------------------------------------
+
+    def acquire(self) -> None:
+        if self.inhibitor is None:
+            try:
+                self.inhibitor = subprocess.Popen(
+                    inhibit_argv(WHY), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    preexec_fn=_lock_child_setup,
+                )
+            except OSError as exc:
+                print(f"portlin-caffeine-lite: no logind lock: {exc}", file=sys.stderr)
+        self.stop_idle()
+
+    def release(self) -> None:
+        if self.inhibitor is not None:
+            self.inhibitor.terminate()
+            try:
+                self.inhibitor.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.inhibitor.kill()
+            self.inhibitor = None
+        self.start_idle()
+
+    def start_idle(self) -> None:
+        """Start the screen lock, in a session of its own.
+
+        Not tied to this process: if the holder dies, the screen should go on
+        locking. The opposite failure, a crash that left the lock off for the
+        rest of the session, is the one nobody would notice.
+        """
+        if self.idle is not None and self.idle.poll() is None:
+            return
+        try:
+            self.idle = subprocess.Popen(
+                [IDLE_TOOL], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True, preexec_fn=_child_setup,
+            )
+        except OSError as exc:
+            print(f"portlin-caffeine-lite: no screen lock: {exc}", file=sys.stderr)
+            self.idle = None
+
+    def stop_idle(self) -> None:
+        if self.idle is None:
+            return
+        if self.idle.poll() is None:
+            self.idle.terminate()
+            try:
+                self.idle.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.idle.kill()
+        self.idle = None
+
+    # -- state -------------------------------------------------------------
+
+    def set_active(self, active: bool, duration: int | None = None) -> None:
+        deadline = time.time() + duration if active and duration else None
+        self.settings = replace(self.settings, active=active, deadline=deadline)
+        if active:
+            self.acquire()
+        else:
+            self.release()
+        save_settings(self.settings)
+
+    def toggle(self) -> None:
+        if self.settings.active:
+            self.set_active(False)
+        else:
+            self.set_active(True, self.settings.default_duration)
+
+    def handle(self, request: dict) -> None:
+        """Apply one request from the menu."""
+        if "active" in request:
+            self.set_active(bool(request["active"]), request.get("duration"))
+            return
+        preferences = {key: request[key] for key in
+                       ("default_duration", "restore_at_login", "notify_on_expiry") if key in request}
+        if preferences:
+            self.settings = replace(self.settings, **preferences)
+            save_settings(self.settings)
+
+    def expire(self) -> None:
+        self.set_active(False)
+        if self.settings.notify_on_expiry:
+            notify("Caffeine has turned off",
+                   "The time you set has run out. This machine can sleep again.")
+
+    def publish(self) -> None:
+        """Write what the panel draws, and tell waybar to draw it now."""
+        state = {"active": self.settings.active, "deadline": self.settings.deadline}
+        try:
+            _write_atomically(self.directory / "state.json", json.dumps(state))
+        except OSError:
+            pass
+        subprocess.run(["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "-u", str(os.getuid()), "-x", "waybar"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def timeout(self, now: float) -> float:
+        if self.settings.active and self.settings.deadline:
+            return max(0.0, min(TICK, self.settings.deadline - now))
+        return TICK
+
+    def run(self) -> int:
+        if self.settings.active:
+            self.acquire()
+        else:
+            self.start_idle()
+        self.publish()
+        while True:
+            info = signal.sigtimedwait(WAITED, self.timeout(time.time()))
+            if info is None:
+                deadline = self.settings.deadline
+                if self.settings.active and deadline and deadline <= time.time():
+                    self.expire()
+            elif info.si_signo == TOGGLE:
+                self.toggle()
+            elif info.si_signo == REQUEST:
+                request = take_request(self.directory)
+                if request is not None:
+                    self.handle(request)
+            else:
+                # Logout, or someone stopping it: give the machine back. Saved
+                # before the release, so a session that ends while active comes
+                # back active next time, as the Xfce applet does.
+                save_settings(self.settings)
+                if self.inhibitor is not None:
+                    self.inhibitor.terminate()
+                    self.inhibitor = None
+                self.start_idle()
+                # Nothing is held any more, so the cup has to say off even
+                # though the saved state says on for the next login.
+                self.settings = replace(self.settings, active=False, deadline=None)
+                self.publish()
+                return 0
+            self.publish()
+
+
+def take_request(directory: Path) -> dict | None:
+    path = directory / "request.json"
+    try:
+        request = json.loads(path.read_text())
+        path.unlink()
+    except (OSError, ValueError):
+        return None
+    return request if isinstance(request, dict) else None
+
+
+def notify(summary: str, body: str) -> None:
+    """Say so through the notification daemon, with gdbus from the GSettings tools.
+
+    Not notify-send: its package is one that goes with Xfce when a stick keeps
+    only the lite session.
+    """
+    subprocess.run(
+        ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+         "--object-path", "/org/freedesktop/Notifications",
+         "--method", "org.freedesktop.Notifications.Notify",
+         WHO, "0", ICONS[False], summary, body, "[]", "{}", "8000"],
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+    )
+
+
+# -- the commands --------------------------------------------------------------
+
+def holder_pid(directory: Path) -> int | None:
+    try:
+        pid = int((directory / "pid").read_text().strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return None
+    return pid
+
+
+def command_run(directory: Path) -> int:
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if holder_pid(directory) is not None:
+        # A second copy would hold a second lock and fight the first over
+        # swayidle. The first one is the one the panel is talking to.
+        return 0
+    signal.pthread_sigmask(signal.SIG_BLOCK, WAITED)
+    _write_atomically(directory / "pid", f"{os.getpid()}\n")
+    holder = Holder(load_settings(), directory)
+    try:
+        return holder.run()
+    except BaseException:
+        # The lock dies with this process by itself; the screen lock has to
+        # be put back by hand, or a crash leaves the session never locking.
+        holder.start_idle()
+        raise
+    finally:
+        (directory / "pid").unlink(missing_ok=True)
+
+
+def command_toggle(directory: Path) -> int:
+    pid = holder_pid(directory)
+    if pid is None:
+        print("portlin-caffeine-lite: not running", file=sys.stderr)
+        return 1
+    os.kill(pid, TOGGLE)
+    return 0
+
+
+def command_menu(directory: Path) -> int:
+    pid = holder_pid(directory)
+    if pid is None:
+        print("portlin-caffeine-lite: not running", file=sys.stderr)
+        return 1
+    settings = current_settings(directory)
+    request = choose(menu_entries(settings),
+                     status_text(settings.active, settings.deadline, time.time()))
+    if request and request.get("choose") == "default_duration":
+        request = choose(duration_entries(), "Clicking the cup activates for")
+    if not request:
+        return 0
+    if "run" in request:
+        subprocess.Popen([request["run"]], start_new_session=True)
+        return 0
+    _write_atomically(directory / "request.json", json.dumps(request))
+    os.kill(pid, REQUEST)
+    return 0
+
+
+def current_settings(directory: Path) -> Settings:
+    """The preferences from disk, with the live state from the holder.
+
+    load_settings decides what a new session starts as, which is not the same
+    question as what this one is doing now.
+    """
+    settings = load_settings()
+    try:
+        state = json.loads((directory / "state.json").read_text())
+    except (OSError, ValueError):
+        return settings
+    return replace(settings, active=bool(state.get("active")), deadline=state.get("deadline"))
+
+
+def command_icon(directory: Path) -> int:
+    settings = current_settings(directory)
+    print(ICONS[settings.active])
+    print(status_text(settings.active, settings.deadline, time.time()))
+    return 0
+
+
+COMMANDS = {"run": command_run, "toggle": command_toggle, "menu": command_menu, "icon": command_icon}
+
+
+def main(argv: list[str]) -> int:
+    name = argv[0] if argv else "run"
+    if name not in COMMANDS:
+        print(f"usage: portlin-caffeine-lite [{'|'.join(COMMANDS)}]", file=sys.stderr)
+        return 2
+    return COMMANDS[name](runtime_dir())
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
