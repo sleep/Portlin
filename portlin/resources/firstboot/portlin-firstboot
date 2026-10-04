@@ -2284,7 +2284,7 @@ def step_hardware(state: State):
         else:
             rows.append(Row(f"driver:{entry}", DRIVER_LABELS.get(entry, entry), [(False, "needs network")],
                             False, enabled=False,
-                            help=reason + " Connect on the Network step to install it now, or later from Software."))
+                            help=reason + " Connect on the Network step to install it now, or later from Drivers in the Portlin menu."))
     memory = _memory_bytes()
 
     def swap_help(values):

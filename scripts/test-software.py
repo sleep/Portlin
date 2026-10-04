@@ -484,20 +484,10 @@ def start_xvfb() -> subprocess.Popen:
 DRIVERS_CATEGORY = "Drivers"
 
 
-def select_category(window, catalog, name: str) -> None:
+def select_category(window, software, name: str) -> None:
     """Click a category in the sidebar, the way a person would."""
-    index = list(catalog.CATEGORIES).index(name)
+    index = list(software.PAGES).index(name)
     window.categories.select_row(window.categories.get_row_at_index(index))
-
-
-def first_row_name(window) -> str:
-    """The name label of the first row drawn, read back out of the widgets."""
-    row = window.listing.get_row_at_index(0)
-    if row is None:
-        return ""
-    box = row.get_child()
-    text = box.get_children()[0]
-    return text.get_children()[0].get_text()
 
 
 def check_it_reads_a_real_job(software) -> None:
@@ -553,14 +543,7 @@ def check_the_window(catalog) -> None:
         from gi.repository import Gtk
 
         check_it_reads_a_real_job(software)
-        scan = {
-            "gpus": [{"slot": "01:00.0", "vendor": "nvidia",
-                      "name": "NVIDIA Corporation GP108M", "id": "10de:1d10"}],
-            "wifi": [],
-            "suggestions": [{"entry": "nvidia-driver", "reason": "GP108M found"}],
-            "notes": [],
-        }
-        window = software.SoftwareWindow(scan=scan, dpkg=set(), sudo=False)
+        window = software.SoftwareWindow(dpkg=set(), sudo=False)
         window.show_all()
 
         # It opens on the first category, so that is what should be drawn.
@@ -576,41 +559,33 @@ def check_the_window(catalog) -> None:
         window.search.set_text("torrent")
         window._on_search(window.search)
         found = len(window.listing.get_children())
-        if found == len(catalog.search("torrent")):
+        if found == len(software.visible_entries("torrent", None)):
             ok("searching the window filters across every category")
         else:
             bad(f"searching for torrent left {found} rows")
 
         # Clicking a page clears the search, so the list has to come back.
-        select_category(window, catalog, DRIVERS_CATEGORY)
+        select_category(window, software, software.PAGES[-1])
         if window.search.get_text() == "":
             ok("picking a page clears the search")
         else:
             bad("picking a page left the previous search in the entry")
-        first = first_row_name(window)
-        if first and "NVIDIA" in first:
-            ok("the drivers page draws the suggestion for this machine first")
-        else:
-            bad(f"the drivers page led with {first!r} rather than the suggestion")
-        # Both halves: the text has to be right and the widget has to be on
-        # screen. A label that is set but never shown reads as an empty box,
-        # and only a real render says which of the two happened.
-        while Gtk.events_pending():
-            Gtk.main_iteration()
-        if "GP108M" not in window.machine.get_text():
-            bad("the drivers page does not name the hardware the scan found")
-        elif not window.machine.get_mapped():
-            bad("the drivers page describes the machine into a label nobody can see")
-        else:
-            ok("the drivers page shows the hardware the scan found")
 
-        select_category(window, catalog, catalog.CATEGORIES[0])
-        while Gtk.events_pending():
-            Gtk.main_iteration()
-        if window.machine_frame.get_visible():
-            bad("the machine description stayed on a page that is not Drivers")
+        # Drivers have their own app: no page for them here, and a search
+        # for one points there rather than listing it.
+        pages = [row.category for row in window.categories.get_children()]
+        if DRIVERS_CATEGORY in pages:
+            bad("the window still has a Drivers page")
         else:
-            ok("the machine description belongs to the drivers page alone")
+            ok("the window has no Drivers page")
+        window.search.set_text("nvidia")
+        window._on_search(window.search)
+        if "nvidia-driver" in window.rows:
+            bad("searching for nvidia listed the driver in Software")
+        elif Path(software.DRIVERS_APP).exists() and not window.listing.get_children():
+            bad("searching for nvidia did not point at the Drivers app")
+        else:
+            ok("searching for a driver points at Drivers instead of listing it")
 
         # The log pane has to follow its own output: a pane showing the first
         # screen of a ten-minute apt run reads as a program that has stopped.

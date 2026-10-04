@@ -23,6 +23,8 @@ import pytest
 
 from portlin import package
 
+from portlin import package
+
 RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
 SOFTWARE = RUNTIME / "portlin-software"
 ENTRY = RUNTIME / "portlin-software.desktop"
@@ -220,42 +222,35 @@ class TestWhatTheListShows:
         assert found >= {"qbittorrent", "deluge"}
 
     def test_whitespace_is_not_a_search(self, software):
-        assert software.visible_entries("   ", "Drivers") == software.visible_entries(
-            "", "Drivers"
+        assert software.visible_entries("   ", "Media") == software.visible_entries(
+            "", "Media"
         )
 
-    def test_no_category_shows_everything(self, software, catalog):
-        assert len(software.visible_entries("", None)) == len(catalog.ENTRIES)
+    def test_no_category_shows_everything_but_drivers(self, software, catalog):
+        shown = software.visible_entries("", None)
+        assert len(shown) == len([entry for entry in catalog.ENTRIES if entry.category != "Drivers"])
 
 
-class TestTheDriversPage:
-    SCAN = {
-        "gpus": [{"slot": "01:00.0", "vendor": "nvidia",
-                  "name": "NVIDIA Corporation GP108M [GeForce MX150]", "id": "10de:1d10"}],
-        "wifi": [],
-        "suggestions": [
-            {"entry": "nvidia-driver", "reason": "GeForce MX150 found",
-             "detail": "nvidia-detect recommends nvidia-driver"},
-        ],
-        "notes": ["Two GPUs: a hybrid laptop."],
-    }
+class TestDriversLiveElsewhere:
+    """Drivers belong to the Drivers app, so Software neither lists nor pages them."""
 
-    def test_a_suggestion_becomes_a_row_with_its_reason(self, software):
-        rows = software.suggestion_rows(self.SCAN)
-        assert [entry.id for entry, _ in rows] == ["nvidia-driver"]
-        assert "nvidia-detect recommends" in rows[0][1]
+    def test_there_is_no_drivers_page(self, software, catalog):
+        assert "Drivers" in catalog.CATEGORIES
+        assert "Drivers" not in software.PAGES
+        assert software.PAGES == [c for c in catalog.CATEGORIES if c != "Drivers"]
 
-    def test_a_suggestion_this_catalog_does_not_know_is_skipped(self, software):
-        scan = {"suggestions": [{"entry": "some-future-driver", "reason": "x"}]}
-        assert software.suggestion_rows(scan) == []
+    def test_a_search_never_lists_a_driver(self, software):
+        found = software.visible_entries("nvidia", None)
+        assert not any(entry.category == "Drivers" for entry in found)
 
-    def test_it_describes_the_machine_in_words(self, software):
-        described = software.describe_machine(self.SCAN)
-        assert "GeForce MX150" in described
-        assert "hybrid laptop" in described
+    def test_a_search_for_a_driver_is_pointed_at_drivers(self, software):
+        assert [entry.id for entry in software.drivers_matching("nvidia")] == ["nvidia-driver"]
+        assert software.drivers_matching("vlc") == []
+        assert software.drivers_matching("   ") == []
 
-    def test_a_machine_it_found_nothing_on_still_says_something(self, software):
-        assert software.describe_machine({}).strip()
+    def test_it_points_at_the_drivers_app_the_packages_install(self, software):
+        assert software.DRIVERS_APP == "/usr/bin/portlin-drivers"
+        assert "usr/bin/portlin-drivers" in package.text_files("portlin-desktop")
 
 
 class TestMenuEntry:
@@ -293,8 +288,13 @@ class TestMenuEntry:
 
     def test_it_can_be_found_by_what_people_call_it(self):
         keywords = self._entry()["Keywords"].lower()
-        for word in ("software", "install", "drivers"):
+        for word in ("software", "install", "apps"):
             assert word in keywords
+
+    def test_it_no_longer_answers_to_driver_searches(self):
+        # The menu search for nvidia should find Drivers, not Software.
+        keywords = self._entry()["Keywords"].lower().split(";")
+        assert "drivers" not in keywords and "nvidia" not in keywords
 
 
 class TestUpdatingEverything:

@@ -3,7 +3,7 @@
 # Part of portlin. Copyright (C) 2026 the portlin authors.
 # Licensed under the GNU General Public License, version 3 or later.
 # See <https://www.gnu.org/licenses/gpl-3.0.html>.
-"""Software: install common programs, and the drivers this machine needs.
+"""Software: install common programs.
 
 This window runs as the user and never installs anything itself. Every
 action is portlin-install, started as a child process: through pkexec for
@@ -17,14 +17,13 @@ What it prints is a line protocol. `::step` moves the status line,
 into the log pane unchanged, so a person who wants to know exactly what was
 run can read it here rather than reaching for a terminal.
 
-A stick travels between machines, so the Drivers page is not a list of
-drivers but a report on the machine the stick is plugged into right now:
-what portlin-install's scan found, and which catalog entries answer to it.
+Drivers are not listed here. They belong to the Drivers app, which reports
+on the machine the stick is plugged into, so there is one place to look for
+them; a search here that matches one points there instead.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import subprocess
@@ -43,7 +42,6 @@ from catalog import (  # noqa: E402
     CATEGORIES,
     ENTRIES,
     Entry,
-    by_id,
     installed,
     is_privileged,
     parse_dpkg_status,
@@ -54,6 +52,12 @@ APP_ID = "org.portlin.Software"
 INSTALLER = "/usr/bin/portlin-install"
 ICON_NAME = "portlin"
 DRIVERS = "Drivers"
+DRIVERS_APP = "/usr/bin/portlin-drivers"
+# The catalog keeps its driver entries, since portlin-install installs them
+# for the Drivers app, but this window leaves them and their page out.
+PAGES = [category for category in CATEGORIES if category != DRIVERS]
+SOFTWARE = tuple(entry for entry in ENTRIES if entry.category != DRIVERS)
+DRIVER_ENTRIES = tuple(entry for entry in ENTRIES if entry.category == DRIVERS)
 
 # Exit codes portlin-install and pkexec use, by what they mean here.
 EXIT_OK = 0
@@ -131,7 +135,7 @@ def row_state(entry: Entry, is_installed: bool, busy: bool) -> tuple[str, str, b
     return ("", "Install", True)
 
 
-def visible_entries(query: str, category: str | None, entries=ENTRIES) -> list[Entry]:
+def visible_entries(query: str, category: str | None, entries=SOFTWARE) -> list[Entry]:
     """What the list shows: a search across everything, or one category.
 
     A query wins over the category, because someone who types a name is
@@ -145,35 +149,9 @@ def visible_entries(query: str, category: str | None, entries=ENTRIES) -> list[E
     return [entry for entry in entries if entry.category == category]
 
 
-def suggestion_rows(scan: dict, known=None) -> list[tuple[Entry, str]]:
-    """The scan's suggestions as (entry, reason), in the order it made them.
-
-    A suggestion naming an entry this catalog does not have is skipped
-    rather than fatal: the scan and the catalog ship together, but a stick
-    can have a newer portlin-install than portlin-software for as long as an
-    upgrade takes.
-    """
-    rows = []
-    for suggestion in scan.get("suggestions", []):
-        try:
-            entry = (known or {}).get(suggestion["entry"]) or by_id(suggestion["entry"])
-        except KeyError:
-            continue
-        reason = suggestion.get("reason", "")
-        detail = suggestion.get("detail")
-        rows.append((entry, f"{reason}. {detail}" if detail else reason))
-    return rows
-
-
-def describe_machine(scan: dict) -> str:
-    """The one-paragraph answer to "what is this stick plugged into"."""
-    lines = []
-    for device in scan.get("gpus", []):
-        lines.append(f"Graphics: {device['name']}")
-    for device in scan.get("wifi", []):
-        lines.append(f"Wifi: {device['name']}")
-    lines += scan.get("notes", [])
-    return "\n".join(lines) or "Nothing was found to report about this machine."
+def drivers_matching(query: str) -> list[Entry]:
+    """Driver entries a search names, so the window can point at Drivers."""
+    return search(query, DRIVER_ENTRIES) if query.strip() else []
 
 
 def has_passwordless_sudo(run=subprocess.run) -> bool:
@@ -252,7 +230,7 @@ class Job:
 
 
 class SoftwareWindow(Gtk.ApplicationWindow):
-    def __init__(self, application=None, *, scan=None, dpkg=None, sudo=None) -> None:
+    def __init__(self, application=None, *, dpkg=None, sudo=None) -> None:
         super().__init__(application=application, title="Software")
         self.set_default_size(940, 640)
         self.set_icon_name(ICON_NAME)
@@ -260,9 +238,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.passwordless_sudo = has_passwordless_sudo() if sudo is None else sudo
         self.dpkg = dpkg_installed() if dpkg is None else dpkg
         self.home = os.path.expanduser("~")
-        self.scan: dict = scan or {}
-        self.scan_pending = scan is None
-        self.category: str | None = CATEGORIES[0]
+        self.category: str | None = PAGES[0]
         self.query = ""
         self.job: Job | None = None
         self.busy_id: str | None = None
@@ -277,8 +253,6 @@ class SoftwareWindow(Gtk.ApplicationWindow):
 
         self._build()
         self._populate()
-        if self.scan_pending:
-            self._start_scan()
 
     # -- construction ------------------------------------------------------
 
@@ -301,7 +275,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
 
         self.categories = Gtk.ListBox()
         self.categories.connect("row-selected", self._on_category)
-        for category in CATEGORIES:
+        for category in PAGES:
             row = Gtk.ListBoxRow()
             label = Gtk.Label(label=category, xalign=0.0)
             label.set_margin_start(12)
@@ -319,25 +293,6 @@ class SoftwareWindow(Gtk.ApplicationWindow):
 
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         panes.pack_start(right, True, True, 0)
-
-        self.machine = Gtk.Label(xalign=0.0)
-        self.machine.set_line_wrap(True)
-        self.machine.set_margin_start(12)
-        self.machine.set_margin_end(12)
-        self.machine.set_margin_top(8)
-        self.machine.set_margin_bottom(8)
-        self.machine_frame = Gtk.Frame(label="This machine")
-        self.machine_frame.set_margin_start(12)
-        self.machine_frame.set_margin_end(12)
-        self.machine_frame.set_margin_top(12)
-        self.machine_frame.add(self.machine)
-        # The frame is hidden on every page but Drivers, and show_all must
-        # not bring it back. Its contents are shown with show_all on the
-        # frame itself when the page opens: no_show_all stops show_all
-        # descending into it, so a child shown only by the window's show_all
-        # would never appear at all.
-        self.machine_frame.set_no_show_all(True)
-        right.pack_start(self.machine_frame, False, False, 0)
 
         self.listing = Gtk.ListBox()
         self.listing.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -373,7 +328,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
 
     # -- the list ----------------------------------------------------------
 
-    def _row_for(self, entry: Entry, reason: str | None = None) -> Gtk.ListBoxRow:
+    def _row_for(self, entry: Entry) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.set_margin_start(12)
@@ -388,10 +343,6 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         summary = Gtk.Label(label=entry.summary, xalign=0.0)
         summary.set_line_wrap(True)
         text.pack_start(summary, False, False, 0)
-        if reason:
-            why = Gtk.Label(label=reason, xalign=0.0)
-            why.set_line_wrap(True)
-            text.pack_start(why, False, False, 0)
         if entry.notes:
             notes = Gtk.Label(label=entry.notes, xalign=0.0)
             notes.set_line_wrap(True)
@@ -428,34 +379,34 @@ class SoftwareWindow(Gtk.ApplicationWindow):
             self.listing.remove(child)
         self.rows.clear()
 
-        showing_drivers = self.category == DRIVERS and not self.query.strip()
-        if showing_drivers:
-            self.machine.set_text(
-                "Looking at this machine..." if self.scan_pending
-                else describe_machine(self.scan)
-            )
-            # show() on each, not show_all(): no_show_all makes show_all a
-            # no-op on this widget and everything under it, which is what
-            # keeps the frame off every other page.
-            self.machine.show()
-            self.machine_frame.show()
-        else:
-            self.machine_frame.hide()
-
-        entries = visible_entries(self.query, self.category)
-        reasons = {}
-        if showing_drivers:
-            suggested = suggestion_rows(self.scan)
-            reasons = {entry.id: reason for entry, reason in suggested}
-            # Suggestions first: on the Drivers page the question is what this
-            # machine needs, and the rest of the list is there for the person
-            # who knows better than the scan does.
-            entries = [entry for entry, _ in suggested] + [
-                entry for entry in entries if entry.id not in reasons
-            ]
-        for entry in entries:
-            self.listing.add(self._row_for(entry, reasons.get(entry.id)))
+        if drivers_matching(self.query) and Path(DRIVERS_APP).exists():
+            self.listing.add(self._drivers_pointer())
+        for entry in visible_entries(self.query, self.category):
+            self.listing.add(self._row_for(entry))
         self.listing.show_all()
+
+    def _drivers_pointer(self) -> Gtk.ListBoxRow:
+        """A row saying drivers live in the Drivers app, with a way there.
+
+        Someone who searches for nvidia here has the right idea and the wrong
+        window, and an empty list would tell them the stick cannot do it.
+        """
+        row = Gtk.ListBoxRow()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        text = Gtk.Label(xalign=0.0)
+        text.set_markup("<b>Looking for a driver?</b>\nDrivers are installed from the Drivers app, "
+                        "which checks what this machine needs.")
+        text.set_line_wrap(True)
+        box.pack_start(text, True, True, 0)
+        button = Gtk.Button(label="Open Drivers")
+        button.connect("clicked", lambda *_: subprocess.Popen([DRIVERS_APP], start_new_session=True))
+        box.pack_start(button, False, False, 0)
+        row.add(box)
+        return row
 
     def _on_category(self, _listbox, row) -> None:
         if row is None:
@@ -475,31 +426,6 @@ class SoftwareWindow(Gtk.ApplicationWindow):
     def _on_search(self, entry) -> None:
         self.query = entry.get_text()
         self._populate()
-
-    # -- the scan ----------------------------------------------------------
-
-    def _start_scan(self) -> None:
-        collected: list[str] = []
-
-        def done(_code: int) -> None:
-            self.scan_pending = False
-            try:
-                self.scan = json.loads("\n".join(collected))
-            except ValueError:
-                self.scan = {"notes": ["The hardware scan did not report anything."]}
-            self.scan_job = None
-            self._populate()
-
-        try:
-            self.scan_job = Job(
-                [INSTALLER, "scan", "--json"],
-                on_event=lambda *_: None,
-                on_output=collected.append,
-                on_done=done,
-            )
-        except OSError as exc:
-            self.scan_pending = False
-            self.scan = {"notes": [f"Could not run the hardware scan: {exc}"]}
 
     # -- running things ----------------------------------------------------
 
@@ -579,7 +505,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self.upgrade_button.set_sensitive(not busy)
-        for entry in ENTRIES:
+        for entry in SOFTWARE:
             self._refresh_row(entry)
 
     def _append(self, line: str) -> None:
@@ -603,7 +529,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
             if rest.startswith("would remove "):
                 self.removals.append(rest.removeprefix("would remove "))
         elif kind == "reboot":
-            self._append("Reboot before relying on this driver.")
+            self._append("Restart before relying on this.")
         elif kind == "result":
             self._append(rest)
 
