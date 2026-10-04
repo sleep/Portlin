@@ -686,6 +686,27 @@ class TestHardwareScreen:
         assert captured["preface"][0] == ("Model: LENOVO ThinkPad T14 Gen 3", "text")
         assert state.drivers == []
 
+    def test_a_failed_driver_says_why(self, fb, monkeypatch):
+        class Proc:
+            stdout = iter(["::step Installing nvidia-detect\n",
+                           "::result failed nvidia-driver apt-get exited with status 100\n"])
+
+            def wait(self):
+                return 1
+
+        class Progress:
+            details, current = ["Installing drivers"], 0
+
+            def note(self, *args):
+                pass
+
+        monkeypatch.setattr(fb.subprocess, "Popen", lambda *args, **kwargs: Proc())
+        monkeypatch.setattr(fb, "log", lambda *args, **kwargs: None)
+        with pytest.raises(RuntimeError) as failure:
+            fb.apply_drivers(["nvidia-driver"], Progress())
+        assert str(failure.value) == (
+            "portlin-install could not install nvidia-driver: apt-get exited with status 100")
+
     def test_swap_starts_at_what_the_image_ships(self, fb):
         from portlin import templates
 

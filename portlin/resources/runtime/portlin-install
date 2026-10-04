@@ -100,6 +100,9 @@ APT_BASE = (
 )
 APT_ENV = (("DEBIAN_FRONTEND", "noninteractive"),)
 
+# The kinds whose install goes through apt, and so through its package lists.
+APT_KINDS = ("apt", "apt-repo", "deb-url", "github-deb")
+
 # The kernel-module builders. Anything installing one has to have the
 # headers for the running kernel, and needs a reboot before the module is
 # loaded.
@@ -281,6 +284,14 @@ def substitute(url: str, ctx: Context) -> str:
 
 
 # -- planners ---------------------------------------------------------------
+
+
+def uses_apt(entry: Entry) -> bool:
+    return entry.kind in APT_KINDS
+
+
+def plan_refresh() -> list[Step]:
+    return [Step("Refreshing the package lists", argv=apt_argv("update"), env=APT_ENV)]
 
 
 def plan_components(entry: Entry, ctx: Context) -> list[Step]:
@@ -562,7 +573,7 @@ def fallback_record(entry: Entry, dpkg: set[str]) -> dict | None:
 
 
 def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
-    if entry.kind in ("apt", "apt-repo", "deb-url", "github-deb"):
+    if uses_apt(entry):
         packages = installed_packages(entry, record)
         paths: list[str] = list(record.get("paths", [])) if record else []
         if entry.repo and not paths:
@@ -1242,6 +1253,17 @@ def cmd_install(args, ctx: Context) -> int:
         code = check_privilege(entry, ctx)
         if code != EXIT_OK:
             return code
+    # A new stick has no package lists at all, since the image is built
+    # without them, and lists from a refresh weeks ago name versions the
+    # mirror has since dropped. Either way apt cannot find or fetch what it is
+    # asked for, so refresh once up front: before the headers check too,
+    # which asks apt-cache and reads "no candidate" off an empty cache.
+    apt_entries = [entry for entry in entries if uses_apt(entry)]
+    if apt_entries:
+        result = run_plan(plan_refresh(), dry_run=args.dry_run)
+        if not result.ok:
+            emit("result", "failed", apt_entries[0].id, result.failure)
+            return EXIT_FAILED
     if any(builds_a_module(list(e.packages) + [e.resolver or ""]) for e in entries):
         ctx = replace(ctx, kernel_headers_available=headers_available(ctx.kernel))
     for entry in entries:
