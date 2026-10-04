@@ -1236,14 +1236,22 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self.stage_scroller.add(self.stage_list)
         page.pack_start(self.stage_scroller, True, True, 0)
 
-        self.details = Gtk.Expander(label="Details")
+        self.details = Gtk.Expander(label="Details", expanded=True)
         self.log = _classed(Gtk.TextView(editable=False, monospace=True, cursor_visible=False), "log")
         self.log.set_left_margin(10)
         self.log.set_top_margin(8)
-        buffer = self.log.get_buffer()
-        self.log_end = buffer.create_mark("end", buffer.get_end_iter(), False)
         log_scroller = Gtk.ScrolledWindow()
         log_scroller.set_size_request(-1, 150)
+        # The log stays on its last line until someone scrolls up to read,
+        # and takes it up again when they scroll back down. Held to the
+        # adjustment rather than scrolled on each insert, which does nothing
+        # while the panel is folded and leaves it at the top when it opens.
+        self.log_follow = True
+        self._log_value = 0.0
+        self._log_idle = 0
+        adjustment = log_scroller.get_vadjustment()
+        adjustment.connect("changed", self._on_log_resized)
+        adjustment.connect("value-changed", self._on_log_scrolled)
         log_scroller.add(self.log)
         self.details.add(log_scroller)
         page.pack_start(self.details, False, False, 0)
@@ -1584,6 +1592,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self.stage_list.remove(child)
         self.stage_rows = []
         self.log.get_buffer().set_text("")
+        self.log_follow = True
         self.details.set_label("Details")
         self.strip.reset()
         self.status_title.set_text(title)
@@ -1774,17 +1783,64 @@ class MigrationWindow(Gtk.ApplicationWindow):
             else:
                 self._set_source_state("empty")
 
+    def _live_start(self):
+        """Where the log's last, unfinished line begins. Every line above it
+        ends in a newline; it is rsync's progress, rewritten in place the
+        way a terminal shows it, or nothing."""
+        buffer = self.log.get_buffer()
+        return buffer.get_iter_at_line(buffer.get_line_count() - 1)
+
     def _append(self, line: str) -> None:
         buffer = self.log.get_buffer()
-        buffer.insert(buffer.get_end_iter(), line + "\n")
+        buffer.insert(self._live_start(), line + "\n")
         excess = buffer.get_line_count() - LOG_LINES
         if excess > 0:
             buffer.delete(buffer.get_start_iter(), buffer.get_iter_at_line(excess))
-        buffer.move_mark(self.log_end, buffer.get_end_iter())
-        self.log.scroll_mark_onscreen(self.log_end)
+
+    def _set_live(self, text: str) -> None:
+        buffer = self.log.get_buffer()
+        buffer.delete(self._live_start(), buffer.get_end_iter())
+        buffer.insert(buffer.get_end_iter(), text)
+
+    def _keep_live(self) -> None:
+        """Leave the progress line as it stands, as a line of the log."""
+        buffer = self.log.get_buffer()
+        if not self._live_start().is_end():
+            buffer.insert(buffer.get_end_iter(), "\n")
+
+    def _on_log_scrolled(self, adjustment) -> None:
+        """Only a move upward lets go of the end: the text view shifts the
+        value by itself as it lays lines out, and that is not someone
+        scrolling away."""
+        value = adjustment.get_value()
+        if value >= adjustment.get_upper() - adjustment.get_page_size() - 1:
+            self.log_follow = True
+        elif value < self._log_value:
+            self.log_follow = False
+        self._log_value = value
+
+    def _on_log_resized(self, adjustment) -> None:
+        """Back to the end once the text view is done with the adjustment:
+        it is still writing to it when this is heard, and would put the old
+        value back over one set here."""
+        if not self.log_follow or self._log_idle:
+            return
+
+        def to_end() -> bool:
+            self._log_idle = 0
+            if self.log_follow:
+                adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
+            return False
+
+        self._log_idle = GLib.idle_add(to_end)
 
     def _on_event(self, kind: str, rest: str) -> None:
         tracker = getattr(self, "tracker", None)
+        if kind == "copy":
+            self._set_live(rest)
+            return
+        if kind in ("step", "result"):
+            self._keep_live()
         if kind == "result":
             self._append(rest)
             if rest.startswith("ok "):
