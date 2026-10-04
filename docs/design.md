@@ -73,7 +73,8 @@ Nothing host-specific may survive into the image:
 - The LUKS argon2id memory cost is capped so a low-RAM machine can still unlock a
   stick formatted on a workstation.
 - `noatime,commit=120` and zram instead of swap, because USB flash has finite
-  write cycles.
+  write cycles. A swap file is an opt-in setup choice for a system on a hard
+  disk or SSD, at a lower priority than zram so it only takes the overflow.
 
 ## The update tier rule
 

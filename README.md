@@ -247,7 +247,8 @@ ordered command lists, which is where the real risk lives: a `crypttab` written 
 - **A capped LUKS KDF.** cryptsetup sizes argon2id by benchmarking whichever machine formats the
   container, so a stick formatted on a workstation can be unopenable on a netbook. Portlin caps it
   at 256 MiB.
-- **Flash-aware defaults**: `noatime,commit=120`, and zram instead of swap.
+- **Flash-aware defaults**: `noatime,commit=120`, and zram instead of swap. A swap file on the drive is
+  offered during setup but off by default, for a system on a hard disk or SSD rather than flash.
 
 </details>
 
@@ -294,7 +295,7 @@ an answer already chosen, so Enter alone gets through it. It asks for:
 | Account | Full name, username and password on one form |
 | Security | Automatic login, whether sudo asks for a password, screen lock delay and lock on suspend, a new LUKS passphrase (only when someone else chose the current one), and an "if found" message shown on the boot menu and above the passphrase prompt |
 | Appearance | Theme, icons, and display scale: automatic picks 100% or 200% at every login for whatever screen the stick is plugged into |
-| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network; compressed swap size |
+| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network; compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
 | Services | SSH server (off by default, host keys generated on first enable) and the ufw firewall (on by default, letting SSH through rate-limited when it is on) |
 | Storage | Growing the system to fill the drive, and the storage-wear switches `portlin-wear` owns |
 
