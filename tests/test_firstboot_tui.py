@@ -65,6 +65,9 @@ class FakeScreen:
     def keypad(self, flag):
         pass
 
+    def clearok(self, flag):
+        self.cleared = flag
+
     def bkgd(self, *args):
         pass
 
@@ -686,7 +689,7 @@ class TestHardwareScreen:
         assert captured["preface"][0] == ("Model: LENOVO ThinkPad T14 Gen 3", "text")
         assert state.drivers == []
 
-    def test_a_failed_driver_says_why(self, fb, monkeypatch):
+    def test_a_failed_driver_says_why(self, fb, monkeypatch, tmp_path):
         class Proc:
             stdout = iter(["::step Installing nvidia-detect\n",
                            "::result failed nvidia-driver apt-get exited with status 100\n"])
@@ -702,10 +705,64 @@ class TestHardwareScreen:
 
         monkeypatch.setattr(fb.subprocess, "Popen", lambda *args, **kwargs: Proc())
         monkeypatch.setattr(fb, "log", lambda *args, **kwargs: None)
+        monkeypatch.setattr(fb, "POLICY_RC_D", tmp_path / "policy-rc.d")
         with pytest.raises(RuntimeError) as failure:
             fb.apply_drivers(["nvidia-driver"], Progress())
         assert str(failure.value) == (
             "portlin-install could not install nvidia-driver: apt-get exited with status 100")
+        assert not (tmp_path / "policy-rc.d").exists()
+
+    def install_with_policy(self, fb, monkeypatch, policy):
+        """Run apply_drivers, returning the policy-rc.d text apt would have seen."""
+        seen = {}
+
+        class Proc:
+            def __init__(self, *args, **kwargs):
+                seen["during"] = policy.read_text() if policy.exists() else None
+                self.stdout = iter(["::reboot\n"])
+
+            def wait(self):
+                return 0
+
+        class Progress:
+            details, current = ["Installing drivers"], 0
+
+            def note(self, *args):
+                pass
+
+        monkeypatch.setattr(fb.subprocess, "Popen", Proc)
+        monkeypatch.setattr(fb, "log", lambda *args, **kwargs: None)
+        monkeypatch.setattr(fb, "POLICY_RC_D", policy)
+        assert fb.apply_drivers(["nvidia-driver"], Progress()) is True
+        return seen["during"]
+
+    def test_nvidia_daemons_are_held_until_the_restart(self, fb, monkeypatch, tmp_path):
+        # nvidia-persistenced fails without the module the restart loads, and
+        # systemd prints that failure across the wizard while it is booting.
+        policy = tmp_path / "policy-rc.d"
+        during = self.install_with_policy(fb, monkeypatch, policy)
+        assert during == fb.POLICY_RC_D_TEXT
+        assert not policy.exists()
+        monkeypatch.undo()
+
+        def verdict(unit):
+            return subprocess.run(["sh", "-c", during, "policy-rc.d", unit, "start"]).returncode
+
+        assert verdict("nvidia-persistenced.service") == 101
+        assert verdict("nvidia-persistenced") == 101
+        assert verdict("tlp.service") == 0
+
+    def test_someone_elses_policy_is_left_alone(self, fb, monkeypatch, tmp_path):
+        policy = tmp_path / "policy-rc.d"
+        policy.write_text("#!/bin/sh\nexit 101\n")
+        assert self.install_with_policy(fb, monkeypatch, policy) == "#!/bin/sh\nexit 101\n"
+        assert policy.read_text() == "#!/bin/sh\nexit 101\n"
+
+    def test_a_policy_left_by_an_interrupted_setup_is_cleared(self, fb, monkeypatch, tmp_path):
+        policy = tmp_path / "policy-rc.d"
+        policy.write_text(fb.POLICY_RC_D_TEXT)
+        assert self.install_with_policy(fb, monkeypatch, policy) == fb.POLICY_RC_D_TEXT
+        assert not policy.exists()
 
     def test_swap_starts_at_what_the_image_ships(self, fb):
         from portlin import templates
@@ -863,6 +920,14 @@ class TestApplying:
         fb.ui.screen = FakeScreen([])
         with pytest.raises(RuntimeError, match="useradd"):
             fb.apply_all(state)
+
+    def test_each_task_redraws_from_nothing(self, fb):
+        # A unit that fails while systemd is booting prints across tty1 no
+        # matter what; a full redraw per task keeps that from lingering.
+        fb.ui.screen = FakeScreen([])
+        progress = fb.Progress(fb.ui, "Applying", "", ["One", "Two"])
+        progress.start(0)
+        assert fb.ui.screen.cleared is True
 
 
 def summary_state(fb):
