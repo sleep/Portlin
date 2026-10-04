@@ -702,7 +702,7 @@ class UI:
     def repaint(self) -> None:
         """Redraw from nothing, after anything else has written to the console.
 
-        setupcon reloads the console font and keymap, and children run in the
+        setupcon reloads the keymap, and children run in the
         foreground draw over everything, so the next frame cannot assume the
         terminal still holds the last one.
         """
@@ -2809,7 +2809,10 @@ def apply_keyboard(layout: str) -> None:
             ]
         )
     )
-    run(["setupcon", "--save"], check=False)
+    # Keyboard only: a full setupcon also reloads the font from
+    # /etc/default/console-setup, putting back the 8x16 that console_font()
+    # replaced and shrinking setup mid-way on a high-resolution screen.
+    run(["setupcon", "--keyboard-only", "--save"], check=False)
     run(["localectl", "set-x11-keymap", layout], check=False)
 
 

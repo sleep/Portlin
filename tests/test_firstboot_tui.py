@@ -812,3 +812,10 @@ class TestConsoleFont:
         assert 'attempt(["setfont", str(font)])' in body
         main_body = source[source.index("def main()"):]
         assert main_body.index("claim_console(True)") < main_body.index("ui.start()")
+
+    def test_the_keyboard_step_leaves_the_font_alone(self):
+        # A full setupcon reloads the 8x16 font from /etc/default/console-setup
+        # and shrinks setup straight after the keyboard screen.
+        source = WIZARD.read_text()
+        body = source[source.index("def apply_keyboard"):source.index("def apply_locale")]
+        assert 'run(["setupcon", "--keyboard-only", "--save"]' in body
