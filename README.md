@@ -119,12 +119,8 @@ comes from, because they are not all the same kind of thing: Debian's archive, t
 repository, a `.deb` the vendor publishes, a tarball unpacked into `/opt`, or an installer that
 runs as you, under your own home directory.
 
-It also looks at the machine the stick is plugged into. The **Drivers** page names the graphics
-and wifi hardware it found and offers what fits: NVIDIA's proprietary driver, picked for that
-exact card by `nvidia-detect`, video acceleration and Vulkan for Intel and AMD, the Broadcom STA
-driver for the chips the open ones do not cover, and printing and scanning. A stick travels, so
-the NVIDIA entry says plainly what installing it does to the next machine, and how to undo it
-from a text console.
+Drivers are not in it: they have their own app, below, and searching Software for one points
+there.
 
 Everything privileged goes through one command, `portlin-install`, which the window runs under
 `pkexec`, or under `sudo` if first boot was told sudo needs no password. So the program that can
@@ -134,7 +130,6 @@ same verbs work from a terminal:
 ```
 portlin-install list                 # the catalog, and what is already installed
 portlin-install install mullvad      # or remove, or status
-portlin-install scan                 # what this machine needs
 portlin-install upgrade              # what Update everything runs
 ```
 
@@ -150,12 +145,16 @@ not left out. Deleting that file takes it away again.
 
 ## Drivers
 
-**Drivers**, in the Portlin menu, is the same hardware report on its own, for after setup:
-the stick moved to a new machine, setup ran with no network, or a driver was skipped then. It names
-the graphics and wifi hardware the stick is plugged into, lists the drivers that fit it with the
-same explanations first boot gives, marks which are already installed, and installs or removes
-them with live progress and apt's output a click away. When a driver builds a kernel module, as
-NVIDIA's and Broadcom's do, it says a restart is needed and offers one.
+**Drivers**, in the Portlin menu, looks at the machine the stick is plugged into, for after
+setup: the stick moved to a new machine, setup ran with no network, or a driver was skipped then.
+It names the graphics and wifi hardware it found and offers what fits, with the same explanations
+first boot gives: NVIDIA's proprietary driver, picked for that exact card by `nvidia-detect`,
+video acceleration and Vulkan for Intel and AMD, the Broadcom STA driver for the chips the open
+ones do not cover, and printing and scanning. It marks which are already installed, and installs
+or removes them with live progress and apt's output a click away. A stick travels, so the NVIDIA
+entry says plainly what installing it does to the next machine, and how to undo it from a text
+console. When a driver builds a kernel module, as NVIDIA's and Broadcom's do, it says a restart
+is needed and offers one.
 
 Installing needs a network, and the window says so rather than starting a download that cannot
 finish: the Install buttons wait, and come back by themselves once NetworkManager reports a
@@ -316,7 +315,7 @@ an answer already chosen, so Enter alone gets through it. It asks for:
 | Account | Full name, username and password on one form |
 | Security | Automatic login, whether sudo asks for a password, screen lock delay and lock on suspend, a new LUKS passphrase (only when someone else chose the current one), and an "if found" message shown on the boot menu and above the passphrase prompt |
 | Appearance | Theme, icons, and display scale: automatic picks 100% or 200% at every login for whatever screen the stick is plugged into |
-| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network (or later from Drivers in the menu); compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
+| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network (or later from Drivers in the Portlin menu); compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
 | Services | SSH server (off by default, host keys generated on first enable) and the ufw firewall (on by default, letting SSH through rate-limited when it is on) |
 | Storage | Growing the system to fill the drive, and the storage-wear switches `portlin-wear` owns |
 

@@ -16,8 +16,8 @@ as a child process:
 
 So the window is a reader of JSON and of the `::step` / `::progress` /
 `::warn` / `::reboot` / `::result` lines, the program that can be asked to
-act as root stays one command with a fixed set of verbs, and first boot,
-Software and this window cannot disagree about what a machine needs.
+act as root stays one command with a fixed set of verbs, and first boot
+and this window cannot disagree about what a machine needs.
 """
 
 from __future__ import annotations

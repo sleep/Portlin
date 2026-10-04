@@ -1131,7 +1131,7 @@ def cmd_status(args, ctx: Context) -> int:
 def check_privilege(entry: Entry, ctx: Context) -> int:
     if is_privileged(entry) and not ctx.root:
         print(
-            f"{entry.id} needs root: run it from Software, or with sudo.",
+            f"{entry.id} needs root: run it from Software or Drivers, or with sudo.",
             file=sys.stderr,
         )
         return EXIT_PRIVILEGE

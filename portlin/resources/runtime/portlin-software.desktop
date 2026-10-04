@@ -3,7 +3,7 @@ Version=1.0
 Type=Application
 Name=Software
 GenericName=Software Installer
-Comment=Install common programs, and the drivers this machine needs
+Comment=Install common programs
 Exec=portlin-software
 Icon=portlin
 Terminal=false
@@ -13,4 +13,4 @@ StartupNotify=true
 # program to launch. PackageManager is what the menu specification calls this
 # kind of program.
 Categories=System;PackageManager;X-Portlin;
-Keywords=software;install;apps;drivers;nvidia;vpn;browser;packages;
+Keywords=software;install;apps;vpn;browser;packages;
