@@ -117,10 +117,11 @@ the applications menu (also on Super+Space and Alt+F2), mako for notifications, 
 swaylock for the screen lock the wizard set. Right-click the desktop for everything else. The same
 applications run in it, Thunar and the terminal included, in the same theme and icons.
 
-What it leaves out: Xfce's settings app, desktop icons and the Caffeine cup. Both sessions stay
-installed, since first boot has no network to fetch the other one with, and the login screen
-lists both, so switching is one click either way. The packages are the `lite` group, which
-`--groups` can leave out; the login screen then hides the session.
+What it leaves out: Xfce's settings app, desktop icons and the Caffeine cup. The image carries
+both desktops, since first boot has no network to fetch either with, and setup removes the one
+not picked, along with whatever only it needed. Thunar, the terminal and the other applications
+stay either way, because both sessions run them. The packages are the `lite` group, which
+`--groups` can leave out; first boot then has nothing to choose between and keeps Xfce.
 
 ## Software
 

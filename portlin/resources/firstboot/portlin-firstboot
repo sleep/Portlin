@@ -180,13 +180,14 @@ OnlyShowIn=XFCE;
 # each login. Plain keys, because it is read by a shell script.
 SCREEN_LOCK_CONFIG = Path("/etc/portlin/screen-lock.conf")
 
-# Which desktop the login screen starts. Both are installed: the lite session's
-# packages are on every stick with a desktop, because first boot has no network
-# to fetch them with. Choosing one sets LightDM's default and its autologin
-# session; the login screen still lists both, so the other is one click away.
+# Which desktop the stick keeps. The image carries both, because first boot has
+# no network to fetch either with, and setup removes the one not picked: its
+# packages, and with them its entry on the login screen. Choosing lite also
+# makes it LightDM's default and autologin session.
 LITE_SESSION = "portlin-lite"
 LITE_SESSION_ENTRY = Path(f"/usr/share/wayland-sessions/{LITE_SESSION}.desktop")
 LABWC = "/usr/bin/labwc"
+XFCE_SESSION_ENTRY = Path("/usr/share/xsessions/xfce.desktop")
 SESSION_CONFIG = Path("/etc/lightdm/lightdm.conf.d/20-portlin-session.conf")
 DESKTOPS = [
     ("xfce", "Xfce"),
@@ -194,11 +195,49 @@ DESKTOPS = [
 ]
 DESKTOP_HELP = {
     "xfce": "The full desktop: a settings app for everything, desktop icons and the "
-            "Caffeine cup. Switch at the login screen any time.",
+            "Caffeine cup. The lite session is removed.",
     "lite": "labwc, a light Wayland session: the same panel readout and apps, more memory "
             "left for them. Fewer settings and no Caffeine cup. For older machines. "
-            "Switch at the login screen any time.",
+            "Xfce is removed, which frees disk space too.",
 }
+
+# What belongs to one desktop alone, purged when the other is picked; apt's
+# autoremove then takes whatever only these pulled in. Thunar, the terminal,
+# Mousepad, Ristretto, the polkit agent and the network applet are absent on
+# purpose: the lite session runs them too. So is the X server, which the login
+# screen runs on whichever desktop follows it. The lite list is packages.LITE
+# less the GSettings tools, which other packages depend on; a test holds the
+# two in agreement.
+DESKTOP_PACKAGES = {
+    "xfce": [
+        "xfce4",
+        "xfce4-goodies",
+        "xfce4-session",
+        "xfce4-panel",
+        "xfce4-settings",
+        "xfwm4",
+        "xfdesktop4",
+        "xfce4-power-manager",
+        "xfce4-screensaver",
+        "xfce4-notifyd",
+        "xfce4-screenshooter",
+        "xfce4-genmon-plugin",
+        "xfce4-whiskermenu-plugin",
+    ],
+    "lite": [
+        "labwc",
+        "xwayland",
+        "waybar",
+        "fuzzel",
+        "mako-notifier",
+        "swaybg",
+        "swayidle",
+        "swaylock",
+        "wlr-randr",
+        "brightnessctl",
+    ],
+}
+APT_ENV = ["env", "DEBIAN_FRONTEND=noninteractive"]
 
 # An owner's "if found" note. Shown on the boot menu, which every stick draws,
 # and printed by the initramfs above the passphrase prompt, which is the only
@@ -1475,7 +1514,7 @@ class State:
         self.password: str | None = None
         self.luks_device: str | None = None
         self.has_desktop = False
-        self.has_lite = False
+        self.choose_desktop = False
         self.desktop = "xfce"
         self.autologin: bool | None = None
         self.sudo_password: bool | None = None
@@ -2238,7 +2277,7 @@ def step_appearance(state: State):
     # A migrated theme is applied by the tool; asking here would override it.
     migrated = "extras.theme" in state.migrated_ids
     rows = []
-    if state.has_lite:
+    if state.choose_desktop:
         rows.append(Row("desktop", "Desktop", DESKTOPS, state.desktop,
                         help=lambda v: DESKTOP_HELP[v["desktop"]]))
     if not migrated:
@@ -2537,7 +2576,7 @@ def summary_groups(state: State) -> list[tuple[str, str, str]]:
         security.append(f"if found: {state.found_message}")
     groups.append(("security", "Security", ", ".join(security)))
     if state.has_desktop:
-        appearance = [dict(DESKTOPS)[state.desktop]] if state.has_lite else []
+        appearance = [dict(DESKTOPS)[state.desktop]] if state.choose_desktop else []
         appearance += [part for part in (state.theme, state.icon_theme) if part]
         appearance.append({"auto": "automatic scale", "1": "100% scale", "2": "200% scale"}[state.scale])
         groups.append(("appearance", "Appearance", ", ".join(appearance)))
@@ -3048,6 +3087,34 @@ def _lite_installed() -> bool:
     return LITE_SESSION_ENTRY.exists() and Path(LABWC).exists()
 
 
+def _xfce_installed() -> bool:
+    return XFCE_SESSION_ENTRY.exists()
+
+
+def _installed_packages(names: list[str]) -> list[str]:
+    """The names dpkg has installed, so apt is never asked about the rest.
+
+    A stick built with --exclude, or a setup re-run after a removal, can lack
+    some of them, and apt refuses a whole purge over one unknown name.
+    """
+    listing = run(["dpkg-query", "-W", "-f", "${Package} ${db:Status-Abbrev}\n", *names], check=False)
+    return [line.split()[0] for line in listing.stdout.splitlines()
+            if len(line.split()) > 1 and line.split()[1] == "ii"]
+
+
+def remove_desktop(desktop: str) -> None:
+    """Purge one desktop's own packages, and whatever only they needed.
+
+    No network is needed to remove anything, which is what lets setup carry
+    both desktops and keep only one.
+    """
+    installed = _installed_packages(DESKTOP_PACKAGES[desktop])
+    if installed:
+        run([*APT_ENV, "apt-get", "-y", "purge", *installed])
+    run([*APT_ENV, "apt-get", "-y", "--purge", "autoremove"])
+    log(f"removed the {desktop} desktop")
+
+
 def apply_desktop(desktop: str) -> None:
     """Make the chosen desktop the one the login screen starts.
 
@@ -3485,8 +3552,10 @@ def apply_all(state: State) -> None:
                 apply_icon_theme(state.icon_theme)
         if state.theme or state.icon_theme:
             task("Theme and icons", appearance)
-        if state.has_lite:
+        if state.choose_desktop:
             task("Desktop", lambda: apply_desktop(state.desktop))
+            other = "lite" if state.desktop == "xfce" else "xfce"
+            task(f"Removing {dict(DESKTOPS)[other]}", lambda: remove_desktop(other), True)
         task("Display scale", lambda: apply_scale(state.scale), True)
         task("Screen lock", lambda: apply_screen_lock(state.lock_minutes, state.lock_on_suspend), True)
     task("Network", lambda: apply_network(state.wifi, state.mac), True)
@@ -3550,7 +3619,9 @@ def wizard() -> State:
     state.candidates = migration_candidates()
     state.luks_device = _luks_device()
     state.has_desktop = _desktop_installed()
-    state.has_lite = state.has_desktop and _lite_installed()
+    # Only while both are here to choose between. A setup that runs again
+    # after one was removed keeps the one that is left.
+    state.choose_desktop = state.has_desktop and _lite_installed() and _xfce_installed()
     steps = [step for step in STEPS if step[0] != "restore" or state.candidates]
     ui.sections = [(key, label) for key, label, _ in steps]
     keys = [key for key, _, _ in steps]

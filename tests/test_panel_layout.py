@@ -124,16 +124,19 @@ class TestEveryPluginIsInstalled:
             assert kind in self.FROM_A_PACKAGE, f"plugin-{identifier} is {kind}"
             assert self.FROM_A_PACKAGE[kind] in installed, kind
 
-    def test_the_desktop_package_depends_on_them(self, properties):
+    def test_the_desktop_package_recommends_them(self, properties):
         # Not derivable from the file list: these are named inside a data file
-        # the package ships, so nothing but this holds them together.
+        # the package ships, so nothing but this holds them together. Recommends
+        # rather than Depends, because first boot purges Xfce, plugins included,
+        # when the lite session is picked, and a Depends would purge
+        # portlin-desktop along with them.
         control = package.text_files("portlin-desktop")["DEBIAN/control"]
-        depends = next(
-            line for line in control.splitlines() if line.startswith("Depends:")
+        recommends = next(
+            line for line in control.splitlines() if line.startswith("Recommends:")
         )
         for kind in _plugin_types(properties).values():
             if kind in self.FROM_A_PACKAGE:
-                assert self.FROM_A_PACKAGE[kind] in depends, kind
+                assert self.FROM_A_PACKAGE[kind] in recommends, kind
 
 
 class TestTheMenuButton:
