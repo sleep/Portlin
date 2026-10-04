@@ -1205,11 +1205,13 @@ def identity_steps(identity: Identity, ids: list[str], *, hosts_text: str) -> li
         ])
         # Keyboard only, so a migration run from first-boot setup does not
         # reload the console font and undo the one setup sized to the screen.
+        # No localectl: on Debian /etc/default/keyboard is the X layout too,
+        # read by X's udev rule and by the lite session, and asking localed
+        # to write the same file again is refused often enough ("Access
+        # denied") to leave a warning for nothing.
         steps.append(Step(f"Setting the keyboard layout to {identity.keyboard}",
                           write=(("/etc/default/keyboard", keyboard),),
                           argv=("setupcon", "--keyboard-only", "--save"), optional=True))
-        steps.append(Step("Recording the keyboard layout for X",
-                          argv=("localectl", "set-x11-keymap", identity.keyboard), optional=True))
     if "identity.timezone" in ids and identity.timezone:
         steps.append(Step(f"Setting the time zone to {identity.timezone}",
                           write=(("/etc/timezone", f"{identity.timezone}\n"),),

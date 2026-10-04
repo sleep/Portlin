@@ -2999,9 +2999,9 @@ def apply_keyboard(layout: str) -> None:
     )
     # Keyboard only: a full setupcon also reloads the font from
     # /etc/default/console-setup, putting back the 8x16 that console_font()
-    # replaced and shrinking setup mid-way on a high-resolution screen.
+    # replaced and shrinking setup mid-way on a high-resolution screen. No
+    # localectl: on Debian the file above is X's layout as well.
     run(["setupcon", "--keyboard-only", "--save"], check=False)
-    run(["localectl", "set-x11-keymap", layout], check=False)
 
 
 def apply_locale(locale_name: str) -> None:
