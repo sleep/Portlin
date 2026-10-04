@@ -645,6 +645,9 @@ EXIT_PAUSED = 7
 SPACE_RESERVE = 512 * 1024**2
 
 _RSYNC_PERCENT = re.compile(r"\s(\d{1,3})%\s")
+# progress2's leading figure, the bytes this run has written so far. Grouped
+# with commas, or with dots or apostrophes under some locales.
+_RSYNC_BYTES = re.compile(r"^\s*(\d[\d,.']*)\s+\d{1,3}%\s")
 # progress2's running count of files transferred, "(xfr#12, to-chk=...)".
 _RSYNC_FILES = re.compile(r"\(xfr#(\d+),")
 
@@ -724,7 +727,8 @@ def rsync_argv(source: Path, target: Path, *, backup_dir: Path, chown: tuple[int
     """
     argv = [
         "rsync", "-a", "--backup", f"--backup-dir={backup_dir}",
-        "--info=progress2", "--no-inc-recursive",
+        # name1 prints each file as it is written, for the window's Details.
+        "--info=progress2", "--info=name1", "--no-inc-recursive",
     ]
     if chown:
         argv.append(f"--chown={chown[0]}:{chown[1]}")
@@ -738,6 +742,17 @@ def rsync_argv(source: Path, target: Path, *, backup_dir: Path, chown: tuple[int
 def parse_rsync_progress(line: str) -> int | None:
     match = _RSYNC_PERCENT.search(line)
     return int(match.group(1)) if match else None
+
+
+def parse_rsync_bytes(line: str) -> int | None:
+    """The bytes written so far, from the same line. The percent alone moves
+    in hundredths of the whole copy, which on a large home is a gigabyte
+    between readings and a speed that stands still in between."""
+    match = _RSYNC_BYTES.match(line)
+    if not match:
+        return None
+    digits = re.sub(r"\D", "", match.group(1))
+    return int(digits) if digits else None
 
 
 def parse_rsync_files(line: str) -> int | None:

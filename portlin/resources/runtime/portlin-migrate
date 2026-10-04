@@ -100,6 +100,7 @@ from migrate import (  # noqa: E402
     overall_percent,
     parse_blkid_export,
     parse_lsblk,
+    parse_rsync_bytes,
     parse_rsync_files,
     parse_rsync_progress,
     parse_tar_checkpoint,
@@ -608,8 +609,13 @@ def run_steps(steps, *, total: int, out=None, execute=None,
                 if step.progress == "rsync":
                     percent = parse_rsync_progress(line)
                     if percent is not None:
-                        emit("progress", str(overall_percent(done, step.weight, percent, total)), out=out)
-                        emit("bytes", str(done + step.weight * percent // 100), str(total), out=out)
+                        # The byte figure moves with every reading; the percent
+                        # also counts files a resumed run skips, which the
+                        # bytes written never include. Whichever is further on.
+                        written = parse_rsync_bytes(line) or 0
+                        copied = min(step.weight, max(written, step.weight * percent // 100))
+                        emit("progress", str(min(100, (done + copied) * 100 // max(total, 1))), out=out)
+                        emit("bytes", str(done + copied), str(total), out=out)
                         count = parse_rsync_files(line)
                         if count is not None and count != files["current"]:
                             files["current"] = count
