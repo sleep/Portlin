@@ -919,6 +919,22 @@ ENTRIES: tuple[Entry, ...] = (
         homepage="https://wiki.debian.org/wl",
     ),
     Entry(
+        id="thinkpad",
+        name="ThinkPad power and battery care",
+        summary="TLP, which tunes power use and charges a ThinkPad battery gently",
+        category="Drivers",
+        kind="apt",
+        # thinkpad_acpi is in the kernel already, and TLP drives it: battery
+        # charge thresholds, power tuning on battery, and tlp-rdw turning
+        # radios off when the laptop is docked or on a wired network.
+        packages=("tlp", "tlp-rdw"),
+        check=dpkg("tlp"),
+        homepage="https://linrunner.de/tlp/",
+        notes="To keep the battery between 75 and 80 percent, run: sudo tlp "
+        "setcharge 75 80 BAT0. The laptop itself holds that setting, so it "
+        "stays after the stick is unplugged.",
+    ),
+    Entry(
         id="printing",
         name="Printing and scanning",
         summary="CUPS, printer drivers and a scanner app",

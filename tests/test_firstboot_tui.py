@@ -667,6 +667,25 @@ class TestHardwareScreen:
     def test_only_well_formed_entries_are_offered(self, fb):
         assert "driver:../evil" not in self.offered(fb, online=True)
 
+    def test_a_thinkpad_is_offered_its_extras_and_they_start_off(self, fb):
+        scan = {"machine": "LENOVO ThinkPad T14 Gen 3", "gpus": [], "notes": [],
+                "suggestions": [{"entry": "thinkpad", "reason": "LENOVO ThinkPad T14 Gen 3 found"}]}
+        state = fb.State()
+        state.online, state.scan, state.swap = True, scan, 50
+        state.drive, state.swapfile = {"kind": "hdd", "free": 100 * 1024**3}, 0
+        captured = {}
+
+        def settings(title, text, rows, **kwargs):
+            captured.update({row.key: row for row in rows}, preface=kwargs.get("preface"))
+            return {row.key: row.value for row in rows}
+
+        fb.ui.settings = settings
+        fb.step_hardware(state)
+        row = captured["driver:thinkpad"]
+        assert row.label == "ThinkPad power and battery care" and row.value is False
+        assert captured["preface"][0] == ("Model: LENOVO ThinkPad T14 Gen 3", "text")
+        assert state.drivers == []
+
     def test_swap_starts_at_what_the_image_ships(self, fb):
         from portlin import templates
 

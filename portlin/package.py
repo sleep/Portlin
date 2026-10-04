@@ -130,6 +130,14 @@ AUTOSTART_ENTRIES = {
     "portlin-intro-autostart.desktop": "etc/xdg/autostart/portlin-intro.desktop",
 }
 
+# Settings for packages the Drivers app can add, shipped ahead of them so
+# they are in place the moment the package is. A file in another package's
+# .d directory is read only by that package's program, and is inert until
+# then. A conffile, like the rest of what portlin puts under /etc.
+DRIVER_SETTINGS = {
+    "tlp-portlin.conf": "etc/tlp.d/50-portlin.conf",
+}
+
 # The lite session: labwc instead of Xfce, offered by the first-boot wizard
 # and listed on the login screen beside Xfce. Its packages are the "lite"
 # group in packages.py, and the entry's TryExec hides it from the greeter on
@@ -603,6 +611,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             **AUTOSTART_ENTRIES,
             **MENU_LAYOUT_ENTRIES,
             **MENU_DIRECTORIES,
+            **DRIVER_SETTINGS,
         }.items():
             files[destination] = (RESOURCES / "runtime" / source).read_text()
         files[BACKDROP_TOOL] = (RESOURCES / "runtime" / "portlin-backdrop").read_text()

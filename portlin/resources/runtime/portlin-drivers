@@ -63,6 +63,7 @@ DRIVER_LABELS = {
     "intel-graphics": "Intel video acceleration",
     "amd-graphics": "AMD video acceleration",
     "broadcom-wifi": "Broadcom Wi-Fi driver",
+    "thinkpad": "ThinkPad power and battery care",
     "printing": "Printing and scanning",
 }
 DRIVER_HELP = {
@@ -71,6 +72,7 @@ DRIVER_HELP = {
     "intel-graphics": "Hardware video decoding and Vulkan for Intel graphics. A small download.",
     "amd-graphics": "Hardware video decoding and Vulkan for AMD graphics. A small download.",
     "broadcom-wifi": "Only for Broadcom chips the built-in driver does not handle. Skip it if Wi-Fi works.",
+    "thinkpad": "TLP, for longer battery life and battery charge limits. A small download.",
     "printing": "The print system, drivers for most printers, and a scanning app.",
 }
 
@@ -230,7 +232,9 @@ def parse_scan(text: str) -> dict | None:
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
     notes = report.get("notes")
+    machine = report.get("machine")
     return {
+        "machine": machine if isinstance(machine, str) else "",
         "gpus": dicts("gpus"),
         "wifi": dicts("wifi"),
         "suggestions": [s for s in dicts("suggestions") if isinstance(s.get("entry"), str)],
@@ -257,10 +261,11 @@ def device_name(device: dict) -> str:
 
 def hardware_lines(scan: dict) -> list[tuple[str, str]]:
     """The "This machine" card, as (what, name) pairs."""
-    lines = [("Graphics", device_name(gpu)) for gpu in scan.get("gpus", [])]
+    lines = [("Model", scan["machine"])] if scan.get("machine") else []
+    lines += [("Graphics", device_name(gpu)) for gpu in scan.get("gpus", [])]
     lines += [("Wi-Fi", device_name(chip)) for chip in scan.get("wifi", [])]
     if not scan.get("gpus"):
-        lines.insert(0, ("Graphics", "not identified"))
+        lines.insert(1 if scan.get("machine") else 0, ("Graphics", "not identified"))
     return lines
 
 
@@ -795,7 +800,7 @@ class DriversWindow(Gtk.ApplicationWindow):
             self._finish_render()
             return
 
-        scan = self.scan or {"gpus": [], "wifi": [], "suggestions": [], "notes": []}
+        scan = self.scan or {"machine": "", "gpus": [], "wifi": [], "suggestions": [], "notes": []}
         self.machine_box.pack_start(_label("This machine", "section"), False, False, 0)
         if self.scan is not None:
             for what, name in hardware_lines(scan):

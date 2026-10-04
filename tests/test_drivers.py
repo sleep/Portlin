@@ -221,6 +221,36 @@ class TestReadingTheRealTool:
         assert [what for what, _ in lines] == ["Graphics", "Graphics", "Wi-Fi"]
         assert any("GeForce MX150" in name for _, name in lines)
 
+    def test_a_thinkpad_is_named_first_and_offered_its_entry(
+        self, drivers, tool, ctx, tmp_path, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(tool, "read_machine",
+                            lambda *a: {"model": "LENOVO ThinkPad T14 Gen 3", "thinkpad": True})
+        monkeypatch.setattr(tool.subprocess, "run",
+                            lambda *a, **k: subprocess.CompletedProcess(a, 0, AMD_LSPCI, ""))
+        args = tool.build_parser().parse_args(["scan", "--json"])
+        assert args.func(args, ctx) == tool.EXIT_OK
+        scan = drivers.parse_scan(capsys.readouterr().out)
+        assert drivers.hardware_lines(scan)[0] == ("Model", "LENOVO ThinkPad T14 Gen 3")
+        entries = drivers.parse_entries(real_list(tool, ctx, capsys, monkeypatch, set()))
+        suggested, others = drivers.build_rows(scan, entries)
+        thinkpad = next(row for row in suggested if row.id == "thinkpad")
+        assert thinkpad.label == "ThinkPad power and battery care"
+        assert "T14 Gen 3" in thinkpad.reason and thinkpad.notes
+
+    def test_elsewhere_the_thinkpad_entry_is_still_available(
+        self, drivers, tool, ctx, tmp_path, capsys, monkeypatch
+    ):
+        scan = drivers.parse_scan(real_scan(tool, ctx, tmp_path, capsys, AMD_LSPCI))
+        entries = drivers.parse_entries(real_list(tool, ctx, capsys, monkeypatch, set()))
+        _, others = drivers.build_rows(scan, entries)
+        assert "thinkpad" in [row.id for row in others]
+
+    def test_without_a_model_graphics_still_leads(self, drivers):
+        assert drivers.hardware_lines({"machine": "", "gpus": []})[0] == ("Graphics", "not identified")
+        lines = drivers.hardware_lines({"machine": "LENOVO ThinkPad X13", "gpus": []})
+        assert lines == [("Model", "LENOVO ThinkPad X13"), ("Graphics", "not identified")]
+
 
 class TestReadingBadOutput:
     def test_output_that_is_not_json_is_not_a_report(self, drivers):
@@ -232,9 +262,9 @@ class TestReadingBadOutput:
     def test_malformed_fields_cost_a_line_not_the_window(self, drivers):
         scan = drivers.parse_scan(json.dumps({
             "gpus": "nope", "suggestions": [{"entry": 3}, "x", {"entry": "intel-graphics"}],
-            "notes": ["fine", 4],
+            "notes": ["fine", 4], "machine": ["not", "a", "name"],
         }))
-        assert scan == {"gpus": [], "wifi": [], "notes": ["fine"],
+        assert scan == {"machine": "", "gpus": [], "wifi": [], "notes": ["fine"],
                         "suggestions": [{"entry": "intel-graphics"}]}
 
     def test_a_machine_with_no_graphics_found_says_so(self, drivers):
