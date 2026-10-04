@@ -3324,7 +3324,11 @@ def apply_drivers(entries: list[str], progress: Progress) -> bool:
         elif line.startswith("::reboot"):
             reboot = True
         elif line.startswith("::result failed"):
-            failed.append(line.split()[2] if len(line.split()) > 2 else "?")
+            # "::result failed <id> <reason>": the reason is what makes the
+            # red line on the screen worth reading.
+            parts = line.split(maxsplit=3)
+            entry = parts[2] if len(parts) > 2 else "?"
+            failed.append(f"{entry}: {parts[3]}" if len(parts) > 3 else entry)
         else:
             progress.note(progress.details[progress.current])
     if proc.wait() != 0 or failed:

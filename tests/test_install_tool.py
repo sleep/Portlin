@@ -493,6 +493,64 @@ class TestPrivilege:
         assert args.func(args, ctx) == tool.EXIT_PRIVILEGE
 
 
+class TestRefreshingBeforeAnInstall:
+    """A new stick has no package lists, so an install that does not
+    refresh first fails with "Unable to locate package"."""
+
+    def recorded(self, tool, ctx, monkeypatch, ids, *, refresh_ok=True):
+        plans, order = [], []
+
+        def record(steps, **kwargs):
+            plans.append(argvs(steps))
+            order.append("plan")
+            if argvs(steps) == [tool.apt_argv("update")] and not refresh_ok:
+                return tool.PlanResult(False, failure="apt-get exited with status 100")
+            return tool.PlanResult(True, captured="It is recommended to install the\n    nvidia-driver\npackage.")
+
+        def headers(kernel):
+            order.append("headers")
+            return True
+
+        monkeypatch.setattr(tool, "run_plan", record)
+        monkeypatch.setattr(tool, "headers_available", headers)
+        monkeypatch.setattr(tool, "write_record", lambda *args: None)
+        monkeypatch.setattr(tool, "missing_requirements", lambda *args: [])
+        args = tool.build_parser().parse_args(["install", *ids])
+        return args.func(args, ctx), plans, order
+
+    def test_the_lists_are_refreshed_once_before_anything_else(self, tool, ctx, monkeypatch):
+        code, plans, order = self.recorded(tool, ctx, monkeypatch, ["vlc", "remmina"])
+        assert code == tool.EXIT_OK
+        assert plans[0] == [tool.apt_argv("update")]
+        assert sum(plan.count(tool.apt_argv("update")) for plan in plans) == 1
+
+    def test_the_headers_check_reads_refreshed_lists(self, tool, ctx, monkeypatch):
+        import dataclasses
+
+        ctx = dataclasses.replace(ctx, components=(*ctx.components, "non-free"))
+        code, plans, order = self.recorded(tool, ctx, monkeypatch, ["nvidia-driver"])
+        assert code == tool.EXIT_OK
+        assert plans[0] == [tool.apt_argv("update")]
+        assert order.index("headers") == 1
+
+    def test_a_failed_refresh_fails_the_install(self, tool, ctx, monkeypatch, capsys):
+        code, plans, _ = self.recorded(tool, ctx, monkeypatch, ["vlc"], refresh_ok=False)
+        assert code == tool.EXIT_FAILED
+        assert plans == [[tool.apt_argv("update")]]
+        assert "::result failed vlc apt-get exited with status 100" in capsys.readouterr().out
+
+    def test_nothing_is_refreshed_for_what_apt_does_not_install(
+        self, tool, catalog, ctx, monkeypatch
+    ):
+        import dataclasses
+
+        entry = next(e for e in catalog.ENTRIES if e.kind == "tarball-opt")
+        user = dataclasses.replace(ctx, root=entry.kind not in catalog.USER_KINDS)
+        code, plans, _ = self.recorded(tool, user, monkeypatch, [entry.id])
+        assert code == tool.EXIT_OK
+        assert plans and [tool.apt_argv("update")] not in plans
+
+
 class TestRunningAPlan:
     def test_a_dry_run_prints_every_command_and_runs_none(
         self, tool, catalog, ctx, monkeypatch, capsys
