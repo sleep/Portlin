@@ -169,6 +169,7 @@ class TestPauseFeedback:
         fake.last_failure = ""
         fake.result_text = ""
         fake._append = lambda line: None
+        fake._keep_live = lambda: None
         window.MigrationWindow._on_event(fake, "result", "paused Paused. Safe to unplug.")
         assert fake.result_text == "Paused. Safe to unplug."
         assert fake.last_failure == ""
@@ -223,6 +224,7 @@ class TestFailureFeedback:
         fake = window.MigrationWindow.__new__(window.MigrationWindow)
         fake.last_failure = ""
         fake._append = lambda line: None
+        fake._keep_live = lambda: None
         window.MigrationWindow._on_event(fake, "result", "failed the passphrase did not open the drive")
         assert fake.last_failure == "the passphrase did not open the drive"
 

@@ -30,6 +30,7 @@ window reads it with the same code Software uses:
     ::progress <0-100>       bytes copied over bytes planned
     ::bytes <copied> <total> the same, in bytes, for rates and estimates
     ::files <count>          files written so far, where rsync counts them
+    ::copy <text>            rsync's own progress line, as it printed it
     ::warn <text>            something was skipped and the run went on
     ::result ok|failed|paused [text]
 
@@ -677,6 +678,7 @@ def run_steps(steps, *, total: int, out=None, execute=None,
                         if count is not None and count != files["current"]:
                             files["current"] = count
                             emit("files", str(files["before"] + count), out=out)
+                        emit("copy", line.strip(), out=out)
                         return
                 elif step.progress == "tar":
                     records = parse_tar_checkpoint(line)
@@ -917,7 +919,7 @@ def gauge_feed(kind: str, rest: str, percent: int) -> str | None:
 # Detail for the Migrate window that a gauge has no place for. They come
 # many times a second, so they are not logged either; ::progress carries
 # the same news to the gauge and the log.
-GAUGE_SILENT = ("stages", "bytes", "files")
+GAUGE_SILENT = ("stages", "bytes", "files", "copy")
 
 
 class Gauge:

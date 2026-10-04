@@ -195,6 +195,8 @@ class TestRunSteps:
             {"text": "Copying B", "bytes": 1000},
         ]
         assert "::bytes 1500 4000" in lines
+        # rsync's own line goes through too, for the window's log.
+        assert "::copy 1,234  50%   1.00MB/s    0:00:01 (xfr#3, to-chk=1/2)" in lines
         # Counts restart with each rsync and are added up across them.
         files = [int(line.split()[1]) for line in lines if line.startswith("::files ")]
         assert files == [3, 5, 8, 10, 13, 15]
