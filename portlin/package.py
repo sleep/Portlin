@@ -92,11 +92,23 @@ MENU_ENTRIES = {
 # because of a category but because xfce-applications.menu names it by
 # Filename in its own Layout, and the only way to sit next to a name placed
 # that way is the same treatment. This ships under
-# /etc/xdg/menus/xfce-applications-merged, the directory <DefaultMergeDirs/>
-# reads for a menu file named xfce-applications.menu, and is a conffile like
-# the rest of what portlin puts under /etc: see THEME_FILES.
+# /etc/xdg/menus/applications-merged, the directory garcon reads for
+# <DefaultMergeDirs/>: it strips the "xfce-" prefix from
+# xfce-applications.menu before adding "-merged", so a file under
+# xfce-applications-merged is never read at all. It is a conffile like the
+# rest of what portlin puts under /etc: see THEME_FILES.
 MENU_LAYOUT_ENTRIES = {
-    "portlin-about.menu": "etc/xdg/menus/xfce-applications-merged/portlin-about.menu",
+    "portlin-about.menu": "etc/xdg/menus/applications-merged/portlin-about.menu",
+    # The Portlin submenu, gathering every entry in the X-Portlin category.
+    # A separate file from the one above, which owns the root Layout and with
+    # it where the submenu sits.
+    "portlin-tools.menu": "etc/xdg/menus/applications-merged/portlin-tools.menu",
+}
+
+# The name and icon the Portlin submenu shows, looked up by the <Directory>
+# in portlin-tools.menu from <DefaultDirectoryDirs/>.
+MENU_DIRECTORIES = {
+    "portlin.directory": "usr/share/desktop-directories/portlin.directory",
 }
 
 # Entries that start a program at login rather than from the menu. Kept apart
@@ -553,6 +565,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
             **MENU_ENTRIES,
             **AUTOSTART_ENTRIES,
             **MENU_LAYOUT_ENTRIES,
+            **MENU_DIRECTORIES,
         }.items():
             files[destination] = (RESOURCES / "runtime" / source).read_text()
         files[BACKDROP_TOOL] = (RESOURCES / "runtime" / "portlin-backdrop").read_text()

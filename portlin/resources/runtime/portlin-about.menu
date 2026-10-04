@@ -2,21 +2,31 @@
  "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
 <!--
 Part of portlin. Merges into the root Xfce menu from
-/etc/xdg/menus/xfce-applications-merged, so this Layout is combined with
-the stock one rather than replacing the whole menu: the last <Layout> for
-a given <Menu> wins, and this is the only way to place an entry next to
-About Xfce, which the stock file also names by Filename rather than by
-category.
+/etc/xdg/menus/applications-merged, the directory garcon reads for
+<DefaultMergeDirs/> (it drops the "xfce-" prefix of xfce-applications.menu).
+The last <Layout> for a given <Menu> wins outright rather than combining, so
+this is the stock root Layout repeated in full, with two additions: the
+Portlin submenu beside Settings, and About Portlin beside About Xfce. The
+stock file places About Xfce by Filename rather than by category, and the
+same treatment is the only way to sit next to it.
 -->
 <Menu>
   <Name>Xfce</Name>
   <Layout>
-    <Merge type="menus"/>
-    <Merge type="files"/>
+    <Filename>xfce4-run.desktop</Filename>
     <Separator/>
+    <Filename>xfce4-terminal-emulator.desktop</Filename>
+    <Filename>xfce4-file-manager.desktop</Filename>
+    <Filename>xfce4-mail-reader.desktop</Filename>
+    <Filename>xfce4-web-browser.desktop</Filename>
+    <Separator/>
+    <Menuname>Portlin</Menuname>
     <Menuname>Settings</Menuname>
+    <Separator/>
+    <Merge type="all"/>
     <Separator/>
     <Filename>portlin-about.desktop</Filename>
     <Filename>xfce4-about.desktop</Filename>
+    <Filename>xfce4-session-logout.desktop</Filename>
   </Layout>
 </Menu>

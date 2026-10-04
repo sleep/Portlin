@@ -282,11 +282,11 @@ def test_desktop_ships_its_xdg_defaults_only_under_its_own_overlay():
     # What may sit outside the overlay is a drop-in named after a portlin
     # program, in a directory dpkg lets every desktop package drop into --
     # /etc/xdg/autostart is shared by xfce4-notifyd, blueman and the rest, and
-    # xfce-applications-merged is the same idea for menu.spec's
+    # applications-merged is the same idea for menu.spec's
     # <DefaultMergeDirs/>. A file nobody else can be named collides with
     # nobody. A default that another package also ships is the thing that
     # cannot go there, and this fails the moment one is added under any name.
-    SHARED_DROPIN_DIRS = {"autostart", "xfce-applications-merged"}
+    SHARED_DROPIN_DIRS = {"autostart", "applications-merged"}
     assert all(Path(path).name.startswith("portlin-") for path in outside), outside
     assert not {Path(path).name for path in outside} & set(package.XDG_DEFAULTS.values())
     assert not {
@@ -648,7 +648,7 @@ def test_desktop_ships_the_about_dialog_and_its_menu_entry():
     assert files["usr/bin/portlin-about"].startswith("#!/usr/bin/env python3")
     assert "usr/share/applications/portlin-about.desktop" in files
     assert "usr/bin/portlin-about" in package.executable_paths("portlin-desktop")
-    assert "etc/xdg/menus/xfce-applications-merged/portlin-about.menu" in files
+    assert "etc/xdg/menus/applications-merged/portlin-about.menu" in files
 
 
 def test_desktop_depends_on_what_the_about_dialog_needs():

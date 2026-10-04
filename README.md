@@ -84,7 +84,8 @@ when root really is encrypted; on a plain stick it is white and labelled `ext4`.
 is decided on every boot, before the login screen, because a stick can be encrypted at any boot
 after it was written.
 
-One panel, along the top, with a searchable applications menu under the portlin mark. At the right
+One panel, along the top, with a searchable applications menu under the portlin mark. portlin's own
+tools (Software, Migrate, Caffeine and Portlin Settings) share a Portlin submenu beside Settings. At the right
 end sits a readout of what the machine is doing:
 
 ```
@@ -110,7 +111,7 @@ preferences; untick it in Settings > Session and Startup to stop it appearing at
 
 ## Software
 
-**Software**, in the applications menu, installs the things people go looking for on a fresh
+**Software**, in the Portlin menu, installs the things people go looking for on a fresh
 system: Chrome, Brave, Chromium, Tor Browser, Pale Moon, Signal, Telegram, Discord, VLC, OBS,
 LibreOffice, GIMP, VS Code, Zed, Cursor, Claude Desktop, Claude Code, Kimi Code, Docker,
 RustDesk, AnyDesk, Mullvad, Tailscale, qBittorrent, Deluge and more. Each entry says where it
@@ -150,7 +151,7 @@ not left out. Deleting that file takes it away again.
 ## Migrating
 
 Plug your old portlin into a machine booted from a new one, and **Migrate** in the
-applications menu brings across what you tick: the account with its password, the
+Portlin menu brings across what you tick: the account with its password, the
 home directory folder by folder (`Documents` but not `Downloads`, Firefox but not
 `.ssh`), what Software installed, saved wifi passwords, Bluetooth pairings,
 printers and the desktop theme. First boot offers the same thing before it asks
