@@ -48,6 +48,7 @@ CATEGORIES = (
     "Media",
     "Office and graphics",
     "Security and privacy",
+    "Security research",
     "Networking",
     "Development",
     "AI tools",
@@ -162,6 +163,11 @@ VENDOR_SCRIPT_WARNING = (
     "Runs the vendor's installer script as you, under your home directory. "
     "Portlin downloads it first and runs the file it downloaded."
 )
+
+# Said on every entry that reaches out to another machine, because the tool
+# itself asks nothing before it does: the entry is where a person reads it.
+AUTHORIZED_USE = "Only for machines and networks you own or have permission to test."
+AUTHORIZED_DEVICE = "Only for devices you own or have permission to test."
 
 ENTRIES: tuple[Entry, ...] = (
     # -- Browsers ----------------------------------------------------------
@@ -447,6 +453,369 @@ ENTRIES: tuple[Entry, ...] = (
         homepage="https://tailscale.com/",
         notes="After installing, run: sudo tailscale up",
     ),
+    # -- Security research -------------------------------------------------
+    Entry(
+        id="nmap",
+        name="Nmap",
+        summary="Scan a network for hosts, open ports and services",
+        category="Security research",
+        kind="apt",
+        packages=("nmap", "zenmap"),
+        check=dpkg("nmap"),
+        homepage="https://nmap.org/",
+        notes="Zenmap is the window; nmap is the command. " + AUTHORIZED_USE,
+    ),
+    Entry(
+        id="metasploit",
+        name="Metasploit Framework",
+        summary="Exploitation framework, from Rapid7's apt repository",
+        category="Security research",
+        kind="apt-repo",
+        packages=("metasploit-framework",),
+        repo=Repo(
+            key_url="https://apt.metasploit.com/metasploit-framework.gpg.key",
+            keyring_path="/usr/share/keyrings/metasploit-framework.asc",
+            sources_line=(
+                "deb [arch=amd64 signed-by=/usr/share/keyrings/metasploit-framework.asc] "
+                "https://apt.metasploit.com/ lucid main"
+            ),
+            sources_path="/etc/apt/sources.list.d/metasploit-framework.list",
+        ),
+        check=dpkg("metasploit-framework"),
+        homepage="https://www.metasploit.com/",
+        notes=(
+            "One bundle carrying its own Ruby and every module, about 900 MB installed, so "
+            "it fits only on a stick with room to spare. Start it with: msfconsole. "
+            + AUTHORIZED_USE
+        ),
+    ),
+    Entry(
+        id="sqlmap",
+        name="sqlmap",
+        summary="Find and exploit SQL injection in a web application",
+        category="Security research",
+        kind="apt",
+        packages=("sqlmap",),
+        check=dpkg("sqlmap"),
+        homepage="https://sqlmap.org/",
+        notes=AUTHORIZED_USE,
+    ),
+    Entry(
+        id="web-scanners",
+        name="Web scanning tools",
+        summary="Nikto, WhatWeb and wafw00f, with the dirb, gobuster and ffuf fuzzers",
+        category="Security research",
+        kind="apt",
+        packages=("nikto", "whatweb", "wafw00f", "dirb", "gobuster", "ffuf", "cewl"),
+        # Debian keeps Nikto in non-free, over the licence on its scan database.
+        needs_components=("non-free",),
+        check=dpkg("nikto", "gobuster", "ffuf"),
+        homepage="https://www.debian.org/",
+        notes=AUTHORIZED_USE,
+    ),
+    Entry(
+        id="password-crackers",
+        name="Password crackers",
+        summary="John the Ripper, hashcat, Hydra, Medusa, Ncrack and crunch",
+        category="Security research",
+        kind="apt",
+        packages=("john", "hashcat", "hashcat-data", "hydra", "medusa", "ncrack", "crunch"),
+        check=dpkg("john", "hashcat", "hydra"),
+        homepage="https://www.debian.org/",
+        notes=(
+            "hashcat uses the graphics card only where an OpenCL driver is installed, and "
+            "falls back to the processor without one. " + AUTHORIZED_USE
+        ),
+    ),
+    Entry(
+        id="impacket",
+        name="Impacket",
+        summary="Python tools for SMB, Kerberos and the other Windows protocols",
+        category="Security research",
+        kind="apt",
+        packages=("python3-impacket", "smbmap", "smbclient"),
+        check=dpkg("python3-impacket"),
+        homepage="https://github.com/fortra/impacket",
+        notes=AUTHORIZED_USE,
+    ),
+    Entry(
+        id="recon-tools",
+        name="Network recon tools",
+        summary="arp-scan, netdiscover and nbtscan, with dnsrecon, dnsenum, fierce and recon-ng",
+        category="Security research",
+        kind="apt",
+        packages=(
+            "arp-scan", "netdiscover", "nbtscan", "dnsrecon", "dnsenum", "fierce",
+            "sublist3r", "recon-ng",
+        ),
+        check=dpkg("arp-scan", "dnsrecon", "recon-ng"),
+        homepage="https://www.debian.org/",
+        notes=AUTHORIZED_USE,
+    ),
+    Entry(
+        id="packet-tools",
+        name="Packet and socket tools",
+        summary="tcpdump, tshark, ngrep, hping3, Scapy, netcat, socat and proxychains",
+        category="Security research",
+        kind="apt",
+        packages=(
+            "tcpdump", "tshark", "ngrep", "hping3", "python3-scapy", "netcat-openbsd",
+            "socat", "proxychains4",
+        ),
+        # Not tshark: the Wireshark entry can bring that in on its own, and
+        # this page would then say these tools are installed when they are not.
+        check=dpkg("tcpdump", "ngrep"),
+        homepage="https://www.debian.org/",
+        notes="Wireshark's window is its own entry, under Networking.",
+    ),
+    Entry(
+        id="mitm-tools",
+        name="Man in the middle tools",
+        summary="bettercap, Ettercap and dsniff, for traffic on a local network",
+        category="Security research",
+        kind="apt",
+        packages=("bettercap", "ettercap-graphical", "dsniff"),
+        check=dpkg("bettercap", "ettercap-graphical"),
+        homepage="https://www.bettercap.org/",
+        notes=AUTHORIZED_USE,
+    ),
+    Entry(
+        id="wifi-tools",
+        name="Wireless auditing tools",
+        summary="aircrack-ng, Reaver, wifite, hcxtools and macchanger",
+        category="Security research",
+        kind="apt",
+        packages=("aircrack-ng", "reaver", "wifite", "hcxtools", "macchanger"),
+        check=dpkg("aircrack-ng"),
+        homepage="https://www.aircrack-ng.org/",
+        notes=(
+            "Needs a wifi adapter whose driver does monitor mode and packet injection; many "
+            "built-in cards do neither. " + AUTHORIZED_USE
+        ),
+    ),
+    Entry(
+        id="ghidra",
+        name="Ghidra",
+        summary="Software reverse engineering suite",
+        category="Security research",
+        kind="github-zip-opt",
+        github_repo="NationalSecurityAgency/ghidra",
+        asset_pattern=r"^ghidra_.*_PUBLIC_.*\.zip$",
+        opt_dir="/opt/ghidra",
+        launcher="ghidraRun",
+        requires=("java",),
+        check=path("/opt/ghidra/ghidraRun"),
+        homepage="https://ghidra-sre.org/",
+        notes="The release ZIP carries no Java, so Java is installed first if it is missing.",
+    ),
+    Entry(
+        id="radare2",
+        name="radare2",
+        summary="Command line reverse engineering framework",
+        category="Security research",
+        kind="github-deb",
+        github_repo="radareorg/radare2",
+        asset_pattern=r"^radare2_\d+\.\d+\.\d+_amd64\.deb$",
+        check=dpkg("radare2"),
+        homepage="https://rada.re/",
+        notes="Debian 13 carries no radare2 package, so this is the project's own .deb.",
+    ),
+    Entry(
+        id="jd-gui",
+        name="JD-GUI",
+        summary="Browse and decompile Java class files",
+        category="Security research",
+        kind="github-deb",
+        github_repo="java-decompiler/jd-gui",
+        asset_pattern=r"^jd-gui-\d+\.\d+\.\d+\.deb$",
+        check=dpkg("jd-gui"),
+        homepage="https://java-decompiler.github.io/",
+    ),
+    Entry(
+        id="apktool",
+        name="Apktool",
+        summary="Decode and rebuild Android APK files",
+        category="Security research",
+        kind="apt",
+        packages=("apktool",),
+        check=dpkg("apktool"),
+        homepage="https://apktool.org/",
+        notes="Decodes resources and smali; JD-GUI reads the Java side of the same app.",
+    ),
+    Entry(
+        id="jadx",
+        name="jadx",
+        summary="Decompile an APK or a dex file back to readable Java",
+        category="Security research",
+        kind="github-zip-opt",
+        github_repo="skylot/jadx",
+        asset_pattern=r"^jadx-\d+\.\d+\.\d+\.zip$",
+        opt_dir="/opt/jadx",
+        launcher="bin/jadx-gui",
+        requires=("java",),
+        check=path("/opt/jadx/bin/jadx-gui"),
+        homepage="https://github.com/skylot/jadx",
+        notes=(
+            "Java is installed first if it is missing. The window is jadx-gui; the command "
+            "line is /opt/jadx/bin/jadx."
+        ),
+    ),
+    Entry(
+        id="apk-tools",
+        name="APK tools",
+        summary="androguard, enjarify and dexdump, with aapt, apksigner and zipalign",
+        category="Security research",
+        kind="apt",
+        packages=("androguard", "enjarify", "dexdump", "aapt", "apksigner", "zipalign"),
+        check=dpkg("androguard", "enjarify", "apksigner"),
+        homepage="https://www.debian.org/",
+        notes="Enough to take an APK apart, patch it, and sign and align it to install again.",
+    ),
+    Entry(
+        id="android-tools",
+        name="Android device tools",
+        summary="adb and fastboot, with the udev rules that let them see a phone",
+        category="Security research",
+        kind="apt",
+        packages=("adb", "fastboot", "android-sdk-platform-tools-common"),
+        add_groups=("plugdev",),
+        check=dpkg("adb", "fastboot"),
+        homepage="https://developer.android.com/tools/adb",
+        notes=(
+            "Your account joins the plugdev group, so a plugged-in phone answers without root. "
+            "Log out and in for that, turn on USB debugging on the phone, then: adb devices."
+        ),
+    ),
+    Entry(
+        id="android-image-tools",
+        name="Android image tools",
+        summary="Heimdall for flashing Samsung devices, abootimg and the sparse image tools",
+        category="Security research",
+        kind="apt",
+        packages=("heimdall-flash", "abootimg", "android-sdk-libsparse-utils"),
+        check=dpkg("heimdall-flash", "abootimg"),
+        homepage="https://www.debian.org/",
+        notes=(
+            "simg2img turns a sparse Android image into one a loop mount can read; abootimg "
+            "takes a boot image apart. " + AUTHORIZED_DEVICE
+        ),
+    ),
+    Entry(
+        id="ios-tools",
+        name="iOS device tools",
+        summary="libimobiledevice: read an iPhone or iPad, its logs, its backups and its apps",
+        category="Security research",
+        kind="apt",
+        packages=(
+            "libimobiledevice-utils", "ideviceinstaller", "libusbmuxd-tools", "usbmuxd",
+            "libplist-utils", "ifuse",
+        ),
+        check=dpkg("libimobiledevice-utils", "ideviceinstaller"),
+        homepage="https://libimobiledevice.org/",
+        notes=(
+            "Unlock the device and run idevicepair pair, and accept the prompt on it, before "
+            "the rest see anything. ifuse mounts what the device will share, iproxy forwards "
+            "a port over USB, and plistutil reads the binary plists that come back. "
+            + AUTHORIZED_DEVICE
+        ),
+    ),
+    Entry(
+        id="ios-recovery",
+        name="iOS recovery tools",
+        summary="idevicerestore and irecovery, for a device in recovery or DFU mode",
+        category="Security research",
+        kind="apt",
+        packages=("idevicerestore", "irecovery"),
+        check=dpkg("idevicerestore", "irecovery"),
+        homepage="https://libimobiledevice.org/",
+        notes="These write firmware, and a restore wipes the device it is pointed at.",
+    ),
+    Entry(
+        id="ipsw",
+        name="ipsw",
+        summary="Download Apple firmware and take it apart, dyld shared cache included",
+        category="Security research",
+        kind="github-deb",
+        github_repo="blacktop/ipsw",
+        asset_pattern=r"^ipsw_\d+\.\d+\.\d+_linux_x86_64\.deb$",
+        check=dpkg("ipsw"),
+        homepage="https://blacktop.github.io/ipsw/",
+        notes="Debian has no package for it, so this is the project's own .deb.",
+    ),
+    Entry(
+        id="debuggers",
+        name="Debuggers and tracers",
+        summary="gdb for any architecture, edb, ltrace and strace",
+        category="Security research",
+        kind="apt",
+        packages=("gdb", "gdb-multiarch", "edb-debugger", "ltrace", "strace"),
+        check=dpkg("gdb-multiarch", "edb-debugger"),
+        homepage="https://www.debian.org/",
+    ),
+    Entry(
+        id="binary-tools",
+        name="Binary inspection tools",
+        summary="binutils for any architecture, patchelf, checksec and YARA",
+        category="Security research",
+        kind="apt",
+        packages=("binutils-multiarch", "patchelf", "checksec", "yara"),
+        check=dpkg("binutils-multiarch", "yara"),
+        homepage="https://www.debian.org/",
+    ),
+    Entry(
+        id="pwntools",
+        name="pwntools",
+        summary="Exploit development toolkit, with the nasm assembler",
+        category="Security research",
+        kind="apt",
+        packages=("python3-pwntools", "nasm"),
+        check=dpkg("python3-pwntools"),
+        homepage="https://docs.pwntools.com/",
+    ),
+    Entry(
+        id="binwalk",
+        name="binwalk",
+        summary="Find and extract files embedded in a firmware image",
+        category="Security research",
+        kind="apt",
+        packages=("binwalk",),
+        check=dpkg("binwalk"),
+        homepage="https://github.com/ReFirmLabs/binwalk",
+    ),
+    Entry(
+        id="hex-editors",
+        name="Hex editors",
+        summary="Okteta and GHex for the desktop, hexedit for a terminal",
+        category="Security research",
+        kind="apt",
+        packages=("okteta", "ghex", "hexedit"),
+        check=dpkg("okteta", "ghex", "hexedit"),
+        homepage="https://www.debian.org/",
+    ),
+    Entry(
+        id="forensics-tools",
+        name="Forensics and recovery tools",
+        summary="The Sleuth Kit, Autopsy, TestDisk, foremost, ExifTool and steghide",
+        category="Security research",
+        kind="apt",
+        packages=(
+            "sleuthkit", "autopsy", "testdisk", "foremost", "libimage-exiftool-perl",
+            "steghide",
+        ),
+        check=dpkg("sleuthkit", "testdisk"),
+        homepage="https://www.sleuthkit.org/",
+        notes="Read a disk image rather than the disk this system is running from.",
+    ),
+    Entry(
+        id="audit-tools",
+        name="Host audit tools",
+        summary="Lynis, chkrootkit and rkhunter, which check the machine they run on",
+        category="Security research",
+        kind="apt",
+        packages=("lynis", "chkrootkit", "rkhunter"),
+        check=dpkg("lynis", "chkrootkit", "rkhunter"),
+        homepage="https://cisofy.com/lynis/",
+    ),
     # -- Networking --------------------------------------------------------
     Entry(
         id="qbittorrent",
@@ -581,6 +950,16 @@ ENTRIES: tuple[Entry, ...] = (
         homepage="https://www.debian.org/",
     ),
     Entry(
+        id="java",
+        name="Java",
+        summary="Debian's default JDK, which Ghidra and jadx run on",
+        category="Development",
+        kind="apt",
+        packages=("default-jdk",),
+        check=dpkg("default-jdk"),
+        homepage="https://openjdk.org/",
+    ),
+    Entry(
         id="php",
         name="PHP development tools",
         summary="PHP command line, common extensions and ImageMagick",
@@ -590,30 +969,6 @@ ENTRIES: tuple[Entry, ...] = (
         check=dpkg("php-cli"),
         homepage="https://www.php.net/",
         notes="Installs Debian's supported PHP version and the common web-development extensions.",
-    ),
-    Entry(
-        id="jd-gui",
-        name="JD-GUI",
-        summary="Browse and decompile Java class files",
-        category="Development",
-        kind="github-deb",
-        github_repo="java-decompiler/jd-gui",
-        asset_pattern=r"^jd-gui-\d+\.\d+\.\d+\.deb$",
-        check=dpkg("jd-gui"),
-        homepage="https://java-decompiler.github.io/",
-    ),
-    Entry(
-        id="ghidra",
-        name="Ghidra",
-        summary="Software reverse engineering suite",
-        category="Development",
-        kind="github-zip-opt",
-        github_repo="NationalSecurityAgency/ghidra",
-        asset_pattern=r"^ghidra_.*_PUBLIC_.*\.zip$",
-        opt_dir="/opt/ghidra",
-        launcher="ghidraRun",
-        check=path("/opt/ghidra/ghidraRun"),
-        homepage="https://ghidra-sre.org/",
     ),
     # -- AI tools ----------------------------------------------------------
     Entry(

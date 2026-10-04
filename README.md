@@ -138,6 +138,14 @@ comes from, because they are not all the same kind of thing: Debian's archive, t
 repository, a `.deb` the vendor publishes, a tarball unpacked into `/opt`, or an installer that
 runs as you, under your own home directory.
 
+Security work has a page of its own: Nmap, Metasploit, sqlmap, the web and password tools,
+tcpdump and tshark, bettercap, the wireless and forensics sets, and, for reversing, Ghidra,
+radare2, JD-GUI, the debuggers and pwntools. Phones are there too: adb and fastboot with the
+udev rules that make a plugged-in Android answer, Apktool, jadx and the APK rebuilding tools,
+and on the Apple side libimobiledevice, the recovery tools and `ipsw` for taking firmware
+apart. The entries that reach across a network say on the page that they are for machines you
+own or have permission to test.
+
 Drivers are not in it: they have their own app, below, and searching Software for one points
 there.
 
