@@ -176,6 +176,30 @@ NoDisplay=true
 OnlyShowIn=XFCE;
 """
 
+# The same screen-lock answer for the lite session, whose swayidle reads it at
+# each login. Plain keys, because it is read by a shell script.
+SCREEN_LOCK_CONFIG = Path("/etc/portlin/screen-lock.conf")
+
+# Which desktop the login screen starts. Both are installed: the lite session's
+# packages are on every stick with a desktop, because first boot has no network
+# to fetch them with. Choosing one sets LightDM's default and its autologin
+# session; the login screen still lists both, so the other is one click away.
+LITE_SESSION = "portlin-lite"
+LITE_SESSION_ENTRY = Path(f"/usr/share/wayland-sessions/{LITE_SESSION}.desktop")
+LABWC = "/usr/bin/labwc"
+SESSION_CONFIG = Path("/etc/lightdm/lightdm.conf.d/20-portlin-session.conf")
+DESKTOPS = [
+    ("xfce", "Xfce"),
+    ("lite", "Lite (labwc)"),
+]
+DESKTOP_HELP = {
+    "xfce": "The full desktop: a settings app for everything, desktop icons and the "
+            "Caffeine cup. Switch at the login screen any time.",
+    "lite": "labwc, a light Wayland session: the same panel readout and apps, more memory "
+            "left for them. Fewer settings and no Caffeine cup. For older machines. "
+            "Switch at the login screen any time.",
+}
+
 # An owner's "if found" note. Shown on the boot menu, which every stick draws,
 # and printed by the initramfs above the passphrase prompt, which is the only
 # screen a finder of an encrypted stick ever gets to.
@@ -302,6 +326,11 @@ ICON_THEME_TARGETS = {
     ),
     "/etc/lightdm/lightdm-gtk-greeter.conf.d/50-portlin.conf": (
         r"(?m)^(icon-theme-name=).*$",
+        r"\g<1>{theme}",
+    ),
+    # The lite session's applications menu, which reads no GTK setting.
+    "/etc/xdg/xdg-portlin/fuzzel/fuzzel.ini": (
+        r"(?m)^(icon-theme=).*$",
         r"\g<1>{theme}",
     ),
 }
@@ -1446,6 +1475,8 @@ class State:
         self.password: str | None = None
         self.luks_device: str | None = None
         self.has_desktop = False
+        self.has_lite = False
+        self.desktop = "xfce"
         self.autologin: bool | None = None
         self.sudo_password: bool | None = None
         self.lock_minutes = 10
@@ -2207,6 +2238,9 @@ def step_appearance(state: State):
     # A migrated theme is applied by the tool; asking here would override it.
     migrated = "extras.theme" in state.migrated_ids
     rows = []
+    if state.has_lite:
+        rows.append(Row("desktop", "Desktop", DESKTOPS, state.desktop,
+                        help=lambda v: DESKTOP_HELP[v["desktop"]]))
     if not migrated:
         rows += [
             Row("theme", "Theme", [(name, name) for name, _ in THEMES], state.theme or THEMES[0][0],
@@ -2224,7 +2258,8 @@ def step_appearance(state: State):
             "2": "Always 200%. Everything is very large on ordinary screens.",
         }[v["scale"]],
     ))
-    values = ui.settings("Appearance", "How the desktop looks.", rows)
+    values = ui.settings("Appearance", "Which desktop, and how it looks.", rows)
+    state.desktop = values.get("desktop", "xfce")
     state.theme = values.get("theme", "")
     state.icon_theme = values.get("icon_theme", "")
     state.scale = values["scale"]
@@ -2502,7 +2537,8 @@ def summary_groups(state: State) -> list[tuple[str, str, str]]:
         security.append(f"if found: {state.found_message}")
     groups.append(("security", "Security", ", ".join(security)))
     if state.has_desktop:
-        appearance = [part for part in (state.theme, state.icon_theme) if part]
+        appearance = [dict(DESKTOPS)[state.desktop]] if state.has_lite else []
+        appearance += [part for part in (state.theme, state.icon_theme) if part]
         appearance.append({"auto": "automatic scale", "1": "100% scale", "2": "200% scale"}[state.scale])
         groups.append(("appearance", "Appearance", ", ".join(appearance)))
     drivers = ", ".join(DRIVER_LABELS.get(entry, entry) for entry in state.drivers) or "no drivers to install"
@@ -3004,6 +3040,32 @@ def apply_screen_lock(minutes: int, on_suspend: bool) -> None:
         lock=flag(minutes > 0 or on_suspend), suspend=flag(on_suspend),
     ))
     _write(XFCONF_DEFAULTS / "xfce4-power-manager.xml", POWER_MANAGER_XML.format(suspend=flag(on_suspend)))
+    _write(SCREEN_LOCK_CONFIG, f"minutes={minutes}\nsuspend={int(on_suspend)}\n")
+
+
+def _lite_installed() -> bool:
+    """Whether the lite session can start here: its entry and its compositor."""
+    return LITE_SESSION_ENTRY.exists() and Path(LABWC).exists()
+
+
+def apply_desktop(desktop: str) -> None:
+    """Make the chosen desktop the one the login screen starts.
+
+    Xfce is what LightDM picks with no setting at all, so choosing it removes
+    the file rather than naming it. autologin-session as well as user-session,
+    because an autologin never shows the greeter's session list and would
+    otherwise start whatever LightDM's own default is.
+    """
+    if desktop != "lite":
+        SESSION_CONFIG.unlink(missing_ok=True)
+        return
+    _write(SESSION_CONFIG, "\n".join([
+        "# Written by portlin-firstboot. The session the login screen starts by default.",
+        "[Seat:*]",
+        f"user-session={LITE_SESSION}",
+        f"autologin-session={LITE_SESSION}",
+        "",
+    ]))
 
 
 def _account_from_earlier_run() -> str | None:
@@ -3423,6 +3485,8 @@ def apply_all(state: State) -> None:
                 apply_icon_theme(state.icon_theme)
         if state.theme or state.icon_theme:
             task("Theme and icons", appearance)
+        if state.has_lite:
+            task("Desktop", lambda: apply_desktop(state.desktop))
         task("Display scale", lambda: apply_scale(state.scale), True)
         task("Screen lock", lambda: apply_screen_lock(state.lock_minutes, state.lock_on_suspend), True)
     task("Network", lambda: apply_network(state.wifi, state.mac), True)
@@ -3486,6 +3550,7 @@ def wizard() -> State:
     state.candidates = migration_candidates()
     state.luks_device = _luks_device()
     state.has_desktop = _desktop_installed()
+    state.has_lite = state.has_desktop and _lite_installed()
     steps = [step for step in STEPS if step[0] != "restore" or state.candidates]
     ui.sections = [(key, label) for key, label, _ in steps]
     keys = [key for key, _, _ in steps]

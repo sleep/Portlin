@@ -280,7 +280,7 @@ def nvidia_reading(state: dict, now: float) -> int | None:
     return value
 
 
-def main() -> int:
+def main(argv: list[str]) -> int:
     now = time.monotonic()
     boot = hostinfo.boot_id()
     path = state_path()
@@ -335,13 +335,20 @@ def main() -> int:
         "encrypted": topology.get("encrypted", False),
     }
 
-    print(f"<txt>{render_text(fields)}</txt>")
-    print(f"<tool>{render_tooltip(host, gpu, topology, unclaimed)}</tool>")
-    print(f"<txtclick>{CLICK_COMMAND}</txtclick>")
+    text = render_text(fields)
+    tooltip = render_tooltip(host, gpu, topology, unclaimed)
+    if "--waybar" in argv:
+        # The lite session's panel reads one JSON object per run instead of
+        # genmon's tags, and runs the click command from its own config.
+        print(json.dumps({"text": text, "tooltip": tooltip}))
+    else:
+        print(f"<txt>{text}</txt>")
+        print(f"<tool>{tooltip}</tool>")
+        print(f"<txtclick>{CLICK_COMMAND}</txtclick>")
 
     save_state(path, state)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

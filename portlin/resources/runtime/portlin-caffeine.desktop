@@ -13,3 +13,6 @@ StartupNotify=false
 # looks for a program to launch.
 Categories=Utility;X-Portlin;
 Keywords=caffeine;sleep;suspend;awake;insomnia;screensaver;blank;dpms;
+# An X tray icon that blanks through xset: the lite session's panel has no
+# X tray and its screen lock is swayidle, so there it would run and do nothing.
+NotShowIn=labwc;

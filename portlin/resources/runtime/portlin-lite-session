@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+#
+# Starts the lite session: labwc, with portlin's defaults, for machines where
+# Xfce is too heavy.
+#
+# The display manager starts a Wayland session without running
+# /etc/X11/Xsession.d, so the two portlin hooks the Xfce session gets from
+# there are sourced here: the overlay directory on XDG_CONFIG_DIRS, which is
+# where labwc finds portlin's rc.xml, and the cache in RAM.
+
+case ":${XDG_CONFIG_DIRS}:" in
+    *:/etc/xdg/xdg-portlin:*) ;;
+    *) [ -r /etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs ] &&
+           . /etc/X11/Xsession.d/40portlin-desktop_xdg-config-dirs ;;
+esac
+[ -r /etc/X11/Xsession.d/41portlin-cache ] && . /etc/X11/Xsession.d/41portlin-cache
+
+# X reads the console's keyboard layout from /etc/default/keyboard by itself;
+# a Wayland compositor only sees what libxkbcommon finds in the environment.
+# Read at every login, so a layout changed later with dpkg-reconfigure
+# keyboard-configuration applies here too. An empty variable is left unset
+# rather than exported empty, because an empty layout is not the default one.
+if [ -r /etc/default/keyboard ]; then
+    . /etc/default/keyboard
+    [ -n "$XKBMODEL" ] && export XKB_DEFAULT_MODEL="$XKBMODEL"
+    [ -n "$XKBLAYOUT" ] && export XKB_DEFAULT_LAYOUT="$XKBLAYOUT"
+    [ -n "$XKBVARIANT" ] && export XKB_DEFAULT_VARIANT="$XKBVARIANT"
+    [ -n "$XKBOPTIONS" ] && export XKB_DEFAULT_OPTIONS="$XKBOPTIONS"
+fi
+
+export XDG_CURRENT_DESKTOP=labwc:wlroots
+export XDG_SESSION_TYPE=wayland
+export MOZ_ENABLE_WAYLAND=1
+
+# GTK's settings, the panel's tray and every notification travel over the
+# session bus. The Xfce session starts one through Xsession; without
+# dbus-user-session nothing else would here.
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ ! -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; then
+    exec dbus-run-session -- labwc
+fi
+exec labwc

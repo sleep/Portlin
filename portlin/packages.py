@@ -236,6 +236,36 @@ DESKTOP = [
     "mate-polkit",
 ]
 
+# The lite session, which the first-boot wizard offers in place of Xfce on
+# machines with little memory: labwc for windows, waybar for the panel, fuzzel
+# for the applications menu, mako for notifications, swayidle and swaylock for
+# the screen lock. Xfce's own applications (Thunar, the terminal) run in it
+# unchanged. Installed on every stick that has the desktop, because first boot
+# has no network to fetch them with once someone picks it.
+LITE = [
+    "labwc",
+    # For the X11 programs the Software app installs. Everything portlin itself
+    # ships is GTK3 and runs on Wayland directly.
+    "xwayland",
+    "waybar",
+    "fuzzel",
+    "mako-notifier",
+    "swaybg",
+    "swayidle",
+    "swaylock",
+    # The lite session's display scaling reads and sets each screen with it.
+    "wlr-randr",
+    # Xfce's power manager answers the brightness keys in the full session;
+    # labwc hands them to this.
+    "brightnessctl",
+    # GTK on Wayland takes its theme from GSettings rather than settings.ini,
+    # so the session's autostart copies the chosen theme across with the
+    # gsettings tool, into dconf, against the schema that names the keys.
+    "libglib2.0-bin",
+    "dconf-gsettings-backend",
+    "gsettings-desktop-schemas",
+]
+
 AUDIO = [
     "pipewire-audio",
     "wireplumber",
@@ -302,6 +332,7 @@ GROUPS: dict[str, list[str]] = {
     "storage": STORAGE,
     "network": NETWORK,
     "desktop": DESKTOP,
+    "lite": LITE,
     "audio": AUDIO,
     "fonts": FONTS,
     "apps": APPS,

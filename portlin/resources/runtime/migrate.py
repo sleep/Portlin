@@ -1122,6 +1122,10 @@ ICON_THEME_TARGETS = {
         r"(?m)^(icon-theme-name=).*$",
         r"\g<1>{theme}",
     ),
+    "/etc/xdg/xdg-portlin/fuzzel/fuzzel.ini": (
+        r"(?m)^(icon-theme=).*$",
+        r"\g<1>{theme}",
+    ),
 }
 
 

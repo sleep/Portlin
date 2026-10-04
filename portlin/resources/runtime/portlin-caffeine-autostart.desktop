@@ -12,3 +12,4 @@ StartupNotify=false
 # not want a cup in their panel can untick it. Deliberately not NoDisplay:
 # a background program nobody can find the switch for is the worse default.
 X-GNOME-Autostart-enabled=true
+NotShowIn=labwc;

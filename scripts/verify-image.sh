@@ -344,6 +344,33 @@ test -x "$MNT/usr/bin/curl" \
     && pass "curl is installed for the installer's downloads" \
     || fail "curl is missing (nothing the installer downloads can be fetched)"
 
+# The lite session the first-boot wizard offers. Probed on labwc for the same
+# reason the block below probes on startxfce4: a stick built without the lite
+# group is meant to lack it, and the greeter hides the entry there by TryExec.
+if test -x "$MNT/usr/bin/labwc"; then
+    test -f "$MNT/usr/share/wayland-sessions/portlin-lite.desktop" \
+        && pass "the lite session is listed for the login screen" \
+        || fail "portlin-lite.desktop is missing (the wizard can offer a session nothing starts)"
+
+    test -x "$MNT/usr/bin/portlin-lite-session" \
+        && pass "portlin-lite-session is executable" \
+        || fail "portlin-lite-session is missing or not executable (choosing lite returns to the greeter)"
+
+    test -f "$MNT/etc/xdg/xdg-portlin/labwc/rc.xml" \
+        && pass "labwc's configuration is in the xdg directory portlin owns" \
+        || fail "labwc's rc.xml is missing from /etc/xdg/xdg-portlin"
+
+    # Each of these is started by name from the autostart, which runs on
+    # regardless when one is missing: no panel, no lock, no password prompt.
+    for PROGRAM in usr/bin/waybar usr/bin/fuzzel usr/bin/mako usr/bin/swaybg \
+        usr/bin/swayidle usr/bin/swaylock usr/bin/wlr-randr usr/bin/gsettings \
+        usr/libexec/polkit-mate-authentication-agent-1; do
+        test -x "$MNT/$PROGRAM" \
+            && pass "the lite session has /$PROGRAM" \
+            || fail "/$PROGRAM is missing (the lite session's autostart starts it)"
+    done
+fi
+
 # portlin-desktop carries the theme and the wallpapers, and write installs it only
 # when the rootfs actually has a desktop. Probing the same way install.py does,
 # rather than asserting unconditionally, keeps a --minimal image from failing a
