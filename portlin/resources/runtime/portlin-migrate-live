@@ -26,6 +26,25 @@ if [ -r /etc/default/keyboard ] && command -v setxkbmap >/dev/null 2>&1; then
     setxkbmap "$@" >/dev/null 2>&1
 fi
 
+# The scale the desktop would pick for this screen at login, by the same rule
+# as portlin-display-scale. That one sets it through the settings daemon, and
+# nothing runs one here, so GTK is told through its environment instead.
+if command -v xrandr >/dev/null 2>&1; then
+    # Width in pixels and millimetres of the first connected screen.
+    # Projectors and virtual machines report 0 mm, which keeps 1x.
+    set -- $(xrandr --query 2>/dev/null | awk '/ connected/ {
+        w = 0
+        for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+/) { split($i, p, /[x+]/); w = p[1] }
+        mm = $(NF - 2); sub(/mm$/, "", mm)
+        if (w > 0 && mm + 0 > 0) { print w, mm + 0; exit }
+    }')
+    if [ -n "$1" ] && [ "$1" -ge 2560 ]; then
+        # About 180 pixels per inch is where 1x text stops being readable.
+        ppi=$(( $1 * 254 / ($2 * 10) ))
+        [ "$ppi" -ge 180 ] && export GDK_SCALE=2
+    fi
+fi
+
 command -v xsetroot >/dev/null 2>&1 && xsetroot -solid '#12161C' >/dev/null 2>&1
 
 # GApplication registers on a session bus, and nothing has started one.

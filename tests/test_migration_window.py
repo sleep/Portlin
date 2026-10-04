@@ -422,6 +422,32 @@ class TestLiveSession:
         text = self.SCRIPT.read_text()
         assert f"{window_path()} --live" in text
 
+    @pytest.mark.parametrize("xrandr, expected", [
+        ("eDP-1 connected primary 3840x2160+0+0 (normal) 344mm x 194mm", "2"),
+        ("HDMI-1 connected 2560x1440+0+0 (normal) 597mm x 336mm", ""),
+        ("eDP-1 connected 1920x1080+0+0 (normal) 344mm x 194mm", ""),
+        ("Virtual-1 connected 3840x2160+0+0 (normal) 0mm x 0mm", ""),
+    ])
+    def test_it_scales_the_window_for_a_dense_screen(self, tmp_path, xrandr, expected):
+        import os
+        import subprocess
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "xrandr").write_text(f"#!/bin/sh\ncat <<'EOF'\n{xrandr}\nEOF\n")
+        (bin_dir / "portlin-migration").write_text(f'#!/bin/sh\nprintf %s "$GDK_SCALE" > {tmp_path}/scale\n')
+        # No session bus, keyboard or root window to set in a test.
+        (bin_dir / "dbus-run-session").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        for name in ("setxkbmap", "xsetroot"):
+            (bin_dir / name).write_text("#!/bin/sh\n")
+        for tool in bin_dir.iterdir():
+            tool.chmod(0o755)
+        script = tmp_path / "live"
+        script.write_text(self.SCRIPT.read_text().replace(window_path(), str(bin_dir / "portlin-migration")))
+        env = {k: v for k, v in os.environ.items() if k != "GDK_SCALE"}
+        subprocess.run(["sh", str(script)], env={**env, "PATH": f"{bin_dir}:{env['PATH']}"}, check=True)
+        assert (tmp_path / "scale").read_text() == expected
+
     def test_setup_and_the_window_agree_on_where_the_result_goes(self, window):
         from test_firstboot import load_wizard
 
