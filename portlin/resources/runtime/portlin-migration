@@ -208,7 +208,7 @@ def candidates_argv(*, passwordless_sudo: bool) -> list[str]:
 def inventory_argv(source: str, *, passwordless_sudo: bool, firstboot: bool = False) -> list[str]:
     """--firstboot leaves software unticked: during setup there may be no
     network yet to install it with."""
-    return [*elevation_argv(passwordless_sudo), TOOL, "inventory", source, "--json",
+    return [*elevation_argv(passwordless_sudo), TOOL, "inventory", source, "--json", "--progress",
             *(["--firstboot"] if firstboot else [])]
 
 
@@ -1036,6 +1036,10 @@ class MigrationWindow(Gtk.ApplicationWindow):
         loading.pack_start(self.source_spinner, False, False, 0)
         self.loading_text = _label("Looking for portlin drives and backups...", "muted", xalign=0.5)
         loading.pack_start(self.loading_text, False, False, 0)
+        # What the tool says it is reading right now: sizing a full home
+        # folder takes minutes, and a spinner alone looks stuck.
+        self.loading_detail = _ellipsize(_label("", "muted", xalign=0.5))
+        loading.pack_start(self.loading_detail, False, False, 0)
         self.source_state.add_named(loading, "loading")
 
         self.sources = Gtk.ListBox()
@@ -1275,6 +1279,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
     def _set_source_state(self, name: str) -> None:
         self.source_state.set_visible_child_name(name)
         if name == "loading":
+            self.loading_detail.set_text("")
             self.source_spinner.start()
         else:
             self.source_spinner.stop()
@@ -1788,6 +1793,9 @@ class MigrationWindow(Gtk.ApplicationWindow):
                 self.result_text = rest[len("paused"):].strip()
             elif rest.startswith("failed"):
                 self.last_failure = rest[len("failed"):].strip()
+            return
+        if kind == "scan":
+            self.loading_detail.set_text(rest)
             return
         if kind == "warn":
             self._append(f"warning: {rest}")

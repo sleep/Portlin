@@ -6,7 +6,8 @@
 """portlin-migrate: bring another portlin's files and settings onto this one.
 
     portlin-migrate candidates [--json]        portlin drives and archives in reach
-    portlin-migrate inventory SOURCE [--json]  what SOURCE holds, by item, with sizes
+    portlin-migrate inventory SOURCE [--json] [--progress]
+                                               what SOURCE holds, by item, with sizes
     portlin-migrate plan [SOURCE] --out FILE   choose on the console, write a plan
     portlin-migrate apply --plan FILE          copy what the plan selects
     portlin-migrate export FILE                this stick, everything, to an archive
@@ -42,6 +43,11 @@ resumes: rsync skips what is already here, and the plan finds the drive by
 its UUID even if it comes back under another device name.
 
 Everything else is rsync, tar and apt talking, passed through for the log.
+
+inventory --progress says what it is reading while it reads, in the same
+form, ahead of the answer:
+
+    ::scan <text>            what is being opened, read or measured now
 """
 
 from __future__ import annotations
@@ -150,6 +156,8 @@ SHELLS = Path("/etc/shells")
 
 # cryptsetup's exit status for a passphrase that does not open the device.
 WRONG_PASSPHRASE = 2
+# Seconds between the running counts inventory --progress prints.
+SCAN_EVERY = 0.2
 PASSPHRASE_TRIES = 3
 
 
@@ -242,6 +250,27 @@ def format_event(kind: str, *parts: str) -> str:
 def emit(kind: str, *parts: str, out=None) -> None:
     out = out or sys.stdout
     print(format_event(kind, *parts), file=out, flush=True)
+
+
+def scan_watch(report: Callable[[str], None], clock=time.monotonic) -> Callable[[str, int], None]:
+    """build_inventory's watch, as lines for ``report``: each entry by name
+    when it starts, then its running count no more often than SCAN_EVERY.
+
+    The name is whatever the old drive calls the entry, so anything that
+    is not printable is replaced: a newline in it would otherwise start a
+    line of its own in the protocol, saying whatever the name says."""
+    last = float("-inf")
+
+    def watch(name: str, seen: int) -> None:
+        nonlocal last
+        now = clock()
+        if seen and now - last < SCAN_EVERY:
+            return
+        last = now
+        shown = "".join(char if char.isprintable() else "?" for char in name)
+        report(f"Measuring {shown}" + (f" · {seen:,} items" if seen else ""))
+
+    return watch
 
 
 def log(message: str) -> None:
@@ -388,21 +417,28 @@ def close_source(run=subprocess.run) -> None:
         pass
 
 
-def source_inventory(source: Source, *, firstboot: bool, run=subprocess.run) -> Inventory:
+def source_inventory(source: Source, *, firstboot: bool, run=subprocess.run,
+                     report: Callable[[str], None] | None = None) -> Inventory:
+    """``report`` hears, in a line each, what is being read as it is read."""
+    report = report or (lambda text: None)
     if source.kind == "archive":
+        report("Reading the backup's list of contents")
         proc = run(list(tar_manifest_argv(Path(source.path))), capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             raise SourceError(f"{source.path} has no manifest: {proc.stderr.strip()}")
         inventory, _ = read_manifest(proc.stdout)
+        report("Listing the files in the backup")
         listing = run(list(tar_list_argv(Path(source.path))), capture_output=True, text=True, check=False)
         source.listing = listing.stdout
         return without_local_packages(inventory)
+    report("Reading its account and settings")
     try:
         status = (source.root / DPKG_STATUS).read_text()
     except OSError:
         status = ""
     return without_local_packages(
-        build_inventory(source.root, dpkg_status=dpkg_status_lines(status), firstboot=firstboot)
+        build_inventory(source.root, dpkg_status=dpkg_status_lines(status), firstboot=firstboot,
+                        watch=scan_watch(report))
     )
 
 
@@ -1045,9 +1081,11 @@ def cmd_candidates(args) -> int:
 
 
 def cmd_inventory(args) -> int:
+    report = (lambda text: emit("scan", text)) if args.progress else (lambda text: None)
+    report("Opening it")
     source = open_source(resolve_source_path(args.source), passphrase=passphrase_from_stdin)
     try:
-        inventory = source_inventory(source, firstboot=args.firstboot)
+        inventory = source_inventory(source, firstboot=args.firstboot, report=report)
     finally:
         if source.kind == "stick":
             close_source()
@@ -1321,6 +1359,7 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument("source", nargs="?")
     inventory.add_argument("--json", action="store_true")
     inventory.add_argument("--firstboot", action="store_true")
+    inventory.add_argument("--progress", action="store_true", help="print ::scan lines while reading")
     apply = verbs.add_parser("apply")
     apply.add_argument("--plan", required=True)
     apply.add_argument("--gauge", action="store_true", help="draw a whiptail gauge instead of printing")

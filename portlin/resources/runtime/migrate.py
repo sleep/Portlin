@@ -464,20 +464,29 @@ def category_label(category: str) -> str:
     return dict(CATEGORIES).get(category, category)
 
 
-def tree_size(path: Path) -> int:
-    """Bytes under a path, links counted as themselves and never followed."""
+def tree_size(path: Path, tick: Callable[[int], None] | None = None) -> int:
+    """Bytes under a path, links counted as themselves and never followed.
+
+    ``tick`` hears how many entries have been counted so far, once per
+    directory: a big tree on a slow drive takes minutes, and whoever is
+    waiting should see it move.
+    """
     try:
         if path.is_symlink() or not path.is_dir():
             return path.lstat().st_size
     except OSError:
         return 0
     total = 0
+    seen = 0
     for dirpath, dirnames, filenames in os.walk(path):
         for name in filenames + dirnames:
             try:
                 total += os.lstat(os.path.join(dirpath, name)).st_size
             except OSError:
                 continue
+        seen += len(filenames) + len(dirnames)
+        if tick is not None:
+            tick(seen)
     return total
 
 
@@ -488,7 +497,7 @@ def read_theme_names(root: Path) -> dict[str, str]:
     return names
 
 
-def _home_items(root: Path, home: str) -> list[Item]:
+def _home_items(root: Path, home: str, watch: Callable[[str, int], None] | None = None) -> list[Item]:
     try:
         # Plain entries before dot entries, so the items come out in the
         # order the categories are shown.
@@ -501,12 +510,16 @@ def _home_items(root: Path, home: str) -> list[Item]:
             continue
         hidden = entry.name.startswith(".")
         category = "home.settings" if hidden else "home.files"
+        tick = None
+        if watch is not None:
+            watch(entry.name, 0)
+            tick = lambda seen, name=entry.name: watch(name, seen)
         items.append(
             Item(
                 id=f"{category}.{entry.name}",
                 category=category,
                 label=entry.name,
-                bytes=tree_size(entry),
+                bytes=tree_size(entry, tick),
                 default=entry.name not in UNTICKED_SETTINGS,
                 paths=(f"{home}/{entry.name}",),
             )
@@ -826,8 +839,14 @@ def _system_items(root: Path) -> list[Item]:
     return items
 
 
-def build_inventory(root: Path, *, entries=None, dpkg_status: str = "", firstboot: bool = False) -> Inventory:
-    """Everything a source has to offer, in the order the checklist shows it."""
+def build_inventory(root: Path, *, entries=None, dpkg_status: str = "", firstboot: bool = False,
+                    watch: Callable[[str, int], None] | None = None) -> Inventory:
+    """Everything a source has to offer, in the order the checklist shows it.
+
+    Sizing the home folder is nearly all of the time this takes. ``watch``
+    hears each of its entries by name as it is measured, with a running
+    count of what has been counted inside it.
+    """
     entries = ENTRIES if entries is None else entries
     accounts = read_accounts(root)
     identity = read_identity(root)
@@ -842,7 +861,7 @@ def build_inventory(root: Path, *, entries=None, dpkg_status: str = "", firstboo
         if value:
             items.append(Item(f"identity.{key}", "identity", f"{label}: {value}", value=value))
     if home:
-        items += _home_items(root, home)
+        items += _home_items(root, home, watch)
     items += _software_items(root, home, entries, dpkg_status, firstboot)
     items += _repo_items(root, entries)
     items += _package_items(root, entries, firstboot)
