@@ -340,6 +340,14 @@ class TestInventory:
         populate_home(home)
         return tmp_path
 
+    def test_watch_hears_each_home_entry_and_a_running_count(self, migrate, source):
+        heard = []
+        migrate.build_inventory(source, watch=lambda name, seen: heard.append((name, seen)))
+        names = [name for name, seen in heard if seen == 0]
+        assert names == ["Documents", "Downloads", "link-to-docs", ".bashrc", ".cache", ".config"]
+        assert ("Documents", 1) in heard
+        assert ".portlin-migrate-backup" not in names
+
     def test_home_entries_split_into_files_and_settings(self, migrate, source):
         inventory = migrate.build_inventory(source)
         by_id = {item.id: item for item in inventory.items}

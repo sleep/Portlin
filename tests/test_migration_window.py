@@ -50,7 +50,7 @@ class TestCommandLines:
     def test_everything_goes_through_the_one_tool_as_root(self, window):
         assert window.candidates_argv(passwordless_sudo=False) == ["pkexec", window.TOOL, "candidates", "--json"]
         assert window.inventory_argv("/dev/sdb4", passwordless_sudo=False) == [
-            "pkexec", window.TOOL, "inventory", "/dev/sdb4", "--json",
+            "pkexec", window.TOOL, "inventory", "/dev/sdb4", "--json", "--progress",
         ]
         assert window.apply_argv("/home/x/.cache/portlin/migrate-plan.json", passwordless_sudo=True) == [
             "sudo", "-n", window.TOOL, "apply", "--plan", "/home/x/.cache/portlin/migrate-plan.json",

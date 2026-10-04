@@ -495,6 +495,24 @@ class TestChecklist:
         assert "moved aside" in text
 
 
+class TestScanWatch:
+    def test_names_come_at_once_and_counts_no_faster_than_the_interval(self, tool):
+        now = [0.0]
+        lines = []
+        watch = tool.scan_watch(lines.append, clock=lambda: now[0])
+        watch("Documents", 0)
+        watch("Documents", 40)
+        now[0] += tool.SCAN_EVERY
+        watch("Documents", 12000)
+        watch("Downloads", 0)
+        assert lines == ["Measuring Documents", "Measuring Documents · 12,000 items", "Measuring Downloads"]
+
+    def test_a_name_cannot_start_a_protocol_line_of_its_own(self, tool):
+        lines = []
+        tool.scan_watch(lines.append)("x\n::result ok", 0)
+        assert lines == ["Measuring x?::result ok"]
+
+
 class TestNarrow:
     def test_only_and_skip_take_ids_or_categories(self, tool, migrate, tmp_path):
         from test_migrate import make_source, populate_home
