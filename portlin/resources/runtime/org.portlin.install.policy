@@ -2,7 +2,7 @@
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <!--
-Part of portlin. Lets the Software app run portlin-install as root.
+Part of portlin. Lets the Software and Drivers apps run portlin-install as root.
 
 The exec.path annotation is what makes this narrow: it names one program,
 so the right this grants is to run that program as root and nothing else.

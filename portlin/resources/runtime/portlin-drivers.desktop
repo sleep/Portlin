@@ -1,0 +1,16 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Drivers
+GenericName=Hardware Drivers
+Comment=See this machine's graphics and wifi hardware, and install the drivers that fit it
+Exec=portlin-drivers
+Icon=portlin
+Terminal=false
+StartupNotify=true
+# X-Portlin files it with portlin's own tools in the menu. System and
+# HardwareSettings are the registered categories the menu specification
+# offers for a program that sets up hardware, so menus that do not know
+# X-Portlin still put it somewhere sensible.
+Categories=X-Portlin;System;HardwareSettings;
+Keywords=drivers;driver;nvidia;amd;intel;graphics;gpu;vulkan;wifi;broadcom;printer;hardware;

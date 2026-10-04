@@ -1,0 +1,1058 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Drivers: see what this machine has, and install the drivers that fit it.
+
+A stick travels between machines, so this window is a report on the machine
+the stick is plugged into right now rather than a list of packages. It knows
+nothing about drivers itself. Everything comes from portlin-install, started
+as a child process:
+
+    portlin-install scan --json                     what hardware is here, what fits it
+    portlin-install list --json --category Drivers  every driver entry, and whether it is installed
+    portlin-install install|remove <ids>            through pkexec, read as the line protocol
+
+So the window is a reader of JSON and of the `::step` / `::progress` /
+`::warn` / `::reboot` / `::result` lines, the program that can be asked to
+act as root stays one command with a fixed set of verbs, and first boot,
+Software and this window cannot disagree about what a machine needs.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+from dataclasses import dataclass, field
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+APP_ID = "org.portlin.Drivers"
+INSTALLER = "/usr/bin/portlin-install"
+ICON_NAME = "portlin"
+CATEGORY = "Drivers"
+
+# The scan runs lspci and, on an NVIDIA machine, nvidia-detect: seconds, not
+# minutes. Anything still running after this is stuck, and a window that
+# says "Looking at this machine..." forever is worse than one that says the
+# scan did not answer.
+LOOKUP_TIMEOUT = 90
+# While offline, how often to ask NetworkManager again, so plugging in a
+# cable or joining wifi from the panel unlocks the buttons without a click.
+NETWORK_POLL = 5
+
+# Exit codes portlin-install and pkexec use, by what they mean here.
+EXIT_OK = 0
+EXIT_PRIVILEGE = 3
+PKEXEC_REFUSED = 126
+PKEXEC_NO_AGENT = 127
+
+# The same names and explanations first boot's hardware step uses, so the
+# entry someone skipped during setup is recognisably the one offered here.
+DRIVER_LABELS = {
+    "nvidia-driver": "NVIDIA driver",
+    "intel-graphics": "Intel video acceleration",
+    "amd-graphics": "AMD video acceleration",
+    "broadcom-wifi": "Broadcom Wi-Fi driver",
+    "printing": "Printing and scanning",
+}
+DRIVER_HELP = {
+    "nvidia-driver": "NVIDIA's own driver, chosen for this card. A large download, built on this "
+                     "stick, and it needs a restart. Without it the open nouveau driver runs the screen.",
+    "intel-graphics": "Hardware video decoding and Vulkan for Intel graphics. A small download.",
+    "amd-graphics": "Hardware video decoding and Vulkan for AMD graphics. A small download.",
+    "broadcom-wifi": "Only for Broadcom chips the built-in driver does not handle. Skip it if Wi-Fi works.",
+    "printing": "The print system, drivers for most printers, and a scanning app.",
+}
+
+# What apt and curl print when there is no route to the archive. Matched in
+# the job's output so a failure caused by a dropped network says so, rather
+# than pointing at a log full of resolver errors.
+NETWORK_FAILURES = (
+    "Temporary failure resolving",
+    "Could not resolve",
+    "Network is unreachable",
+    "No route to host",
+    "Connection timed out",
+    "Could not connect to",
+    "Failed to fetch",
+)
+
+# The brand palette (docs/brand), plus the terminal palette's green, blue and
+# amber for installed, suggested and needs attention. The accent is reserved
+# for encryption, so nothing here uses it.
+INK = "#12161C"
+PANEL = "#1A212B"
+LINE = "#2C3542"
+MUTED = "#7C8B9E"
+PAPER = "#E8EDF3"
+GREEN = "#4FBF8B"
+BLUE = "#5AA9E6"
+AMBER = "#D8A657"
+
+CSS = f"""
+.drivers, .drivers .page, .drivers viewport {{ background-color: {INK}; color: {PAPER}; }}
+.drivers headerbar {{
+    background-image: none; background-color: {INK};
+    border-bottom: 1px solid {LINE}; box-shadow: none;
+}}
+.drivers headerbar .title {{ color: {PAPER}; font-weight: bold; }}
+.drivers headerbar .subtitle {{ color: {MUTED}; }}
+.drivers .hero-title {{ font-size: 19pt; font-weight: 300; color: {PAPER}; }}
+.drivers .hero-sub {{ color: {MUTED}; }}
+.drivers .section {{ font-size: 9pt; font-weight: bold; color: {MUTED}; }}
+.drivers .muted {{ color: {MUTED}; }}
+.drivers .small {{ font-size: 9pt; }}
+.drivers .amber {{ color: {AMBER}; }}
+.drivers .green {{ color: {GREEN}; }}
+.drivers .card-title {{ font-weight: bold; color: {PAPER}; }}
+.drivers .mono {{ font-family: "DejaVu Sans Mono", Menlo, monospace; }}
+.drivers .card {{
+    background-color: {PANEL}; border: 1px solid {LINE}; border-radius: 10px;
+    padding: 12px 14px;
+}}
+.drivers .card.warn {{ border-color: alpha({AMBER}, 0.6); }}
+.drivers .card.good {{ border-color: alpha({GREEN}, 0.6); }}
+.drivers .badge {{
+    border-radius: 99px; padding: 1px 9px; font-size: 8pt; font-weight: bold;
+    background-color: alpha({MUTED}, 0.16); color: {MUTED};
+}}
+.drivers .badge.green {{ background-color: alpha({GREEN}, 0.16); color: {GREEN}; }}
+.drivers .badge.blue {{ background-color: alpha({BLUE}, 0.16); color: {BLUE}; }}
+.drivers list, .drivers list row {{ background-color: transparent; }}
+.drivers list row {{ padding: 0; margin: 0 0 8px 0; outline: none; }}
+.drivers list row:hover {{ background-color: transparent; }}
+.drivers scrolledwindow overshoot, .drivers scrolledwindow undershoot {{
+    background-image: none; background-color: transparent; box-shadow: none;
+}}
+.drivers textview.log, .drivers textview.log text {{
+    background-color: #0D1116; color: #A9B6C6; font-size: 9pt;
+}}
+.drivers expander title {{ color: {MUTED}; }}
+.drivers button {{ border-radius: 8px; padding: 6px 14px; }}
+.drivers button.suggested-action {{
+    background-image: none; background-color: {BLUE}; color: {INK};
+    border-color: {BLUE}; font-weight: bold; box-shadow: none; text-shadow: none;
+}}
+.drivers button.suggested-action:hover {{ background-color: #74B8EC; }}
+.drivers button.suggested-action:disabled {{ background-color: {LINE}; color: {MUTED}; border-color: {LINE}; }}
+.drivers progressbar trough {{ min-height: 10px; border-radius: 5px; background-color: {PANEL}; border-color: {LINE}; }}
+.drivers progressbar progress {{ min-height: 10px; border-radius: 5px; background-image: none; background-color: {BLUE}; border: none; }}
+"""
+
+
+# -- command lines -------------------------------------------------------------
+
+
+def elevation_argv(passwordless_sudo: bool) -> list[str]:
+    """As in Software: pkexec draws a password dialog; someone who waived the
+    sudo password at first boot has said they do not want one, and `sudo -n`
+    fails rather than prompting."""
+    return ["sudo", "-n"] if passwordless_sudo else ["pkexec"]
+
+
+def scan_argv() -> list[str]:
+    return [INSTALLER, "scan", "--json"]
+
+
+def list_argv() -> list[str]:
+    return [INSTALLER, "list", "--json", "--category", CATEGORY]
+
+
+def action_argv(action: str, ids: list[str], *, privileged: bool, passwordless_sudo: bool) -> list[str]:
+    """One install or remove. Removal takes one id at a time, as the tool does.
+
+    Unprivileged entries are run as the user, because portlin-install refuses
+    to put them in a home directory as root. Every driver today is privileged;
+    honouring the flag the tool reports keeps that its decision, not this
+    window's.
+    """
+    if action == "remove" and len(ids) != 1:
+        raise ValueError("portlin-install removes one entry at a time")
+    prefix = elevation_argv(passwordless_sudo) if privileged else []
+    return [*prefix, INSTALLER, action, *ids]
+
+
+def installer_present(path: str = INSTALLER) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def has_passwordless_sudo(run=subprocess.run) -> bool:
+    """Whether sudo acts for this account without asking. -n means it never
+    prompts, and anything unexpected is a no, which only costs a dialog."""
+    try:
+        return run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL,
+                   capture_output=True, timeout=3).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# -- reading what the tool says ------------------------------------------------
+
+
+def parse_event(line: str) -> tuple[str, str] | None:
+    """One `::` line as (kind, rest), or None for ordinary tool output."""
+    if not line.startswith("::"):
+        return None
+    kind, _, rest = line[2:].partition(" ")
+    return kind, rest.strip()
+
+
+def _load_json(text: str):
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def parse_scan(text: str) -> dict | None:
+    """`scan --json`, with every field checked, or None if it is not a report.
+
+    Checked rather than trusted because the window and the tool are upgraded
+    separately, and a missing key should cost a line of the report rather
+    than the whole window.
+    """
+    report = _load_json(text)
+    if not isinstance(report, dict):
+        return None
+
+    def dicts(key: str) -> list[dict]:
+        value = report.get(key)
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    notes = report.get("notes")
+    return {
+        "gpus": dicts("gpus"),
+        "wifi": dicts("wifi"),
+        "suggestions": [s for s in dicts("suggestions") if isinstance(s.get("entry"), str)],
+        "notes": [n for n in notes if isinstance(n, str)] if isinstance(notes, list) else [],
+    }
+
+
+def parse_entries(text: str) -> list[dict] | None:
+    """`list --json`: the catalog entries, or None if it is not a list of them."""
+    entries = _load_json(text)
+    if not isinstance(entries, list):
+        return None
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def device_name(device: dict) -> str:
+    """A card the PCI ID database does not know is named just "Device", which
+    says nothing; its vendor and device numbers at least identify it."""
+    name = str(device.get("name") or "")
+    if name in ("", "Device"):
+        return f"Unnamed device [{device.get('id', '?')}]"
+    return name
+
+
+def hardware_lines(scan: dict) -> list[tuple[str, str]]:
+    """The "This machine" card, as (what, name) pairs."""
+    lines = [("Graphics", device_name(gpu)) for gpu in scan.get("gpus", [])]
+    lines += [("Wi-Fi", device_name(chip)) for chip in scan.get("wifi", [])]
+    if not scan.get("gpus"):
+        lines.insert(0, ("Graphics", "not identified"))
+    return lines
+
+
+@dataclass
+class DriverRow:
+    id: str
+    label: str
+    help: str
+    reason: str = ""
+    suggested: bool = False
+    # None when the list could not be read: the scan still says what fits,
+    # but nobody knows what is already installed.
+    installed: bool | None = False
+    privileged: bool = True
+    warning: str = ""
+    notes: str = ""
+
+
+def _row(entry_id: str, entry: dict | None, reason: str = "", suggested: bool = False) -> DriverRow:
+    entry = entry or {}
+    installed = entry.get("installed") if "installed" in entry else None
+    return DriverRow(
+        id=entry_id,
+        label=DRIVER_LABELS.get(entry_id) or str(entry.get("name") or entry_id),
+        help=DRIVER_HELP.get(entry_id) or str(entry.get("summary") or ""),
+        reason=reason,
+        suggested=suggested,
+        installed=bool(installed) if installed is not None else None,
+        privileged=bool(entry.get("privileged", True)),
+        warning=str(entry.get("warning") or ""),
+        notes=str(entry.get("notes") or ""),
+    )
+
+
+def build_rows(scan: dict, entries: list[dict] | None) -> tuple[list[DriverRow], list[DriverRow]]:
+    """(suggested for this machine, also available), in the scan's order.
+
+    A suggestion naming an entry the list does not have is dropped, as
+    Software does: portlin-install could not install it either. When the
+    list could not be read at all, the suggestions are shown anyway, with
+    their installed state unknown, because the scan's answer is still worth
+    having.
+    """
+    known = {entry["id"]: entry for entry in entries or []}
+    suggested: list[DriverRow] = []
+    seen: set[str] = set()
+    for suggestion in scan.get("suggestions", []):
+        entry_id = suggestion["entry"]
+        if entry_id in seen or (entries is not None and entry_id not in known):
+            continue
+        seen.add(entry_id)
+        reason = str(suggestion.get("reason") or "")
+        detail = suggestion.get("detail")
+        if detail:
+            reason = f"{reason}. {detail}" if reason else str(detail)
+        suggested.append(_row(entry_id, known.get(entry_id), reason, suggested=True))
+    others = [_row(entry["id"], entry) for entry in entries or [] if entry["id"] not in seen]
+    return suggested, others
+
+
+def row_state(row: DriverRow, *, busy: bool, online: str) -> tuple[str, str, bool, str]:
+    """(badge, button label, button sensitive, hint) for one row.
+
+    Removal needs no network, since apt only takes things away, so only the
+    Install button waits for one. "unknown" (no NetworkManager to ask) lets
+    the install go ahead, and a failure then says what happened.
+    """
+    if row.installed:
+        badge = "Installed"
+    elif row.suggested:
+        badge = "Suggested"
+    else:
+        badge = ""
+    action = "Remove" if row.installed else "Install"
+    if busy:
+        return badge, action, False, ""
+    if action == "Install" and online == "offline":
+        return badge, action, False, "Needs a network connection"
+    return badge, action, True, ""
+
+
+def installable_suggestions(rows: list[DriverRow]) -> list[str]:
+    """What "Install all suggested" passes to one portlin-install run."""
+    return [row.id for row in rows if row.suggested and not row.installed and row.privileged]
+
+
+def network_state(run=subprocess.run) -> str:
+    """"online", "offline", or "unknown" when NetworkManager cannot be asked.
+
+    Only "connected" counts: "connected (site only)" is a network with no
+    route to Debian's archive, which is the case worth catching here.
+    """
+    try:
+        proc = run(["nmcli", "-t", "-f", "STATE", "general"],
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if proc.returncode != 0:
+        return "unknown"
+    return "online" if proc.stdout.strip() == "connected" else "offline"
+
+
+def mentions_network_failure(lines: list[str]) -> bool:
+    return any(marker in line for line in lines for marker in NETWORK_FAILURES)
+
+
+def explain_exit(code: int, *, privileged: bool) -> str:
+    """Why a job ended, in words. 126 and 127 come from pkexec, not the tool."""
+    if code == EXIT_OK:
+        return ""
+    if privileged and code == PKEXEC_REFUSED:
+        return "Authentication was cancelled, so nothing was changed."
+    if privileged and code == PKEXEC_NO_AGENT:
+        return ("No authentication agent answered, so the password could not be "
+                "asked for. Log out and in, or install mate-polkit.")
+    if code == EXIT_PRIVILEGE:
+        return "That was run with the wrong privileges. Nothing was changed."
+    return f"It did not finish (exit status {code}). The details say where it stopped."
+
+
+@dataclass
+class Outcome:
+    """What one install or remove run reported, gathered from its events."""
+
+    action: str
+    ids: list[str]
+    labels: dict[str, str] = field(default_factory=dict)
+    step: str = ""
+    reboot: bool = False
+    succeeded: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    output: list[str] = field(default_factory=list)
+
+    def feed(self, kind: str, rest: str) -> None:
+        if kind == "step":
+            self.step = rest
+        elif kind == "warn":
+            self.warnings.append(rest)
+        elif kind == "reboot":
+            self.reboot = True
+        elif kind == "result":
+            verdict, _, tail = rest.partition(" ")
+            entry_id, _, text = tail.partition(" ")
+            if verdict == "ok" and entry_id:
+                self.succeeded.append(entry_id)
+            elif verdict == "failed":
+                self.failed[entry_id or "?"] = text.strip()
+
+    def _names(self, ids) -> str:
+        return ", ".join(self.labels.get(entry_id, entry_id) for entry_id in ids)
+
+    def summary(self, code: int, *, privileged: bool) -> tuple[str, str, str]:
+        """(title, body, tone) for the result card. tone is good, warn or muted."""
+        done = "installed" if self.action == "install" else "removed"
+        if code == EXIT_OK and not self.failed:
+            names = self._names(self.succeeded or self.ids)
+            if self.reboot:
+                verb = "is" if len(self.succeeded or self.ids) == 1 else "are"
+                why = ("the driver is only loaded at boot" if self.action == "install"
+                       else "the old driver stays loaded until then")
+                return ("Restart needed", f"{names} {verb} {done}. Restart this machine to finish: {why}.",
+                        "warn")
+            return ("Done", f"{names}: {done}.", "good")
+        if privileged and code in (PKEXEC_REFUSED, PKEXEC_NO_AGENT):
+            return ("Nothing was changed", explain_exit(code, privileged=privileged), "muted")
+        parts = []
+        if self.succeeded:
+            parts.append(f"{self._names(self.succeeded)}: {done}.")
+        for entry_id, text in self.failed.items():
+            label = self.labels.get(entry_id, entry_id)
+            parts.append(f"{label}: {text}." if text else f"{label} did not finish.")
+        if mentions_network_failure(self.output):
+            parts.append("It could not reach the internet. Connect to a network and try again.")
+        elif not self.failed:
+            parts.append(explain_exit(code, privileged=privileged))
+        if self.reboot and self.succeeded:
+            parts.append("Restart before relying on what was installed.")
+        return ("It did not finish", " ".join(parts), "warn")
+
+
+# -- running the tool ----------------------------------------------------------
+
+
+class Job:
+    """One portlin-install run, read line by line without blocking the window.
+
+    Read through the main loop rather than in a loop here, because apt can
+    take minutes and a window that stops redrawing for minutes gets
+    force-quit half way through an install. ``timeout`` is for the lookups
+    only: an install is root's process, which this window could not stop
+    anyway, and apt gives up on a dead network by itself.
+    """
+
+    def __init__(self, argv, *, on_event, on_output, on_done, timeout: int | None = None) -> None:
+        self.on_event = on_event
+        self.on_output = on_output
+        self.on_done = on_done
+        self.timed_out = False
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self._timer = GLib.timeout_add_seconds(timeout, self._on_timeout) if timeout else 0
+        GLib.io_add_watch(self.proc.stdout, GLib.PRIORITY_DEFAULT,
+                          GLib.IO_IN | GLib.IO_HUP, self._on_readable)
+
+    def _on_timeout(self) -> bool:
+        self._timer = 0
+        self.timed_out = True
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
+        return False
+
+    def _on_readable(self, source, condition) -> bool:
+        line = source.readline()
+        if line:
+            line = line.rstrip("\n")
+            event = parse_event(line)
+            if event:
+                self.on_event(*event)
+            else:
+                self.on_output(line)
+            return True
+        if self._timer:
+            GLib.source_remove(self._timer)
+            self._timer = 0
+        self.proc.wait()
+        self.on_done(self.proc.returncode)
+        return False
+
+
+# -- the window ----------------------------------------------------------------
+
+
+def _label(text: str = "", *classes: str, xalign: float = 0.0, wrap: bool = False) -> Gtk.Label:
+    label = Gtk.Label(label=text, xalign=xalign)
+    if wrap:
+        label.set_line_wrap(True)
+    for name in classes:
+        label.get_style_context().add_class(name)
+    return label
+
+
+def _classed(widget, *classes: str):
+    for name in classes:
+        widget.get_style_context().add_class(name)
+    return widget
+
+
+class DriversWindow(Gtk.ApplicationWindow):
+    def __init__(self, application=None, *, sudo=None) -> None:
+        super().__init__(application=application, title="Drivers")
+        self.set_default_size(760, 720)
+        self.set_icon_name(ICON_NAME)
+        self.get_style_context().add_class("drivers")
+
+        self.passwordless_sudo = has_passwordless_sudo() if sudo is None else sudo
+        self.present_tool = installer_present()
+        self.online = "unknown"
+        self.scan: dict | None = None
+        self.entries: list[dict] | None = None
+        self.lookup_problems: list[str] = []
+        self.lookups_pending = 0
+        self.job: Job | None = None
+        self.outcome: Outcome | None = None
+        self.job_privileged = True
+        self.suggested: list[DriverRow] = []
+        self.others: list[DriverRow] = []
+        self.row_widgets: dict[str, dict] = {}
+        self._poll_id = 0
+
+        self._build()
+        self._check_network()
+        self._reload()
+
+    # -- construction ------------------------------------------------------
+
+    def _build(self) -> None:
+        self.header = Gtk.HeaderBar(title="Drivers", show_close_button=True)
+        self.refresh_button = Gtk.Button()
+        self.refresh_button.set_image(
+            Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON))
+        self.refresh_button.set_tooltip_text("Look at this machine again")
+        self.refresh_button.connect("clicked", lambda *_: self._reload())
+        self.header.pack_end(self.refresh_button)
+        self.set_titlebar(self.header)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(outer)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        outer.pack_start(scroller, True, True, 0)
+
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        page.set_margin_start(32)
+        page.set_margin_end(32)
+        page.set_margin_top(26)
+        page.set_margin_bottom(22)
+        # The page's margins are outside its own background, so it sits in a
+        # backdrop of the same colour; otherwise the viewport's shade shows
+        # around the edges once the content scrolls.
+        backdrop = _classed(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "page")
+        backdrop.pack_start(page, True, True, 0)
+        scroller.add(backdrop)
+
+        heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        heading.pack_start(_label("Drivers for this machine", "hero-title"), False, False, 0)
+        heading.pack_start(_label(
+            "What the stick found in the computer it is plugged into now, and what fits it.",
+            "hero-sub", wrap=True), False, False, 0)
+        page.pack_start(heading, False, False, 0)
+
+        # The machine card, the network warning and the result of the last
+        # run are each a card whose text is set later.
+        self.machine_card, self.machine_box = self._card()
+        page.pack_start(self.machine_card, False, False, 0)
+
+        self.network_card, network_box = self._card("warn")
+        network_row = Gtk.Box(spacing=12)
+        self.network_text = _label(
+            "No network connection. Drivers are downloaded from Debian's archive, so connect "
+            "to a network first. Removing a driver works without one.", wrap=True)
+        network_row.pack_start(self.network_text, True, True, 0)
+        recheck = Gtk.Button(label="Check again")
+        recheck.set_valign(Gtk.Align.CENTER)
+        recheck.connect("clicked", lambda *_: self._check_network())
+        network_row.pack_end(recheck, False, False, 0)
+        network_box.pack_start(network_row, False, False, 0)
+        self.network_card.set_no_show_all(True)
+        page.pack_start(self.network_card, False, False, 0)
+
+        self.result_card, result_box = self._card()
+        self.result_title = _label("", "card-title")
+        self.result_body = _label("", wrap=True)
+        result_box.pack_start(self.result_title, False, False, 0)
+        result_box.pack_start(self.result_body, False, False, 0)
+        self.restart_button = Gtk.Button(label="Restart now")
+        _classed(self.restart_button, "suggested-action")
+        self.restart_button.set_halign(Gtk.Align.START)
+        self.restart_button.connect("clicked", lambda *_: self._restart())
+        result_box.pack_start(self.restart_button, False, False, 4)
+        self.result_card.set_no_show_all(True)
+        page.pack_start(self.result_card, False, False, 0)
+
+        self.suggested_head = suggested_head = Gtk.Box(spacing=12)
+        suggested_head.pack_start(_label("SUGGESTED FOR THIS MACHINE", "section"), True, True, 0)
+        self.all_button = Gtk.Button(label="Install all suggested")
+        _classed(self.all_button, "suggested-action")
+        self.all_button.connect("clicked", lambda *_: self._install_all())
+        self.all_button.set_no_show_all(True)
+        suggested_head.pack_end(self.all_button, False, False, 0)
+        # Hidden when there is no portlin-install to suggest anything with.
+        suggested_head.set_no_show_all(True)
+        page.pack_start(suggested_head, False, False, 4)
+        self.suggested_note = _label("", "muted", wrap=True)
+        page.pack_start(self.suggested_note, False, False, 0)
+        self.suggested_list = _classed(Gtk.ListBox(), "drivers-list")
+        self.suggested_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        page.pack_start(self.suggested_list, False, False, 0)
+
+        self.others_head = _label("ALSO AVAILABLE", "section")
+        # Both are shown only when there is something under them, which
+        # _finish_render decides; show_all must not decide it first.
+        self.others_head.set_no_show_all(True)
+        self.suggested_note.set_no_show_all(True)
+        page.pack_start(self.others_head, False, False, 4)
+        self.others_list = _classed(Gtk.ListBox(), "drivers-list")
+        self.others_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        page.pack_start(self.others_list, False, False, 0)
+
+        # The run panel along the bottom: what is happening now, and the raw
+        # output for anyone who wants to see exactly what apt did.
+        self.revealer = Gtk.Revealer()
+        run_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        run_box.set_margin_start(32)
+        run_box.set_margin_end(32)
+        run_box.set_margin_top(10)
+        run_box.set_margin_bottom(16)
+        self.status = _label("", "card-title")
+        self.step = _label("", "muted", "small", wrap=True)
+        self.progress = Gtk.ProgressBar()
+        run_box.pack_start(self.status, False, False, 0)
+        run_box.pack_start(self.step, False, False, 0)
+        run_box.pack_start(self.progress, False, False, 0)
+        self.details = Gtk.Expander(label="Details")
+        self.log = _classed(Gtk.TextView(editable=False, monospace=True), "log")
+        self.log.set_cursor_visible(False)
+        # A mark kept at the end is what the view scrolls to after every line;
+        # without it the pane shows the first screen of an apt run throughout.
+        buffer = self.log.get_buffer()
+        self.log_end = buffer.create_mark("end", buffer.get_end_iter(), False)
+        log_scroller = Gtk.ScrolledWindow()
+        log_scroller.set_size_request(-1, 160)
+        log_scroller.add(self.log)
+        self.details.add(log_scroller)
+        run_box.pack_start(self.details, False, False, 0)
+        self.revealer.add(run_box)
+        outer.pack_start(Gtk.Separator(), False, False, 0)
+        outer.pack_start(self.revealer, False, False, 0)
+
+    def _card(self, *classes: str) -> tuple[Gtk.Box, Gtk.Box]:
+        card = _classed(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "card", *classes)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.pack_start(inner, True, True, 0)
+        return card, inner
+
+    def _show_card(self, card: Gtk.Widget, visible: bool) -> None:
+        # The cards are no_show_all so the window's show_all leaves them
+        # alone; showing one means showing its contents explicitly.
+        if visible:
+            card.set_no_show_all(False)
+            card.show_all()
+            card.set_no_show_all(True)
+        else:
+            card.hide()
+
+    # -- loading -----------------------------------------------------------
+
+    def _reload(self) -> None:
+        """Ask the tool again: what is here, and what is installed."""
+        if self.job is not None or self.lookups_pending:
+            return
+        if not self.present_tool:
+            self.present_tool = installer_present()
+        if not self.present_tool:
+            self._render()
+            return
+        self.lookup_problems = []
+        self.lookups_pending = 2
+        if self.row_widgets:
+            # Looking again after an install: the rows stay, with their
+            # buttons held, rather than the list emptying for a second.
+            self.header.set_subtitle("Checking again...")
+            self._refresh_rows()
+        else:
+            self._render()
+        self._lookup(scan_argv(), "scan")
+        self._lookup(list_argv(), "list")
+
+    def _lookup(self, argv, what: str) -> None:
+        collected: list[str] = []
+
+        def done(code: int) -> None:
+            text = "\n".join(collected)
+            if what == "scan":
+                self.scan = parse_scan(text) if code == EXIT_OK else None
+                if self.scan is None:
+                    self.lookup_problems.append(
+                        "The hardware scan did not answer in time." if job.timed_out
+                        else "The hardware scan did not report anything.")
+            else:
+                self.entries = parse_entries(text) if code == EXIT_OK else None
+                if self.entries is None:
+                    self.lookup_problems.append(
+                        "Could not read which drivers are installed"
+                        + (" in time." if job.timed_out else ".")
+                        + (f" portlin-install said: {collected[-1]}" if collected and not job.timed_out else ""))
+            self._lookup_finished()
+
+        try:
+            job = Job(argv, on_event=lambda *_: None, on_output=collected.append,
+                      on_done=done, timeout=LOOKUP_TIMEOUT)
+        except OSError as exc:
+            self.lookup_problems.append(f"Could not run portlin-install: {exc}")
+            if what == "scan":
+                self.scan = None
+            else:
+                self.entries = None
+            self._lookup_finished()
+
+    def _lookup_finished(self) -> None:
+        self.lookups_pending -= 1
+        if self.lookups_pending == 0:
+            self._render()
+
+    # -- the network -------------------------------------------------------
+
+    def _check_network(self) -> None:
+        self.online = network_state()
+        self._show_card(self.network_card, self.online == "offline")
+        self._refresh_rows()
+        if self.online == "offline" and not self._poll_id:
+            self._poll_id = GLib.timeout_add_seconds(NETWORK_POLL, self._poll_network)
+
+    def _poll_network(self) -> bool:
+        self.online = network_state()
+        if self.online != "offline":
+            self._poll_id = 0
+            self._show_card(self.network_card, False)
+            self._refresh_rows()
+            return False
+        return True
+
+    # -- drawing -----------------------------------------------------------
+
+    def _render(self) -> None:
+        for child in self.machine_box.get_children():
+            self.machine_box.remove(child)
+        for listing in (self.suggested_list, self.others_list):
+            for child in listing.get_children():
+                listing.remove(child)
+        self.row_widgets.clear()
+
+        if not self.present_tool:
+            self.header.set_subtitle("")
+            self.machine_box.pack_start(_label("portlin-install is missing", "card-title"), False, False, 0)
+            self.machine_box.pack_start(_label(
+                f"This window installs drivers through {INSTALLER}, which is part of the "
+                "portlin-runtime package, and it is not on this system. Put it back from a "
+                "terminal with: sudo apt install portlin-runtime", wrap=True), False, False, 0)
+            self.suggested_note.set_text("")
+            self.suggested, self.others = [], []
+            self._finish_render()
+            self._show_card(self.suggested_head, False)
+            return
+
+        self._show_card(self.suggested_head, True)
+        if self.lookups_pending:
+            self.header.set_subtitle("Looking at this machine...")
+            self.machine_box.pack_start(_label("Looking at this machine...", "muted"), False, False, 0)
+            self.suggested_note.set_text("")
+            self.suggested, self.others = [], []
+            self._finish_render()
+            return
+
+        scan = self.scan or {"gpus": [], "wifi": [], "suggestions": [], "notes": []}
+        self.machine_box.pack_start(_label("This machine", "section"), False, False, 0)
+        if self.scan is not None:
+            for what, name in hardware_lines(scan):
+                line = Gtk.Box(spacing=10)
+                line.pack_start(_label(what, "muted"), False, False, 0)
+                line.pack_start(_label(name, wrap=True), True, True, 0)
+                self.machine_box.pack_start(line, False, False, 0)
+        for note in scan["notes"] + self.lookup_problems:
+            self.machine_box.pack_start(_label(note, "muted", "small", wrap=True), False, False, 0)
+        gpus = [device_name(gpu) for gpu in scan["gpus"]]
+        self.header.set_subtitle(", ".join(gpus))
+
+        self.suggested, self.others = build_rows(scan, self.entries)
+        if self.scan is None:
+            self.suggested_note.set_text("Without the scan there is nothing to suggest. "
+                                         "Everything below can still be installed by hand.")
+        elif not self.suggested:
+            self.suggested_note.set_text("Nothing here needs a driver beyond what is already running.")
+        else:
+            self.suggested_note.set_text("")
+        for row in self.suggested:
+            self.suggested_list.add(self._row_widget(row))
+        for row in self.others:
+            self.others_list.add(self._row_widget(row))
+        self._finish_render()
+
+    def _finish_render(self) -> None:
+        self.machine_card.show_all()
+        self.suggested_list.show_all()
+        self.others_list.show_all()
+        self.others_head.set_visible(bool(self.others))
+        self.suggested_note.set_visible(bool(self.suggested_note.get_text()))
+        self._refresh_rows()
+
+    def _row_widget(self, row: DriverRow) -> Gtk.ListBoxRow:
+        card, box = self._card()
+        top = Gtk.Box(spacing=10)
+        top.pack_start(_label(row.label, "card-title"), False, False, 0)
+        badge = _label("", "badge")
+        badge.set_valign(Gtk.Align.CENTER)
+        top.pack_start(badge, False, False, 0)
+        button = Gtk.Button()
+        button.set_valign(Gtk.Align.CENTER)
+        button.connect("clicked", lambda _b, r=row: self._on_button(r))
+        top.pack_end(button, False, False, 0)
+        box.pack_start(top, False, False, 0)
+        if row.help:
+            box.pack_start(_label(row.help, wrap=True), False, False, 0)
+        if row.reason:
+            box.pack_start(_label(row.reason, "muted", "small", wrap=True), False, False, 0)
+        if row.notes:
+            box.pack_start(_label(row.notes, "muted", "small", wrap=True), False, False, 0)
+        hint = _label("", "amber", "small")
+        badge.set_no_show_all(True)
+        hint.set_no_show_all(True)
+        box.pack_start(hint, False, False, 0)
+
+        item = Gtk.ListBoxRow(activatable=False, selectable=False)
+        item.add(card)
+        self.row_widgets[row.id] = {"row": row, "badge": badge, "button": button, "hint": hint}
+        return item
+
+    def _refresh_rows(self) -> None:
+        busy = self.job is not None or bool(self.lookups_pending)
+        for widgets in self.row_widgets.values():
+            badge_text, label, sensitive, hint = row_state(widgets["row"], busy=busy, online=self.online)
+            badge = widgets["badge"]
+            badge.set_text(badge_text)
+            badge.set_visible(bool(badge_text))
+            context = badge.get_style_context()
+            for tone in ("green", "blue"):
+                context.remove_class(tone)
+            if badge_text:
+                context.add_class("green" if badge_text == "Installed" else "blue")
+            widgets["button"].set_label(label)
+            widgets["button"].set_sensitive(sensitive)
+            widgets["hint"].set_text(hint)
+            widgets["hint"].set_visible(bool(hint))
+        pending = installable_suggestions(self.suggested)
+        self.all_button.set_label(f"Install all {len(pending)} suggested")
+        self.all_button.set_visible(len(pending) > 1)
+        self.all_button.set_sensitive(not busy and self.online != "offline")
+        self.refresh_button.set_sensitive(not busy)
+        self.restart_button.set_sensitive(self.job is None)
+
+    # -- acting ------------------------------------------------------------
+
+    def _on_button(self, row: DriverRow) -> None:
+        if self.job is not None:
+            return
+        if row.installed:
+            if self._confirm(f"Remove {row.label}?",
+                             "It is taken off this stick, along with what nothing else needs.",
+                             "Remove"):
+                self._start("remove", [row])
+            return
+        if row.warning and not self._confirm(f"Install {row.label}?", row.warning, "Install"):
+            return
+        self._start("install", [row])
+
+    def _install_all(self) -> None:
+        if self.job is not None:
+            return
+        wanted = set(installable_suggestions(self.suggested))
+        rows = [row for row in self.suggested if row.id in wanted]
+        if not rows:
+            return
+        warned = [row for row in rows if row.warning]
+        if warned and not self._confirm(
+            f"Install {len(rows)} drivers?",
+            "\n\n".join(f"{row.label}: {row.warning}" for row in warned),
+            "Install",
+        ):
+            return
+        self._start("install", rows)
+
+    def _confirm(self, title: str, body: str, action: str) -> bool:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=title,
+        )
+        dialog.format_secondary_text(body)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button(action, Gtk.ResponseType.ACCEPT)
+        answer = dialog.run()
+        dialog.destroy()
+        return answer == Gtk.ResponseType.ACCEPT
+
+    def _start(self, action: str, rows: list[DriverRow]) -> None:
+        if action == "install":
+            # Asked again at the moment it matters: the card may be minutes
+            # old, and an install started offline would only fail in apt.
+            self._check_network()
+            if self.online == "offline":
+                return
+        ids = [row.id for row in rows]
+        self.job_privileged = all(row.privileged for row in rows)
+        argv = action_argv(action, ids, privileged=self.job_privileged,
+                           passwordless_sudo=self.passwordless_sudo)
+        self.outcome = Outcome(action=action, ids=ids, labels={row.id: row.label for row in rows})
+        names = ", ".join(row.label for row in rows)
+        self._show_card(self.result_card, False)
+        self.revealer.set_reveal_child(True)
+        self.status.set_text(f"{'Installing' if action == 'install' else 'Removing'} {names}")
+        self.step.set_text("Waiting for the password..." if self.job_privileged and not self.passwordless_sudo
+                           else "Starting...")
+        self.progress.set_fraction(0.0)
+        self._append(f"$ {shlex.join(argv)}")
+        try:
+            self.job = Job(argv, on_event=self._on_event, on_output=self._on_output,
+                           on_done=self._on_done)
+        except OSError as exc:
+            self.job = None
+            self.revealer.set_reveal_child(False)
+            self._show_result("It did not start", f"Could not run {argv[0]}: {exc}", "warn", reboot=False)
+        self._refresh_rows()
+
+    def _append(self, line: str) -> None:
+        buffer = self.log.get_buffer()
+        buffer.insert(buffer.get_end_iter(), line + "\n")
+        buffer.move_mark(self.log_end, buffer.get_end_iter())
+        self.log.scroll_mark_onscreen(self.log_end)
+
+    def _on_output(self, line: str) -> None:
+        if self.outcome is not None:
+            self.outcome.output.append(line)
+        self._append(line)
+
+    def _on_event(self, kind: str, rest: str) -> None:
+        if self.outcome is not None:
+            self.outcome.feed(kind, rest)
+        if kind == "step":
+            self.step.set_text(rest)
+            self.progress.pulse()
+            self._append(f"== {rest}")
+        elif kind == "progress":
+            try:
+                self.progress.set_fraction(min(1.0, max(0.0, int(rest) / 100)))
+            except ValueError:
+                pass
+        elif kind == "warn":
+            self._append(f"warning: {rest}")
+        elif kind == "reboot":
+            self._append("A restart is needed before this driver is in use.")
+        elif kind == "result":
+            self._append(rest)
+
+    def _on_done(self, code: int) -> None:
+        self.job = None
+        outcome = self.outcome
+        title, body, tone = outcome.summary(code, privileged=self.job_privileged)
+        if outcome.warnings:
+            body += "\n\n" + "\n".join(outcome.warnings)
+        self.progress.set_fraction(1.0 if code == EXIT_OK else self.progress.get_fraction())
+        self.status.set_text(title)
+        self.step.set_text("")
+        if code != EXIT_OK and code not in (PKEXEC_REFUSED, PKEXEC_NO_AGENT):
+            self.details.set_expanded(True)
+        else:
+            self.revealer.set_reveal_child(False)
+        self._show_result(title, body, tone, reboot=outcome.reboot and bool(outcome.succeeded))
+        # What is installed has changed, and so may the scan's detail: the
+        # NVIDIA suggestion names the exact driver once nvidia-detect is here.
+        self._reload()
+
+    def _show_result(self, title: str, body: str, tone: str, *, reboot: bool) -> None:
+        context = self.result_card.get_style_context()
+        for name in ("good", "warn"):
+            context.remove_class(name)
+        if tone in ("good", "warn"):
+            context.add_class(tone)
+        self.result_title.set_text(title)
+        self.result_body.set_text(body)
+        self._show_card(self.result_card, True)
+        self.restart_button.set_visible(reboot)
+
+    def _restart(self) -> None:
+        if self.job is not None:
+            return
+        if not self._confirm("Restart now?", "Save your work in other windows first.", "Restart"):
+            return
+        try:
+            subprocess.Popen(["systemctl", "reboot"], stdin=subprocess.DEVNULL)
+        except OSError as exc:
+            self._show_result("Could not restart", f"{exc}. Restart from the menu instead.", "warn",
+                              reboot=False)
+
+
+def install_css() -> None:
+    provider = Gtk.CssProvider()
+    provider.load_from_data(CSS.encode())
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+
+def main() -> int:
+    application = Gtk.Application(application_id=APP_ID)
+    windows: dict[str, DriversWindow] = {}
+
+    def on_activate(app) -> None:
+        # A second launch from the menu brings the first window forward
+        # rather than starting a second scan beside it.
+        if "window" in windows:
+            windows["window"].present()
+            return
+        Gtk.Window.set_default_icon_name(ICON_NAME)
+        install_css()
+        window = windows["window"] = DriversWindow(application=app)
+        window.show_all()
+
+    application.connect("activate", on_activate)
+    return application.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

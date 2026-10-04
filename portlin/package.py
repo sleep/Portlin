@@ -43,7 +43,7 @@ TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install",
 # tool but the tool and the tests both import the module.
 SHARED_MODULES = ["devices.py", "catalog.py", "hostinfo.py", "migrate.py"]
 
-# The polkit action the Software app elevates through. It ships in
+# The polkit action the Software and Drivers apps elevate through. It ships in
 # portlin-runtime, beside the program its exec.path annotation names, so the
 # two cannot end up in different packages naming different paths.
 POLKIT_ACTIONS = {
@@ -59,6 +59,7 @@ DESKTOP_TOOLS = [
     "portlin-about",
     "portlin-caffeine",
     "portlin-software",
+    "portlin-drivers",
     "portlin-migration",
     "portlin-settings",
     # The only one of these that is not a GTK program. It is here rather than
@@ -82,6 +83,7 @@ MENU_ENTRIES = {
     "portlin-about.desktop": "usr/share/applications/portlin-about.desktop",
     "portlin-caffeine.desktop": "usr/share/applications/portlin-caffeine.desktop",
     "portlin-software.desktop": "usr/share/applications/portlin-software.desktop",
+    "portlin-drivers.desktop": "usr/share/applications/portlin-drivers.desktop",
     "portlin-migration.desktop": "usr/share/applications/portlin-migration.desktop",
     "portlin-settings.desktop": "usr/share/applications/portlin-settings.desktop",
 }
