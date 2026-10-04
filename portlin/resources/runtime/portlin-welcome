@@ -167,8 +167,10 @@ def gather() -> dict:
         uptime = float(PROC_UPTIME.read_text().split()[0])
     except (OSError, ValueError, IndexError):
         uptime = 0.0
+    version = release.get("PORTLIN_VERSION", "unknown")
+    commit = release.get("PORTLIN_COMMIT", "")
     data = {
-        "version": release.get("PORTLIN_VERSION", "unknown"),
+        "version": f"{version} ({commit})" if commit else version,
         "encrypted": root_source().startswith("/dev/mapper/"),
         "os": os_release.get("PRETTY_NAME", "unknown"),
         "machine": host.model,

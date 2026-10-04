@@ -73,6 +73,7 @@ def main() -> int:
     drive_gb = int(disk_bytes_out) / 1_000_000_000 if disk_bytes_out.isdigit() else 0.0
 
     print(f"portlin      {release.get('PORTLIN_VERSION', 'unknown')}")
+    print(f"commit       {release.get('PORTLIN_COMMIT', 'unknown')}")
     print(f"debian       {_debian_description()}")
     print(f"root         {source}")
     print(f"encrypted    {'yes' if encrypted else 'no'}")

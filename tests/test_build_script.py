@@ -47,6 +47,9 @@ def make_container_command(script, monkeypatch, tmp_path):
     # rather than left to fake_run, so the captured command is always the
     # docker run and never the probe.
     monkeypatch.setattr(script, "_image_is_cached", lambda _image: True)
+    # And the commit pinned, so source_commit never asks git through the
+    # subprocess.run patched above.
+    monkeypatch.setenv("PORTLIN_COMMIT", "abc1234")
 
     def make(**overrides):
         fields = {
@@ -85,6 +88,11 @@ class TestContainerHandoff:
 
     def test_is_privileged_because_the_write_stage_needs_loop_devices(self, container_command):
         assert "--privileged" in container_command
+
+    def test_hands_the_hosts_commit_to_the_container(self, container_command):
+        # The container mounts the checkout but has no git, so without this
+        # every image built on a Mac would record no commit at all.
+        assert "PORTLIN_COMMIT=abc1234" in container_command
 
     def test_output_goes_to_the_bind_mounted_directory(self, container_command, tmp_path):
         assert f"{(tmp_path / 'out').resolve()}:/out" in container_command

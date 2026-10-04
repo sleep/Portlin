@@ -19,7 +19,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
-from . import __version__, crypto, templates
+from . import __version__, buildinfo, crypto, templates
 from . import package as pkg
 from .chroot import Chroot
 from .config import WriteConfig
@@ -383,14 +383,15 @@ def _write_target_config(
     # Stamped here rather than during build: the rootfs tarball is reusable for
     # months, so a version baked into it would describe the tarball rather than
     # the stick, and the update channel needs a version it can trust.
+    commit = buildinfo.source_commit()
     runner.write_file(
         mountpoint / "etc/portlin-release",
-        templates.render_os_release_extra(__version__),
+        templates.render_os_release_extra(__version__, commit),
     )
-    _install_boot_theme(runner, mountpoint)
+    _install_boot_theme(runner, mountpoint, commit)
 
 
-def _install_boot_theme(runner: Runner, mountpoint: Path) -> None:
+def _install_boot_theme(runner: Runner, mountpoint: Path, commit: str) -> None:
     """Put the mark on the boot menu.
 
     Written here, before the chroot runs grub-mkconfig, because grub-mkconfig
@@ -407,7 +408,9 @@ def _install_boot_theme(runner: Runner, mountpoint: Path) -> None:
     theme_dir = mountpoint / templates.GRUB_THEME_DIR.lstrip("/")
     runner.write_file(
         mountpoint / templates.GRUB_THEME.lstrip("/"),
-        (RESOURCES / "grub" / "theme.txt").read_text(),
+        templates.render_boot_theme(
+            (RESOURCES / "grub" / "theme.txt").read_text(), __version__, commit
+        ),
     )
     # GRUB has no SVG renderer, so the mark ships as the one raster copy in the
     # tree; logo.svg serves everywhere a real toolkit is doing the drawing.

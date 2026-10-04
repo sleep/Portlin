@@ -65,3 +65,15 @@ terminal-font: "GNU Unifont Regular 16"
     color = "#7C8B9E"
     font = "GNU Unifont Regular 16"
 }
+
+# Which source the stick was written from, so a screenshot of a misbehaving
+# boot is enough to know what built it. Filled in at write time.
++ label {
+    text = "@PORTLIN_BUILD@"
+    left = 0
+    top = 95%
+    width = 100%
+    align = "center"
+    color = "#7C8B9E"
+    font = "GNU Unifont Regular 16"
+}

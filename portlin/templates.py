@@ -8,6 +8,7 @@ rather than discovering wrong on a stranger's laptop.
 
 from __future__ import annotations
 
+from . import buildinfo
 from .layout import MAPPER_NAME
 
 # noatime avoids a write on every read. commit=120 batches ext4 journal commits
@@ -214,15 +215,33 @@ def render_policy_rc_d() -> str:
     return "#!/bin/sh\n# Installed by portlin for the duration of the build.\nexit 101\n"
 
 
-def render_os_release_extra(version: str) -> str:
-    """Render /etc/portlin-release, a breadcrumb identifying how the stick was made."""
-    return "\n".join(
-        [
-            f"PORTLIN_VERSION={version}",
-            "PORTLIN_URL=https://github.com/sleep/Portlin",
-            "",
-        ]
-    )
+def render_os_release_extra(version: str, commit: str = "") -> str:
+    """Render /etc/portlin-release, a breadcrumb identifying how the stick was made.
+
+    PORTLIN_COMMIT is left out rather than written empty when the source is
+    unknown, so every reader's "unknown" default is the one that shows.
+    """
+    lines = [f"PORTLIN_VERSION={version}"]
+    if commit:
+        lines.append(f"PORTLIN_COMMIT={commit}")
+    lines += ["PORTLIN_URL=https://github.com/sleep/Portlin", ""]
+    return "\n".join(lines)
+
+
+# Stands in theme.txt for the build line, filled in at write time for the same
+# reason /etc/portlin-release is: the tarball can be months older than the stick.
+BOOT_THEME_BUILD_PLACEHOLDER = "@PORTLIN_BUILD@"
+
+
+def render_boot_theme(theme: str, version: str, commit: str = "") -> str:
+    """Fill the build line into the GRUB theme.
+
+    Quotes are dropped from the label text because a GRUB theme string has no
+    escape for them, and one stray quote would end the label early and leave
+    the rest of the file unparsed.
+    """
+    build = f"portlin {buildinfo.describe(version, commit)}".replace('"', "")
+    return theme.replace(BOOT_THEME_BUILD_PLACEHOLDER, build)
 
 
 def render_bashrc(*, root: bool = False) -> str:

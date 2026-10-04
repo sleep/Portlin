@@ -195,6 +195,10 @@ if [[ -f "$MNT/boot/grub/grub.cfg" ]]; then
         && pass "the boot theme is installed" \
         || fail "no /$THEME_DIR/theme.txt (the boot menu is unbranded)"
 
+    ! grep -q '@PORTLIN_' "$MNT/$THEME_DIR/theme.txt" 2>/dev/null \
+        && pass "the boot menu names the build it was written from" \
+        || fail "theme.txt still has a placeholder (the build line shows it raw)"
+
     head -c 8 "$MNT/$THEME_DIR/logo.png" 2>/dev/null | grep -qa PNG \
         && pass "the mark is installed for the boot menu" \
         || fail "/$THEME_DIR/logo.png is missing or is not a PNG"

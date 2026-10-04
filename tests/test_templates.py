@@ -4,6 +4,7 @@ made it, so they are asserted on quite literally."""
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from portlin import templates
 
@@ -243,3 +244,35 @@ class TestRootProfile:
         profile = templates.render_root_profile()
         assert '. ~/.bashrc' in profile
         assert 'if [ -n "$BASH" ]' in profile
+
+
+class TestRelease:
+    def test_records_the_commit_the_stick_was_written_from(self):
+        release = templates.render_os_release_extra("0.1.2", "1a83e8c")
+        assert "PORTLIN_VERSION=0.1.2\n" in release
+        assert "PORTLIN_COMMIT=1a83e8c\n" in release
+
+    def test_an_unknown_commit_is_left_out_rather_than_written_empty(self):
+        # Every reader falls back to "unknown" on a missing key; an empty
+        # value would show as a blank instead.
+        assert "PORTLIN_COMMIT" not in templates.render_os_release_extra("0.1.2", "")
+
+
+class TestBootTheme:
+    THEME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "grub" / "theme.txt"
+
+    def test_the_shipped_theme_has_exactly_one_build_line(self):
+        assert self.THEME.read_text().count(templates.BOOT_THEME_BUILD_PLACEHOLDER) == 1
+
+    def test_the_build_line_names_the_version_and_commit(self):
+        theme = templates.render_boot_theme(self.THEME.read_text(), "0.1.2", "1a83e8c-dirty")
+        assert 'text = "portlin 0.1.2 (1a83e8c-dirty)"' in theme
+        assert templates.BOOT_THEME_BUILD_PLACEHOLDER not in theme
+
+    def test_an_unknown_commit_still_names_the_version(self):
+        theme = templates.render_boot_theme(self.THEME.read_text(), "0.1.2", "")
+        assert 'text = "portlin 0.1.2"' in theme
+
+    def test_a_quote_cannot_end_the_label_early(self):
+        theme = templates.render_boot_theme('text = "@PORTLIN_BUILD@"', "0.1.2", 'x"y')
+        assert theme == 'text = "portlin 0.1.2 (xy)"'

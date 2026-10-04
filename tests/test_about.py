@@ -36,6 +36,9 @@ class TestAboutTool:
         assert "/etc/portlin-release" in source
         assert "PORTLIN_VERSION" in source
 
+    def test_it_names_the_commit_the_stick_was_written_from(self):
+        assert "PORTLIN_COMMIT" in ABOUT.read_text()
+
     def test_it_names_its_window_icon_so_the_mark_reaches_the_window_list(self):
         # set_logo draws inside the dialog and nowhere else. What the window
         # manager, the task list and the alt-tab switcher show is a separate

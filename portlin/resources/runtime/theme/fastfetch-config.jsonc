@@ -29,6 +29,8 @@
     { "type": "memory", "key": "memory" },
     { "type": "disk", "key": "disk (/)", "folders": "/" },
     { "type": "command", "key": "portlin", "shell": "/bin/sh",
-      "text": "sed -n 's/^PORTLIN_VERSION=//p' /etc/portlin-release" }
+      "text": "sed -n 's/^PORTLIN_VERSION=//p' /etc/portlin-release" },
+    { "type": "command", "key": "commit", "shell": "/bin/sh",
+      "text": "sed -n 's/^PORTLIN_COMMIT=//p' /etc/portlin-release | grep . || echo unknown" }
   ]
 }
