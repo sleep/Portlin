@@ -21,7 +21,12 @@ tarball-opt  a tarball unpacked under /opt, with a generated menu entry
 user-script  the vendor's installer script, run as the user, into their home
 
 The first five need root and go through pkexec. user-script must never run as
-root, because it writes under a home directory.
+root, because it writes under a home directory. A user-script entry can pass
+its script arguments and environment variables, which is how an installer
+that would otherwise stop to ask a question is told not to. Any entry can name
+other entries it ``requires``: the Software app installs those first, and
+portlin-install refuses the entry until they are there, since a vendor script
+run as the user cannot install what it finds missing.
 """
 
 from __future__ import annotations
@@ -61,6 +66,7 @@ ENTRY_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 KEYRING_DIRS = ("/usr/share/keyrings/", "/etc/apt/keyrings/")
 SOURCES_DIR = "/etc/apt/sources.list.d/"
 DASHES = "–—"
+ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -117,6 +123,9 @@ class Entry:
     add_groups: tuple[str, ...] = ()
     post_install: tuple[tuple[str, ...], ...] = ()
     remove_paths: tuple[str, ...] = ()
+    script_args: tuple[str, ...] = ()
+    script_env: tuple[tuple[str, str], ...] = ()
+    requires: tuple[str, ...] = ()
     warning: str | None = None
     notes: str | None = None
 
@@ -667,6 +676,120 @@ ENTRIES: tuple[Entry, ...] = (
             "leaves that line behind; delete it by hand if you want it gone."
         ),
     ),
+    # The agents below install themselves with the vendor's script, which
+    # is how each vendor documents installing on Linux. Each is told not to
+    # stop and ask anything: the script's output goes to the progress log,
+    # where a question would wait for an answer nobody can type. Removal
+    # takes the program away and leaves the agent's own settings, sign-in
+    # and memory where they are, so installing it again picks them back up.
+    Entry(
+        id="hermes",
+        name="Hermes Agent",
+        summary="Nous Research's self-improving agent, installed under your home directory",
+        category="AI tools",
+        kind="user-script",
+        url="https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh",
+        # Without it the script runs `hermes setup` against /dev/tty when
+        # it can open one, which it can when the app was started from a
+        # terminal.
+        script_args=("--non-interactive",),
+        # It clones itself with git, which the image leaves out.
+        requires=("build-tools",),
+        check=path("~/.local/bin/hermes"),
+        remove_paths=(
+            "~/.hermes/hermes-agent",
+            "~/.hermes/tools",
+            "~/.hermes/installs",
+            "~/.hermes/cache",
+            "~/.local/bin/hermes",
+            "~/.local/bin/hermes-acp",
+            "~/.local/bin/hermes-agent",
+        ),
+        warning=VENDOR_SCRIPT_WARNING,
+        homepage="https://hermes-agent.nousresearch.com/",
+        notes=(
+            "Build tools, for git, is installed first if it is not already. A large download, "
+            "about 3 GB once installed. Afterwards, run hermes setup "
+            "in a terminal to pick a model provider. Removing it keeps your settings, "
+            "skills and memories in ~/.hermes."
+        ),
+    ),
+    Entry(
+        id="openclaw",
+        name="OpenClaw",
+        summary="A personal AI assistant that works through your chat apps",
+        category="AI tools",
+        kind="user-script",
+        # The installer for a home directory: its own Node.js under
+        # ~/.openclaw, no sudo, and no onboarding questions. The site's main
+        # install.sh instead reaches for sudo apt-get to install Node.js.
+        url="https://openclaw.ai/install-cli.sh",
+        # It wants git, and without it tries sudo apt-get, which cannot
+        # prompt for a password here.
+        requires=("build-tools",),
+        check=path("~/.openclaw/bin/openclaw"),
+        remove_paths=("~/.openclaw/bin", "~/.openclaw/tools"),
+        warning=VENDOR_SCRIPT_WARNING,
+        homepage="https://openclaw.ai/",
+        notes=(
+            "Build tools, for git, is installed first if it is not already. To set it up, run "
+            "~/.openclaw/bin/openclaw onboard in a terminal. Removing it "
+            "keeps your settings in ~/.openclaw."
+        ),
+    ),
+    Entry(
+        id="codex",
+        name="Codex CLI",
+        summary="OpenAI's coding agent for the terminal, installed under your home directory",
+        category="AI tools",
+        kind="user-script",
+        url="https://releases.openai.com/codex/install.sh",
+        # Otherwise it offers to start Codex once installed.
+        script_env=(("CODEX_NON_INTERACTIVE", "1"),),
+        check=path("~/.local/bin/codex"),
+        remove_paths=("~/.codex/packages", "~/.local/bin/codex"),
+        warning=VENDOR_SCRIPT_WARNING,
+        homepage="https://developers.openai.com/codex/cli",
+        notes=(
+            "Run codex in a terminal to sign in. The installer adds ~/.local/bin to PATH in "
+            "~/.bashrc; removing Codex leaves that line and your settings in ~/.codex."
+        ),
+    ),
+    Entry(
+        id="opencode",
+        name="OpenCode",
+        summary="An open-source coding agent for the terminal, for any model provider",
+        category="AI tools",
+        kind="user-script",
+        url="https://opencode.ai/install",
+        check=path("~/.opencode/bin/opencode"),
+        remove_paths=("~/.opencode",),
+        warning=VENDOR_SCRIPT_WARNING,
+        homepage="https://opencode.ai/",
+        notes=(
+            "The installer adds ~/.opencode/bin to PATH in ~/.bashrc. Removing OpenCode "
+            "leaves that line behind; delete it by hand if you want it gone."
+        ),
+    ),
+    Entry(
+        id="goose",
+        name="goose",
+        summary="Block's open-source agent for the terminal, for any model provider",
+        category="AI tools",
+        kind="user-script",
+        url="https://github.com/block/goose/releases/download/stable/download_cli.sh",
+        # Otherwise the script runs `goose configure` and asks whether to
+        # edit PATH, both against /dev/tty when it can open one.
+        script_env=(("CONFIGURE", "false"),),
+        check=path("~/.local/bin/goose"),
+        remove_paths=("~/.local/bin/goose",),
+        warning=VENDOR_SCRIPT_WARNING,
+        homepage="https://block.github.io/goose/",
+        notes=(
+            "Run goose configure in a terminal to pick a model provider. Removing it keeps "
+            "your settings in ~/.config/goose."
+        ),
+    ),
     # -- Remote access -----------------------------------------------------
     Entry(
         id="rustdesk",
@@ -987,6 +1110,14 @@ def search(query: str, entries: tuple[Entry, ...] = ENTRIES) -> list[Entry]:
     return found
 
 
+def missing_requirements(entry: Entry, dpkg_installed: set[str], home: Path) -> list[Entry]:
+    """The entries ``entry`` requires that are not installed yet."""
+    return [
+        required for required in map(by_id, entry.requires)
+        if not installed(required, dpkg_installed, home)
+    ]
+
+
 def is_privileged(entry: Entry) -> bool:
     return entry.kind in PRIVILEGED_KINDS
 
@@ -1071,6 +1202,7 @@ def validate(entries: tuple[Entry, ...] = ENTRIES) -> list[str]:
     """
     problems: list[str] = []
     seen: set[str] = set()
+    ids = {entry.id for entry in entries}
 
     def problem(entry: Entry, text: str) -> None:
         problems.append(f"{entry.id}: {text}")
@@ -1162,6 +1294,14 @@ def validate(entries: tuple[Entry, ...] = ENTRIES) -> list[str]:
                 problem(entry, "user-script entries are checked by a path under ~")
             if entry.warning is None:
                 problem(entry, "user-script entries warn that they run a vendor script")
+        if (entry.script_args or entry.script_env) and entry.kind != "user-script":
+            problem(entry, "only user-script entries pass their script arguments or environment")
+        for name, _value in entry.script_env:
+            if not ENV_NAME.match(name):
+                problem(entry, f"not an environment variable name: {name!r}")
+        for required in entry.requires:
+            if required == entry.id or required not in ids:
+                problem(entry, f"requires something not another catalog entry: {required!r}")
 
         if entry.check.kind not in ("dpkg", "path") or not entry.check.values:
             problem(entry, "every entry has a check")

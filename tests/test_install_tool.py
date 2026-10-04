@@ -390,6 +390,13 @@ class TestVendorScripts:
         rendered = flat(steps)
         assert rendered.index("check ") < rendered.index("run bash")
 
+    def test_an_entry_can_tell_its_script_not_to_ask_anything(self, tool, catalog, ctx):
+        steps = tool.plan_install(catalog.by_id("hermes"), ctx)
+        assert argvs(steps)[-1][-1] == "--non-interactive"
+        steps = tool.plan_install(catalog.by_id("goose"), ctx)
+        run = next(step for step in steps if step.argv and step.argv[0] == "bash")
+        assert run.env == (("CONFIGURE", "false"),)
+
     def test_the_script_is_deleted_afterwards(self, tool, catalog, ctx):
         steps = tool.plan_install(catalog.by_id("zed"), ctx)
         assert any(step.remove for step in steps)
@@ -499,6 +506,18 @@ class TestRunningAPlan:
         assert result.ok
         assert "would run: curl" in printed
         assert "would write /etc/apt/sources.list.d/mullvad.list" in printed
+
+    def test_it_refuses_an_entry_whose_requirements_are_missing(
+        self, tool, catalog, ctx, monkeypatch, capsys
+    ):
+        def forbidden(*args, **kwargs):
+            raise AssertionError("an install with a requirement missing spawned a command")
+
+        monkeypatch.setattr(tool, "dpkg_installed", lambda: set())
+        monkeypatch.setattr(tool.subprocess, "Popen", forbidden)
+        code = tool.install_one(catalog.by_id("hermes"), ctx, dry_run=False)
+        assert code == tool.EXIT_FAILED
+        assert "needs Build tools installed first" in capsys.readouterr().out
 
     def test_a_dry_run_writes_nothing(self, tool, catalog, ctx, tmp_path):
         import dataclasses

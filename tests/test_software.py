@@ -154,6 +154,36 @@ class TestHowItElevates:
         assert seen["argv"][:2] == ["sudo", "-n"]
 
 
+class TestInstallingWhatAnEntryNeedsFirst:
+    def test_a_missing_requirement_is_installed_first_and_elevated_on_its_own(
+        self, software, catalog, tmp_path
+    ):
+        jobs = software.install_queue(
+            catalog.by_id("hermes"), set(), tmp_path, passwordless_sudo=False
+        )
+        assert [argv for argv, _entry in jobs] == [
+            ["pkexec", "/usr/bin/portlin-install", "install", "build-tools"],
+            ["/usr/bin/portlin-install", "install", "hermes"],
+        ]
+
+    def test_a_requirement_already_installed_is_not_installed_again(
+        self, software, catalog, tmp_path
+    ):
+        jobs = software.install_queue(
+            catalog.by_id("hermes"), {"build-essential"}, tmp_path, passwordless_sudo=False
+        )
+        assert [entry.id for _argv, entry in jobs] == ["hermes"]
+
+    def test_the_dialog_says_what_goes_in_first(self, software, catalog):
+        hermes = catalog.by_id("hermes")
+        text = software.confirm_text(hermes, [catalog.by_id("build-tools")])
+        assert text.startswith("Hermes Agent needs Build tools, which will be installed first.")
+        assert hermes.warning in text
+
+    def test_an_entry_with_nothing_to_say_needs_no_dialog(self, software, catalog):
+        assert software.confirm_text(catalog.by_id("vlc"), []) == ""
+
+
 class TestTheProtocolItReads:
     @pytest.mark.parametrize(
         "line, expected",

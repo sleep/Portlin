@@ -44,6 +44,7 @@ from catalog import (  # noqa: E402
     Entry,
     installed,
     is_privileged,
+    missing_requirements,
     parse_dpkg_status,
     search,
 )
@@ -86,6 +87,32 @@ def launch_argv(entry: Entry, action: str, *, passwordless_sudo: bool) -> list[s
     # asking for a password to install into a home directory would teach
     # people to type it where it is not needed.
     return [INSTALLER, action, entry.id]
+
+
+def install_queue(
+    entry: Entry, dpkg: set[str], home: Path, *, passwordless_sudo: bool
+) -> list[tuple[list[str], Entry]]:
+    """The jobs that install ``entry``: what it requires first, then it.
+
+    Each one elevates, or does not, on its own terms, so installing Hermes
+    asks for a password once, for Build tools, and then runs Hermes's own
+    script as the user.
+    """
+    return [
+        (launch_argv(job, "install", passwordless_sudo=passwordless_sudo), job)
+        for job in [*missing_requirements(entry, dpkg, home), entry]
+    ]
+
+
+def confirm_text(entry: Entry, first: list[Entry]) -> str:
+    """What the install dialog says: what goes in first, then any warning."""
+    parts = []
+    if first:
+        names = " and ".join(required.name for required in first)
+        parts.append(f"{entry.name} needs {names}, which will be installed first.")
+    if entry.warning:
+        parts.append(entry.warning)
+    return "\n\n".join(parts)
 
 
 def upgrade_argv(*, passwordless_sudo: bool, allow_removals: bool = False) -> list[str]:
@@ -242,6 +269,9 @@ class SoftwareWindow(Gtk.ApplicationWindow):
         self.query = ""
         self.job: Job | None = None
         self.busy_id: str | None = None
+        # The jobs still to run after this one, when an install needs other
+        # entries installed before it. A failure anywhere drops the rest.
+        self.queue: list[tuple[list[str], Entry]] = []
         # What the running upgrade said it would have to remove, collected
         # from its warnings so the question can be put with the list in it.
         self.removals: list[str] = []
@@ -432,13 +462,19 @@ class SoftwareWindow(Gtk.ApplicationWindow):
     def _on_button(self, entry: Entry) -> None:
         if self.job is not None:
             return
-        action = "remove" if self.is_installed(entry) else "install"
-        if action == "install" and entry.warning and not self._confirm(entry):
+        if self.is_installed(entry):
+            self._start(launch_argv(entry, "remove", passwordless_sudo=self.passwordless_sudo),
+                        entry=entry)
             return
-        self._start(launch_argv(entry, action, passwordless_sudo=self.passwordless_sudo),
-                    entry=entry)
+        jobs = install_queue(entry, self.dpkg, Path(self.home),
+                             passwordless_sudo=self.passwordless_sudo)
+        text = confirm_text(entry, [job for _argv, job in jobs[:-1]])
+        if text and not self._confirm(entry, text):
+            return
+        (argv, first), *self.queue = jobs
+        self._start(argv, entry=first)
 
-    def _confirm(self, entry: Entry) -> bool:
+    def _confirm(self, entry: Entry, text: str) -> bool:
         dialog = Gtk.MessageDialog(
             transient_for=self,
             modal=True,
@@ -446,7 +482,7 @@ class SoftwareWindow(Gtk.ApplicationWindow):
             buttons=Gtk.ButtonsType.NONE,
             text=f"Install {entry.name}?",
         )
-        dialog.format_secondary_text(entry.warning)
+        dialog.format_secondary_text(text)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button("Install", Gtk.ResponseType.ACCEPT)
         answer = dialog.run()
@@ -544,6 +580,11 @@ class SoftwareWindow(Gtk.ApplicationWindow):
             self.status.set_text(message)
             self._append(message)
         self.busy_id = None
+        if code == EXIT_OK and self.queue:
+            (argv, entry), *self.queue = self.queue
+            self._start(argv, entry=entry)
+            return
+        self.queue = []
         self._set_busy(False)
         self._populate()
         if code == EXIT_NEEDS_REMOVALS and self.removals:

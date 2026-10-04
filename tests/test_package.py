@@ -858,6 +858,14 @@ def test_runtime_depends_on_what_the_migration_tool_shells_out_to():
     assert "zstd" in depends
 
 
+def test_runtime_depends_on_what_the_agent_installer_scripts_expect():
+    # They run as the user, so a missing tool is a failed install rather
+    # than something they could apt-get for themselves.
+    depends = _declared_depends("portlin-runtime")
+    for name in ("bzip2", "libatomic1"):
+        assert name in depends
+
+
 def test_runtime_ships_the_migration_tool_and_its_module():
     files = package.text_files("portlin-runtime")
     assert "usr/bin/portlin-migrate" in files

@@ -24,7 +24,7 @@ RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "ru
 REQUESTED = [
     "mullvad", "qbittorrent", "deluge", "tor-browser", "chrome", "chromium",
     "brave", "palemoon", "zed", "cursor", "claude-desktop", "claude-code",
-    "kimi-code", "rustdesk", "anydesk",
+    "kimi-code", "hermes", "openclaw", "codex", "opencode", "goose", "rustdesk", "anydesk",
     "vscode", "docker", "tailscale", "syncthing", "wireshark",
     "vlc", "libreoffice", "gimp", "obs-studio", "thunderbird", "keepassxc",
     "signal", "telegram", "discord",
@@ -193,6 +193,27 @@ class TestValidationRules:
         zed = catalog.by_id("zed")
         assert _only(catalog, dataclasses.replace(zed, check=catalog.dpkg("zed")))
         assert _only(catalog, dataclasses.replace(zed, warning=None))
+
+    def test_only_user_scripts_pass_their_script_arguments_or_environment(self, catalog, good):
+        assert _only(catalog, dataclasses.replace(good, script_args=("--yes",)))
+        assert _only(catalog, dataclasses.replace(good, script_env=(("CONFIGURE", "false"),)))
+
+    def test_an_entry_requires_only_other_entries_in_the_catalog(self, catalog):
+        hermes = catalog.by_id("hermes")
+        build_tools = catalog.by_id("build-tools")
+        assert catalog.validate((hermes, build_tools)) == []
+        assert catalog.validate((hermes,))
+        assert _only(catalog, dataclasses.replace(build_tools, requires=("build-tools",)))
+
+    def test_missing_requirements_are_the_ones_not_installed(self, catalog, tmp_path):
+        hermes = catalog.by_id("hermes")
+        assert [e.id for e in catalog.missing_requirements(hermes, set(), tmp_path)] == ["build-tools"]
+        assert catalog.missing_requirements(hermes, {"build-essential"}, tmp_path) == []
+
+    def test_script_environment_names_are_variable_names(self, catalog):
+        zed = catalog.by_id("zed")
+        assert _only(catalog, dataclasses.replace(zed, script_env=(("not a name", "1"),)))
+        assert _only(catalog, dataclasses.replace(zed, script_env=(("CONFIGURE", "false"),))) == []
 
     def test_every_entry_has_a_check(self, catalog, good):
         assert _only(catalog, dataclasses.replace(good, check=catalog.Check("dpkg", ())))
