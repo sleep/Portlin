@@ -460,12 +460,13 @@ def local_shells(path: Path = SHELLS) -> set[str]:
 def move_roots(target: Target) -> tuple[tuple[Path, Path], ...]:
     """Where a move-aside may act, as (root, backup root) pairs: a file
     under the account's home is backed up inside that home, and a file
-    under the two system trees the plan's fixed paths live in is backed
-    up under /var/backups, the same split the planner's backup_dir makes.
+    under the system trees the plan's fixed paths live in is backed up
+    under /var/backups, the same split the planner's backup_dir makes; of
+    /usr, only the keyring directory an apt source may bring a key into.
     Nothing else on this system is the plan's to rename, whatever the
     source says."""
     backups = Path("/") / Path(SYSTEM_BACKUP_ROOT).parent
-    roots = ((Path("/etc"), backups), (Path("/var"), backups))
+    roots = ((Path("/etc"), backups), (Path("/var"), backups), (Path("/usr/share/keyrings"), backups))
     if target.home:
         home = Path("/") / target.home
         return ((home, home), *roots)

@@ -389,6 +389,7 @@ CATEGORIES = [
     ("home.files", "Home: files"),
     ("home.settings", "Home: app settings"),
     ("software", "Software"),
+    ("repos", "Package sources"),
     ("packages", "Other packages"),
     ("network", "Network"),
     ("extras", "System extras"),
@@ -633,6 +634,130 @@ def drop_unwanted_packages(inventory: Inventory, installed_here: set[str], image
     return dataclasses.replace(inventory, items=items)
 
 
+APT_SOURCES_DIR = "etc/apt/sources.list.d"
+# Where a source's Signed-By may point for its keyring to come along. A path
+# anywhere else is not a keyring this tool will copy, whatever the file says.
+KEYRING_DIRS = ("etc/apt/keyrings", "usr/share/keyrings", "etc/apt/trusted.gpg.d")
+APT_DIRS = (APT_SOURCES_DIR, *KEYRING_DIRS)
+# Debian's own mirrors, which the new stick has already, and portlin's archive,
+# which portlin-archive-keyring installs.
+OFFICIAL_HOSTS = ("debian.org", "debian.net")
+OWN_SOURCES = ("portlin.sources",)
+SOURCE_NAME_RE = re.compile(r"[A-Za-z0-9_.+-]+\.(list|sources)")
+APT_FILE_NAME_RE = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+@dataclass(frozen=True)
+class AptSource:
+    uris: tuple[str, ...]
+    keyrings: tuple[str, ...]  # absolute paths as the file names them
+    enabled: bool = True
+
+
+def _list_options(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
+    """The [key=value ...] block of a one-line entry, and what follows it."""
+    if not tokens or not tokens[0].startswith("["):
+        return {}, tokens
+    words, rest = [], list(tokens)
+    while rest:
+        word = rest.pop(0)
+        words.append(word)
+        if word.endswith("]"):
+            break
+    options = {}
+    for word in " ".join(words).strip("[]").split():
+        key, sep, value = word.partition("=")
+        if sep:
+            options[key] = value
+    return options, rest
+
+
+def parse_apt_source(name: str, text: str) -> AptSource:
+    """The URIs and Signed-By keyrings of a .list or .sources file."""
+    uris: list[str] = []
+    keyrings: list[str] = []
+    enabled = False
+    if name.endswith(".sources"):
+        for fields in _stanzas(text):
+            if fields.get("Enabled", "yes").lower() == "no":
+                continue
+            enabled = True
+            uris += fields.get("URIs", "").split()
+            # An inline key starts on the next line and leaves this empty.
+            keyrings += [p for p in fields.get("Signed-By", "").replace(",", " ").split() if p.startswith("/")]
+    else:
+        for line in text.splitlines():
+            tokens = line.split("#", 1)[0].split()
+            if not tokens or tokens[0] not in ("deb", "deb-src"):
+                continue
+            options, rest = _list_options(tokens[1:])
+            if rest:
+                enabled = True
+                uris.append(rest[0])
+            keyrings += [p for p in options.get("signed-by", "").split(",") if p.startswith("/")]
+    return AptSource(tuple(dict.fromkeys(uris)), tuple(dict.fromkeys(keyrings)), enabled)
+
+
+def _host(uri: str) -> str:
+    return uri.split("://", 1)[-1].split("/", 1)[0].split("@")[-1].split(":")[0].lower()
+
+
+def official(uri: str) -> bool:
+    host = _host(uri)
+    return any(host == h or host.endswith("." + h) for h in OFFICIAL_HOSTS)
+
+
+def apt_path_allowed(path: str) -> bool:
+    """A file directly inside one of the apt directories, safely named."""
+    parent, _, name = path.rpartition("/")
+    return parent in APT_DIRS and bool(APT_FILE_NAME_RE.fullmatch(name)) and name not in (".", "..")
+
+
+def _repo_items(root: Path, entries) -> list[Item]:
+    """The old stick's third-party apt sources, each with its keyring.
+
+    Off unless ticked: bringing one over means trusting whoever signs it,
+    on this stick, from now on. A source the catalog manages is left to its
+    Software item, which writes it itself.
+    """
+    directory = root / APT_SOURCES_DIR
+    try:
+        names = sorted(p.name for p in directory.iterdir())
+    except OSError:
+        return []
+    managed = {
+        entry.repo.sources_path.lstrip("/") for entry in entries if getattr(entry, "repo", None)
+    }
+    items = []
+    for name in names:
+        relative = f"{APT_SOURCES_DIR}/{name}"
+        source_file = root / relative
+        if (not SOURCE_NAME_RE.fullmatch(name) or name in OWN_SOURCES or relative in managed
+                or source_file.is_symlink() or not source_file.is_file()):
+            continue
+        source = parse_apt_source(name, _read(root, relative))
+        if not source.enabled or not source.uris or all(official(uri) for uri in source.uris):
+            continue
+        keyrings = []
+        for keyring in source.keyrings:
+            path = os.path.normpath(keyring).lstrip("/")
+            file = root / path
+            if apt_path_allowed(path) and file.is_file() and not file.is_symlink():
+                keyrings.append(path)
+        hosts = ", ".join(dict.fromkeys(_host(uri) for uri in source.uris if not official(uri)))
+        missing = len(keyrings) < len(source.keyrings) or not source.keyrings
+        items.append(Item(
+            id=f"repos.{name}",
+            category="repos",
+            label=f"{hosts} ({name})",
+            bytes=sum(tree_size(root / p) for p in (relative, *keyrings)),
+            default=False,
+            note="its signing key does not come with it" if missing else "",
+            paths=(relative, *keyrings),
+        ))
+    return items
+
+
 def read_image_packages(path: Path = IMAGE_PACKAGES) -> set[str]:
     try:
         return {line.strip() for line in path.read_text().splitlines() if line.strip()}
@@ -680,6 +805,7 @@ def build_inventory(root: Path, *, entries=None, dpkg_status: str = "", firstboo
     if home:
         items += _home_items(root, home)
     items += _software_items(root, home, entries, dpkg_status, firstboot)
+    items += _repo_items(root, entries)
     items += _package_items(root, entries, firstboot)
     items += _system_items(root)
     return Inventory(
@@ -917,7 +1043,8 @@ def unsafe_paths(inventory: Inventory, ids: list[str]) -> list[str]:
     bad = []
     for item in selected(inventory, ids):
         for path in item.paths:
-            if _malformed(path) or not (is_home(path, inventory.home) or path in ALLOWED_SYSTEM_PATHS):
+            allowed = is_home(path, inventory.home) or path in ALLOWED_SYSTEM_PATHS or apt_path_allowed(path)
+            if _malformed(path) or not allowed:
                 bad.append(path)
     return bad
 
@@ -929,6 +1056,8 @@ def confinement_root(destination: str, target: Target) -> Path | None:
     if is_home(destination, target.home):
         return target.root / target.home
     if any(destination == p or destination.startswith(p + "/") for p in ALLOWED_SYSTEM_PATHS):
+        return target.root / destination.split("/", 1)[0]
+    if apt_path_allowed(destination):
         return target.root / destination.split("/", 1)[0]
     return None
 
