@@ -637,7 +637,9 @@ def drop_unwanted_packages(inventory: Inventory, installed_here: set[str], image
 APT_SOURCES_DIR = "etc/apt/sources.list.d"
 # Where a source's Signed-By may point for its keyring to come along. A path
 # anywhere else is not a keyring this tool will copy, whatever the file says.
-KEYRING_DIRS = ("etc/apt/keyrings", "usr/share/keyrings", "etc/apt/trusted.gpg.d")
+# Not trusted.gpg.d: a key there vouches for every source, Debian's included,
+# where a keyring named by Signed-By vouches only for the source naming it.
+KEYRING_DIRS = ("etc/apt/keyrings", "usr/share/keyrings")
 APT_DIRS = (APT_SOURCES_DIR, *KEYRING_DIRS)
 # Debian's own mirrors, which the new stick has already, and portlin's archive,
 # which portlin-archive-keyring installs.
@@ -756,6 +758,43 @@ def _repo_items(root: Path, entries) -> list[Item]:
             paths=(relative, *keyrings),
         ))
     return items
+
+
+def guard_apt_files(inventory: Inventory, ids: list[str], target: Target, *,
+                    same: Callable[[str], bool]) -> tuple[Inventory, list[Step]]:
+    """Leave alone every apt file this stick already has.
+
+    The source is somebody else's stick. A source whose Signed-By names
+    debian-archive-keyring.gpg, with a key of its own in that file, would
+    otherwise move Debian's keyring aside and put its key in its place. So a
+    ticked source is copied only where none of its files would land on a
+    different one here; otherwise it is left out whole, since a source
+    without its key, or a key without its source, is no use. ``same`` says
+    whether the source's copy of a path is identical to the one here, as it
+    is on a resumed copy, and that path is skipped without a word.
+    """
+    warnings: list[Step] = []
+    items = []
+    wanted = set(ids)
+    for item in inventory.items:
+        if item.category != "repos" or item.id not in wanted:
+            items.append(item)
+            continue
+        keep, clash = [], ""
+        for path in item.paths:
+            here = target.root / path
+            if here.exists() or here.is_symlink():
+                if same(path):
+                    continue
+                clash = path
+                break
+            keep.append(path)
+        if clash:
+            warnings.append(Step("", warn=f"left out the package source {item.label}: "
+                                          f"this stick already has a different /{clash}"))
+            keep = []
+        items.append(dataclasses.replace(item, paths=tuple(keep)))
+    return dataclasses.replace(inventory, items=tuple(items)), warnings
 
 
 def read_image_packages(path: Path = IMAGE_PACKAGES) -> set[str]:

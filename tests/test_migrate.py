@@ -1583,3 +1583,45 @@ class TestPackageSources:
             inventory = migrate.Inventory("0.1.2", "h", "home/u", (
                 migrate.Item("repos.x", "repos", "x", paths=(path,)),))
             assert migrate.unsafe_paths(inventory, ["repos.x"]) == [path], path
+
+    def test_a_key_trusted_for_every_source_never_comes(self, migrate, source):
+        # trusted.gpg.d vouches for every source, Debian's included.
+        (source / "etc/apt/trusted.gpg.d").mkdir(parents=True)
+        (source / "etc/apt/trusted.gpg.d/global.gpg").write_bytes(b"\x99key")
+        (source / "etc/apt/sources.list.d/global.list").write_text(
+            "deb [signed-by=/etc/apt/trusted.gpg.d/global.gpg] https://global.example.com/ x main\n")
+        item = self.repos(migrate, source)["repos.global.list"]
+        assert item.paths == ("etc/apt/sources.list.d/global.list",)
+        assert item.note == "its signing key does not come with it"
+
+
+class TestAptFilesAreNeverReplaced:
+    """A ticked source must not replace a keyring or source this stick has:
+    a source naming debian-archive-keyring.gpg, with its own key in that
+    file, would otherwise put its key where Debian's was."""
+
+    ITEM_PATHS = ("etc/apt/sources.list.d/evil.list", "usr/share/keyrings/debian-archive-keyring.gpg")
+
+    def guard(self, migrate, tmp_path, same):
+        inventory = migrate.Inventory("0.1.2", "h", "home/u", (
+            migrate.Item("repos.evil.list", "repos", "evil.example.com (evil.list)", paths=self.ITEM_PATHS),
+            migrate.Item("home.files.Documents", "home.files", "Documents", paths=("home/u/Documents",)),
+        ))
+        target = migrate.Target(root=tmp_path, user="alice", uid=1000, gid=1000, home="home/alice")
+        (tmp_path / "usr/share/keyrings").mkdir(parents=True)
+        (tmp_path / "usr/share/keyrings/debian-archive-keyring.gpg").write_bytes(b"debian's own")
+        return migrate.guard_apt_files(inventory, ["repos.evil.list", "home.files.Documents"], target, same=same)
+
+    def test_a_different_keyring_here_leaves_the_whole_source_out(self, migrate, tmp_path):
+        guarded, warnings = self.guard(migrate, tmp_path, same=lambda path: False)
+        by_id = {item.id: item for item in guarded.items}
+        assert by_id["repos.evil.list"].paths == ()
+        assert by_id["home.files.Documents"].paths == ("home/u/Documents",)
+        assert len(warnings) == 1 and "debian-archive-keyring.gpg" in warnings[0].warn
+
+    def test_an_identical_file_here_is_skipped_and_the_rest_copied(self, migrate, tmp_path):
+        # The resumed copy: the keyring came over the first time.
+        guarded, warnings = self.guard(migrate, tmp_path, same=lambda path: True)
+        by_id = {item.id: item for item in guarded.items}
+        assert by_id["repos.evil.list"].paths == ("etc/apt/sources.list.d/evil.list",)
+        assert warnings == []

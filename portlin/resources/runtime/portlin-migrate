@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import filecmp
 import grp
 import json
 import os
@@ -94,6 +95,7 @@ from migrate import (  # noqa: E402
     dpkg_status_lines,
     drop_unwanted_packages,
     entry_within,
+    guard_apt_files,
     human,
     mark_existing_account,
     identity_steps,
@@ -690,6 +692,19 @@ def apply_steps(inventory: Inventory, ids: list[str], source: Source, target: Ta
     steps: list[Step] = []
     if not firstboot:
         steps += identity_steps(inventory.identity, ids, hosts_text=hosts_text)
+
+    def same(path: str) -> bool:
+        # An archive's copy cannot be compared without unpacking it, so any
+        # file already here counts as different and the source is left out.
+        if source.kind == "archive":
+            return False
+        try:
+            return filecmp.cmp(source.root / path, target.root / path, shallow=False)
+        except OSError:
+            return False
+
+    inventory, refused = guard_apt_files(inventory, ids, target, same=same)
+    steps += refused
     if source.kind == "archive":
         steps += plan_archive(inventory, ids, Path(source.path), source.listing, target, stamp)
     else:
