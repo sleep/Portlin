@@ -902,11 +902,14 @@ class TestIdentitySteps:
             migrate.Identity(keyboard="gb", timezone="Europe/London"),
             ["identity.keyboard", "identity.timezone"], hosts_text="",
         )
-        keyboard, setupcon, link, tz = steps
+        keyboard, link, tz = steps
         assert keyboard.write[0][0] == "/etc/default/keyboard"
         assert 'XKBLAYOUT="gb"' in keyboard.write[0][1]
         assert keyboard.argv == ("setupcon", "--keyboard-only", "--save") and keyboard.optional
-        assert setupcon.argv == ("localectl", "set-x11-keymap", "gb") and setupcon.optional
+        # /etc/default/keyboard is X's layout on Debian too; localed is not
+        # asked to write it again, which it refuses with "Access denied".
+        assert not any(step.argv and step.argv[0] == "localectl" and "set-x11-keymap" in step.argv
+                       for step in steps)
         assert link.write == (("/etc/timezone", "Europe/London\n"),)
         assert link.argv == ("ln", "-sf", "/usr/share/zoneinfo/Europe/London", "/etc/localtime")
         assert tz.argv == ("timedatectl", "set-timezone", "Europe/London") and tz.optional
