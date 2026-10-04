@@ -211,6 +211,14 @@ needs network and fits the machine the stick is in now. An archive holds the
 password hash and every saved wifi password, so `export` writes it `0600` and
 says so.
 
+A copy from a drive can be stopped with **Pause + Unmount**, which finishes the
+file under way, unmounts the old drive and locks it again, so it is safe to
+unplug. **Resume**, there or the next time Migrate opens, runs the same plan again:
+rsync skips everything already copied, and the drive is found by its UUID even if
+it comes back under another device name. A copy that fails part way, such as on a
+drive with bad sectors, keeps its plan the same way and offers **Try again**. The
+Details pane shows each file rsync writes.
+
 ## Updates
 
 The Debian system updates itself: it is a real install, so `apt full-upgrade`

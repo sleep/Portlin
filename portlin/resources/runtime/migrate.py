@@ -41,8 +41,10 @@ RELEASE_FILE = "etc/portlin-release"
 # number differently, and lsblk knows it either way. NAME is requested and
 # never read: current util-linux only nests a disk's partitions under it as
 # "children" in --json output when NAME is among the requested columns, and
-# parse_lsblk's walk of disk["children"] finds nothing without it.
-LSBLK_COLUMNS = "NAME,PATH,LABEL,FSTYPE,SIZE,MODEL,TRAN,PARTN"
+# parse_lsblk's walk of disk["children"] finds nothing without it. UUID is
+# what finds the same root again after the drive is unplugged and comes back
+# under another name, which is how a paused migration resumes.
+LSBLK_COLUMNS = "NAME,PATH,LABEL,FSTYPE,SIZE,MODEL,TRAN,PARTN,UUID"
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class Candidate:
     size: str = ""
     encrypted: bool = False
     version: str = ""
+    uuid: str = ""  # the root's filesystem or LUKS UUID, for a stick
 
 
 def lsblk_argv() -> list[str]:
@@ -102,14 +105,13 @@ def _probed(child: dict, probe: Callable[[str], dict[str, str]]) -> dict:
     reading that cache, so it is the fallback for whichever of the two
     lsblk left blank -- never for a value lsblk already gave.
     """
-    if child.get("fstype") and child.get("label"):
+    if child.get("fstype") and child.get("label") and child.get("uuid"):
         return child
     info = probe(child["path"])
     filled = dict(child)
-    if not filled.get("fstype"):
-        filled["fstype"] = info.get("TYPE") or filled.get("fstype")
-    if not filled.get("label"):
-        filled["label"] = info.get("LABEL") or filled.get("label")
+    for key, probed in (("fstype", "TYPE"), ("label", "LABEL"), ("uuid", "UUID")):
+        if not filled.get(key):
+            filled[key] = info.get(probed) or filled.get(key)
     return filled
 
 
@@ -157,6 +159,7 @@ def parse_lsblk(
                 (disk.get("model") or "").strip(),
                 disk.get("size") or "",
                 encrypted,
+                uuid=root.get("uuid") or "",
             )
         )
     return found
@@ -635,6 +638,9 @@ SYSTEM_BACKUP_ROOT = "var/backups/portlin-migrate"
 RSYNC_PARTIAL = (23, 24)
 
 EXIT_NO_SPACE = 6
+# Pause was asked for: the copy stopped, the source was closed, and running
+# the same plan again carries on from there.
+EXIT_PAUSED = 7
 # Left free after the copy, so a full root does not stop apt or the desktop.
 SPACE_RESERVE = 512 * 1024**2
 
@@ -710,6 +716,11 @@ def rsync_argv(source: Path, target: Path, *, backup_dir: Path, chown: tuple[int
     trailing slashes make rsync copy a directory's contents into the target
     rather than nesting it one level down; a file or a symlink is named as
     itself, and -a keeps a symlink a symlink.
+
+    Leaving out --delete is also what makes a stopped copy resumable: run
+    again, rsync skips every file already here with the same size and time,
+    and a skipped file is not replaced, so nothing finished the first time
+    is moved aside the second.
     """
     argv = [
         "rsync", "-a", "--backup", f"--backup-dir={backup_dir}",

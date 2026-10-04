@@ -29,10 +29,16 @@ window reads it with the same code Software uses:
     ::bytes <copied> <total> the same, in bytes, for rates and estimates
     ::files <count>          files written so far, where rsync counts them
     ::warn <text>            something was skipped and the run went on
-    ::result ok|failed [text]
+    ::result ok|failed|paused [text]
 
 A reader that knows only step, progress, warn and result loses nothing it
 needs by skipping the rest.
+
+While apply runs, a line "pause" on its stdin (after the passphrase, when
+there is one) stops the copy under way, closes the source so the drive can
+be unplugged, and ends with ::result paused. Running the same plan again
+resumes: rsync skips what is already here, and the plan finds the drive by
+its UUID even if it comes back under another device name.
 
 Everything else is rsync, tar and apt talking, passed through for the log.
 """
@@ -45,10 +51,12 @@ import grp
 import json
 import os
 import pwd
+import re
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +78,7 @@ from migrate import (  # noqa: E402
     BACKUP_DIRNAME,
     CATEGORIES,
     EXIT_NO_SPACE,
+    EXIT_PAUSED,
     MANIFEST,
     SYSTEM_BACKUP_ROOT,
     Inventory,
@@ -124,6 +133,8 @@ PLAN_DIR = Path("/run/portlin/migrate")
 LOG = Path("/var/log/portlin-migrate.log")
 WEAR_CONFIG = Path("/etc/portlin/wear.conf")
 MEDIA_ROOTS = ("/media", "/run/media")
+BY_UUID = Path("/dev/disk/by-uuid")
+UUID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
 LOCAL_ROOT = Path("/")
 SHELLS = Path("/etc/shells")
 
@@ -143,6 +154,65 @@ class Source:
     encrypted: bool = False
     root: Path | None = None  # where a stick is mounted
     listing: str = ""  # an archive's member list, once read
+
+
+class Paused(Exception):
+    """A pause was asked for and the run stopped short of its end."""
+
+
+# The steps a pause may stop mid-way. An rsync stopped there loses nothing:
+# the file it was writing is dropped and copied whole next time, and every
+# finished file is skipped. A tar restore starts over instead, which is why
+# the window offers a pause only for a drive. Anything else (useradd, an apt
+# install) is left to finish, and the pause comes after it.
+INTERRUPTIBLE = ("rsync", "tar")
+
+
+class Control:
+    """The pause request, and the copy it should stop, shared with the thread
+    that reads stdin."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.requested = False
+        self.proc = None
+
+    def pause(self) -> None:
+        with self.lock:
+            self.requested = True
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.terminate()
+
+    def running(self, proc) -> None:
+        """Name the copy a pause would stop, or None when it has ended."""
+        with self.lock:
+            self.proc = proc
+            if proc is not None and self.requested:
+                proc.terminate()
+
+
+CONTROL = Control()
+
+
+def listen_for_pause(stream=None, control: Control | None = None) -> threading.Thread:
+    """Read stdin for "pause" in the background. End of input means only
+    that nobody can ask any more, not a pause: a window that crashed should
+    not stop a copy it can no longer show."""
+    stream = stream or sys.stdin
+    control = control or CONTROL
+
+    def read() -> None:
+        try:
+            for line in stream:
+                if line.strip() == "pause":
+                    log("pause requested")
+                    control.pause()
+        except (OSError, ValueError):
+            pass
+
+    thread = threading.Thread(target=read, daemon=True)
+    thread.start()
+    return thread
 
 
 @dataclass(frozen=True)
@@ -454,6 +524,9 @@ def _execute(step: Step, on_line: Callable[[str], None]) -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+    interruptible = step.progress in INTERRUPTIBLE
+    if interruptible:
+        CONTROL.running(proc)
     try:
         if step.stdin is not None:
             proc.stdin.write(step.stdin.encode())
@@ -478,16 +551,26 @@ def _execute(step: Step, on_line: Callable[[str], None]) -> int:
         proc.kill()
         proc.wait()
         raise
-    return proc.wait()
+    finally:
+        if interruptible:
+            CONTROL.running(None)
+    code = proc.wait()
+    if interruptible and CONTROL.requested:
+        raise Paused()
+    return code
 
 
 def run_steps(steps, *, total: int, out=None, execute=None,
-              move_roots: tuple[tuple[Path, Path], ...] = ()) -> RunResult:
+              move_roots: tuple[tuple[Path, Path], ...] = (), control: Control | None = None) -> RunResult:
     """Run a plan's steps in order. ``move_roots`` is where a step's
     move-asides may act, as move_roots() gives it; with none given, every
-    move-aside is refused."""
+    move-aside is refused. A pause raises Paused before the next step, or
+    out of execute when it stopped a copy."""
     out = out or sys.stdout
     execute = execute or _execute
+    # Looked up here rather than as the default, so it is the same object
+    # _execute stops copies through.
+    control = control or CONTROL
     warnings: list[str] = []
     done = 0
     # Files rsync reports written: the finished steps' total, plus the
@@ -495,6 +578,8 @@ def run_steps(steps, *, total: int, out=None, execute=None,
     files = {"before": 0, "current": 0}
     emit("stages", json.dumps(stage_outline(steps)), out=out)
     for step in steps:
+        if control.requested:
+            raise Paused()
         if step.warn:
             emit("warn", step.warn, out=out)
             warnings.append(step.warn)
@@ -603,7 +688,8 @@ def apply_steps(inventory: Inventory, ids: list[str], source: Source, target: Ta
 # -- plan files -----------------------------------------------------------------
 
 
-def write_plan(path: Path, *, source: Source, ids: list[str], inventory: Inventory, firstboot: bool, label: str) -> None:
+def write_plan(path: Path, *, source: Source, ids: list[str], inventory: Inventory, firstboot: bool, label: str,
+               uuid: str = "") -> None:
     """What the wizard and the window hand to apply. The account and identity
     are repeated at the top level so the wizard can prefill its screens
     without understanding the inventory."""
@@ -619,6 +705,7 @@ def write_plan(path: Path, *, source: Source, ids: list[str], inventory: Invento
             break
     data = {
         "source": source.path,
+        "uuid": uuid,
         "kind": source.kind,
         "encrypted": source.encrypted,
         "ids": ids,
@@ -861,7 +948,8 @@ def interactive_plan(source_path: str | None, *, firstboot: bool, keep_open: boo
             return EXIT_FAILED
         if not confirm("Ready", plan_summary(inventory, ids, label, shutil.disk_usage("/").free)):
             return EXIT_FAILED
-        write_plan(out_path, source=source, ids=ids, inventory=inventory, firstboot=firstboot, label=label)
+        write_plan(out_path, source=source, ids=ids, inventory=inventory, firstboot=firstboot, label=label,
+                   uuid=candidate.uuid if candidate else "")
         written = True
         return EXIT_OK
     finally:
@@ -877,6 +965,21 @@ def interactive_plan(source_path: str | None, *, firstboot: bool, keep_open: boo
 
 def passphrase_from_stdin() -> str:
     return sys.stdin.readline().rstrip("\n")
+
+
+def passphrase_once() -> Callable[[], str]:
+    """stdin's first line as the passphrase, then nothing. apply keeps stdin
+    open to hear a pause, so a second readline after a wrong passphrase
+    would wait forever instead of meeting the end of input."""
+    asked = {"done": False}
+
+    def read() -> str:
+        if asked["done"]:
+            return ""
+        asked["done"] = True
+        return passphrase_from_stdin()
+
+    return read
 
 
 def resolve_source_path(given: str | None) -> str:
@@ -932,14 +1035,32 @@ def narrow(inventory: Inventory, ids: list[str], only, skip) -> list[str]:
     return kept
 
 
-def apply_plan(path: Path, *, out, only=None, skip=None, passphrase=passphrase_from_stdin) -> tuple[int, str]:
-    """Run a plan. Returns the exit code and the text for ::result or a dialog."""
+def plan_source(plan: dict, by_uuid: Path = BY_UUID) -> str:
+    """Where the plan's source is now. A drive unplugged at a pause can come
+    back as sdc where it was sdb, so its UUID is asked first; the plan file
+    is the user's, so the UUID has to look like one before it becomes a path."""
+    uuid = str(plan.get("uuid") or "")
+    if plan.get("kind") != "archive" and UUID_RE.fullmatch(uuid):
+        link = by_uuid / uuid
+        if link.exists():
+            return os.path.realpath(link)
+    return plan["source"]
+
+
+def apply_plan(path: Path, *, out, only=None, skip=None, passphrase=passphrase_from_stdin,
+               listen: bool = False) -> tuple[int, str]:
+    """Run a plan. Returns the exit code and the text for ::result or a dialog.
+
+    ``listen`` reads stdin for a pause once the passphrase, if any, is read.
+    """
     plan = read_plan(path)
     inventory = from_json(json.dumps(plan["inventory"]))
     ids = narrow(inventory, list(plan["ids"]), only, skip)
     firstboot = bool(plan.get("firstboot"))
     stamp = stamp_now()
-    source = open_source(plan["source"], passphrase=passphrase)
+    source = open_source(plan_source(plan), passphrase=passphrase)
+    if listen:
+        listen_for_pause()
     try:
         if source.kind == "archive":
             source_inventory(source, firstboot=firstboot)  # fills the listing
@@ -961,7 +1082,7 @@ def apply_plan(path: Path, *, out, only=None, skip=None, passphrase=passphrase_f
                 # give the files to and nothing useful to do with them.
                 return EXIT_FAILED, "; ".join(result.warnings) or "the account could not be created"
             target = target_for(account.name)
-        elif account and target.user:
+        elif account and target.user and target.user != account.name:
             emit("warn", f"the account {target.user} already exists here, so {account.name}'s files go into it", out=out)
         steps = apply_steps(
             inventory, ids, source, target, stamp, firstboot=firstboot,
@@ -995,9 +1116,17 @@ def cmd_apply(args) -> int:
             gauge.close()
         message("Done" if code == EXIT_OK else "Not finished", "\n" + text)
         return code
-    code, text = apply_plan(Path(args.plan), out=sys.stdout, only=args.only, skip=args.skip)
+    try:
+        code, text = apply_plan(Path(args.plan), out=sys.stdout, only=args.only, skip=args.skip,
+                                passphrase=passphrase_once(), listen=True)
+    except Paused:
+        emit("result", "paused", PAUSED_TEXT)
+        return EXIT_PAUSED
     emit("result", "ok" if code == EXIT_OK else "failed", text)
     return code
+
+
+PAUSED_TEXT = "The old drive is unmounted and safe to unplug. Resuming carries on from where this stopped."
 
 
 def cmd_plan(args) -> int:
@@ -1145,6 +1274,9 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         emit("result", "failed", "cancelled")
         return EXIT_FAILED
+    except Paused:
+        emit("result", "paused", PAUSED_TEXT)
+        return EXIT_PAUSED
     except Cancelled:
         close_source()
         return EXIT_FAILED
