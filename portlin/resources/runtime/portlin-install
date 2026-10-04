@@ -457,6 +457,7 @@ def desktop_categories(entry: Entry) -> str:
         "Browsers": "Network;WebBrowser;",
         "Communication": "Network;InstantMessaging;",
         "Development": "Development;",
+        "Security research": "Development;Security;",
     }.get(entry.category, "Utility;")
 
 
@@ -494,14 +495,22 @@ def plan_user_script(entry: Entry, ctx: Context) -> list[Step]:
 
 
 def plan_github_zip(entry: Entry, ctx: Context, url: str) -> list[Step]:
-    """Install a release ZIP whose sole top-level directory is the app."""
+    """Install a release ZIP, whether or not it wraps the app in a directory.
+
+    Both shapes are shipped: Ghidra's ZIP holds one versioned directory,
+    jadx's holds bin/ and lib/ at the top. Unpacking into a staging
+    directory first is what lets one script tell them apart, and means a
+    half-written tree never looks like the installed program.
+    """
     archive = f"{ctx.download_dir}/{entry.id}.zip"
     staging = f"{entry.opt_dir}/.portlin-unpack"
     script = (
         'set -eu; archive="$1"; destination="$2"; staging="$3"; '
         'rm -rf "$staging"; mkdir -p "$staging"; unzip -q "$archive" -d "$staging"; '
-        'set -- "$staging"/*; test "$#" = 1; test -d "$1"; '
-        'mv "$1"/* "$destination"/; rmdir "$1" "$staging"'
+        'set -- "$staging"/*; '
+        'if test "$#" = 1 && test -d "$1"; then mv "$1"/* "$destination"/; rmdir "$1"; '
+        'else mv "$staging"/* "$destination"/; fi; '
+        'rmdir "$staging"'
     )
     return [
         Step(f"Downloading {entry.name}", mkdir=ctx.download_dir,

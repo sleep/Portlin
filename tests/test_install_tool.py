@@ -12,7 +12,9 @@ a home directory's tools out of root.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -371,6 +373,60 @@ class TestTarballs:
         parser = configparser.ConfigParser(interpolation=None)
         parser.read_string(tool.render_desktop_entry(catalog.by_id("palemoon")))
         assert parser["Desktop Entry"]["Type"] == "Application"
+
+    def test_a_security_research_entry_still_lands_in_the_development_menu(self, tool, catalog):
+        # Ghidra is the one entry on that page that writes a menu entry, and
+        # a page it is drawn on is not a menu it belongs in: without the
+        # mapping it would fall back to Utility and move out of Development.
+        rendered = tool.render_desktop_entry(catalog.by_id("ghidra"))
+        assert "Categories=Development;Security;" in rendered
+
+
+class TestReleaseZips:
+    """The unpack script, run for real against both shapes of release ZIP.
+
+    The script is three lines of shell inside an argv, which no assertion
+    about the argv can prove works. So it is run here against a ZIP built
+    like Ghidra's, which wraps everything in a versioned directory, and one
+    built like jadx's, which does not.
+    """
+
+    def _unpack(self, tool, catalog, ctx, archive: Path, opt: Path) -> None:
+        entry = catalog.by_id("ghidra")
+        steps = tool.plan_install(entry, ctx, asset_url="https://example.invalid/x.zip")
+        argv = [a for a in argvs(steps) if a[0] == "sh"][0]
+        script = argv[2]
+        staging = opt / ".portlin-unpack"
+        opt.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["sh", "-ec", script, "portlin-unpack", str(archive), str(opt), str(staging)],
+            check=True,
+        )
+        assert not staging.exists()
+
+    def _zip(self, path: Path, names: list[str]) -> Path:
+        with zipfile.ZipFile(path, "w") as archive:
+            for name in names:
+                archive.writestr(name, "x")
+        return path
+
+    @pytest.mark.skipif(shutil.which("unzip") is None, reason="needs unzip")
+    def test_a_wrapped_zip_loses_its_top_directory(self, tool, catalog, ctx, tmp_path):
+        archive = self._zip(tmp_path / "wrapped.zip", ["ghidra_11.4_PUBLIC/ghidraRun",
+                                                      "ghidra_11.4_PUBLIC/lib/one.jar"])
+        opt = tmp_path / "opt-wrapped"
+        self._unpack(tool, catalog, ctx, archive, opt)
+        assert (opt / "ghidraRun").is_file()
+        assert (opt / "lib" / "one.jar").is_file()
+
+    @pytest.mark.skipif(shutil.which("unzip") is None, reason="needs unzip")
+    def test_a_flat_zip_keeps_what_it_holds(self, tool, catalog, ctx, tmp_path):
+        archive = self._zip(tmp_path / "flat.zip", ["bin/jadx-gui", "lib/jadx.jar", "README.md"])
+        opt = tmp_path / "opt-flat"
+        self._unpack(tool, catalog, ctx, archive, opt)
+        assert (opt / "bin" / "jadx-gui").is_file()
+        assert (opt / "lib" / "jadx.jar").is_file()
+        assert (opt / "README.md").is_file()
 
 
 class TestVendorScripts:

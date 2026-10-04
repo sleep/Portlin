@@ -29,6 +29,11 @@ REQUESTED = [
     "vlc", "libreoffice", "gimp", "obs-studio", "thunderbird", "keepassxc",
     "signal", "telegram", "discord",
     "yt-dlp", "gallery-dl", "handbrake", "kleopatra", "veracrypt", "php", "jd-gui", "ghidra",
+    "nmap", "metasploit", "sqlmap", "web-scanners", "password-crackers", "impacket",
+    "recon-tools", "packet-tools", "mitm-tools", "wifi-tools", "radare2", "apktool",
+    "debuggers", "binary-tools", "pwntools", "binwalk", "hex-editors", "forensics-tools",
+    "audit-tools", "jadx", "apk-tools", "android-tools", "android-image-tools", "ios-tools",
+    "ios-recovery", "ipsw", "java",
     "btop", "terminal-tools", "konsole", "sqlitebrowser", "wireguard-tools", "virt-manager", "virtualbox",
     "elementary-xfce-icons", "numix-circle-icons",
     "nvidia-driver", "intel-graphics", "amd-graphics", "broadcom-wifi", "printing",
@@ -115,6 +120,62 @@ class TestWhatMovedFromTheImage:
         assert "firmware-nvidia-graphics" in packages.NEVER_INSTALL
         entry = catalog.by_id("nvidia-driver")
         assert "firmware-nvidia-graphics" in entry.packages
+
+
+class TestTheSecurityResearchPage:
+    """The page of tools that act on a machine other than this one.
+
+    Neither rule here is something validate() can know: whether an entry
+    that reaches across the network says so where a person reads it, and
+    whether the reversing tools sit on one page rather than half of them
+    being left behind under Development.
+    """
+
+    OUTWARD = (
+        "nmap", "metasploit", "sqlmap", "web-scanners", "password-crackers",
+        "impacket", "recon-tools", "mitm-tools", "wifi-tools",
+    )
+
+    def test_entries_that_reach_other_machines_say_so(self, catalog):
+        for entry_id in self.OUTWARD:
+            notes = catalog.by_id(entry_id).notes
+            assert notes and catalog.AUTHORIZED_USE in notes, entry_id
+
+    def test_the_entries_that_reach_a_phone_say_so_too(self, catalog):
+        for entry_id in ("android-image-tools", "ios-tools"):
+            notes = catalog.by_id(entry_id).notes
+            assert notes and catalog.AUTHORIZED_DEVICE in notes, entry_id
+
+    def test_the_reversing_tools_share_one_page(self, catalog):
+        for entry_id in ("ghidra", "jd-gui", "radare2", "apktool", "jadx", "debuggers",
+                         "binary-tools"):
+            assert catalog.by_id(entry_id).category == "Security research", entry_id
+
+    def test_the_java_tools_bring_java(self, catalog):
+        # Ghidra and jadx are unpacked archives, not packages, so nothing
+        # pulls a JDK in behind them: without this they install and then
+        # refuse to start.
+        for entry_id in ("ghidra", "jadx"):
+            assert catalog.by_id(entry_id).requires == ("java",), entry_id
+        assert "default-jdk" in catalog.by_id("java").packages
+
+    def test_the_phone_entries_cover_both_platforms(self, catalog):
+        android = ("android-tools", "android-image-tools", "apk-tools", "jadx", "apktool")
+        ios = ("ios-tools", "ios-recovery", "ipsw")
+        for entry_id in android + ios:
+            assert catalog.by_id(entry_id).category == "Security research", entry_id
+        # adb only reaches a phone through the udev rules, and those only
+        # help an account in plugdev.
+        assert catalog.by_id("android-tools").add_groups == ("plugdev",)
+
+    def test_a_search_finds_the_page_by_the_words_people_use(self, catalog):
+        for query, wanted in (
+            ("reverse", "ghidra"),
+            ("packet", "packet-tools"),
+            ("wifi", "wifi-tools"),
+            ("password", "password-crackers"),
+        ):
+            assert wanted in {entry.id for entry in catalog.search(query)}, query
 
 
 class TestValidationRules:
