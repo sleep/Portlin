@@ -1054,7 +1054,7 @@ class TestKeyringUnderAutologin:
         # was doing. Without LUKS there is no such handover, and a passwordless
         # keyring would leave saved passwords readable to whoever finds the
         # stick -- on a device whose entire purpose is being carried around.
-        applying = source[source.index("        apply_autologin(state.username"):source.index("SENTINEL.unlink")]
+        applying = source[source.index("def apply_login"):source.index("def apply_upgrade")]
         assert "apply_keyring_autounlock(" in applying, "nothing opens the keyring at all"
         guard = applying[:applying.index("apply_keyring_autounlock(")]
         assert "encrypted" in guard, "the keyring must not be opened up on an unencrypted stick"

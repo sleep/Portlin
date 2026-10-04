@@ -129,6 +129,40 @@ class TestPlan:
         assert json.loads(path.read_text()) == plan
 
 
+class TestLive:
+    """--live: the window as the whole of an upgrade from first-boot setup."""
+
+    PLAN = {
+        "ids": ["account.ann", "home.files.Documents"],
+        "inventory": {"accounts": [
+            {"name": "bob", "gecos": "Bob", "sudo_nopasswd": False, "autologin": False},
+            {"name": "ann", "gecos": "Ann Example,,,", "sudo_nopasswd": True, "autologin": True},
+        ]},
+    }
+
+    def test_setup_is_told_the_account_that_came_over_and_its_answers(self, window):
+        assert window.live_result(self.PLAN) == {
+            "account": "ann", "full_name": "Ann Example", "sudo_nopasswd": True, "autologin": True,
+        }
+
+    def test_no_account_ticked_tells_setup_nothing(self, window):
+        assert window.live_result({**self.PLAN, "ids": ["home.files.Documents"]}) is None
+        assert window.has_account(["account.ann"]) and not window.has_account(["home.files.Documents"])
+
+    def test_the_inventory_leaves_software_for_later_during_setup(self, window):
+        assert window.inventory_argv("/dev/sdb4", passwordless_sudo=False, firstboot=True)[-1] == "--firstboot"
+        assert "--firstboot" not in window.inventory_argv("/dev/sdb4", passwordless_sudo=False)
+
+    def test_as_root_the_tool_is_run_directly(self, window, monkeypatch):
+        monkeypatch.setattr(window.os, "geteuid", lambda: 0)
+        assert window.apply_argv("/root/plan.json", passwordless_sudo=False) == [
+            window.TOOL, "apply", "--plan", "/root/plan.json",
+        ]
+
+    def test_a_pause_is_explained(self, window, migrate):
+        assert "unplug" in window.explain_exit(migrate.EXIT_PAUSED)
+
+
 class TestPauseFeedback:
     def test_the_paused_result_text_is_kept_for_the_page(self, window):
         fake = window.MigrationWindow.__new__(window.MigrationWindow)
@@ -366,3 +400,33 @@ class TestMenuEntry:
         assert entry["Icon"] == "portlin"
         assert "System" in entry["Categories"]
         assert entry["Terminal"] == "false"
+
+
+class TestLiveSession:
+    """The X client first-boot setup runs for an upgrade."""
+
+    SCRIPT = RUNTIME / "portlin-migrate-live"
+
+    def test_setup_starts_the_script_the_desktop_package_installs(self):
+        from portlin import package
+        from test_firstboot import load_wizard
+
+        assert load_wizard().LIVE_SESSION == f"/{package.MIGRATE_LIVE_TOOL}"
+        assert package.MIGRATE_LIVE_TOOL in package.executable_paths("portlin-desktop")
+        assert package.MIGRATE_LIVE_TOOL in package.text_files("portlin-desktop")
+
+    def test_it_is_valid_shell_and_opens_the_window_in_live_mode(self):
+        import subprocess
+
+        assert subprocess.run(["sh", "-n", str(self.SCRIPT)]).returncode == 0
+        text = self.SCRIPT.read_text()
+        assert f"{window_path()} --live" in text
+
+    def test_setup_and_the_window_agree_on_where_the_result_goes(self, window):
+        from test_firstboot import load_wizard
+
+        assert load_wizard().LIVE_RESULT == window.LIVE_RESULT
+
+
+def window_path() -> str:
+    return "/usr/bin/portlin-migration"

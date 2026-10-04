@@ -151,6 +151,11 @@ LITE_DISPLAY_TOOL = "usr/lib/portlin/portlin-lite-display"
 # The lite session's screen lock, started and stopped by portlin-caffeine-lite.
 LITE_IDLE_TOOL = "usr/lib/portlin/portlin-lite-idle"
 
+# What first-boot setup runs under xinit for an upgrade from an old portlin:
+# the Migrate window alone. Here because the window is, and not on PATH,
+# because outside setup there is a desktop to open Migrate from.
+MIGRATE_LIVE_TOOL = "usr/lib/portlin/portlin-migrate-live"
+
 # What both Caffeine applets import: the lock, the durations and the settings
 # file. Beside portlin-runtime's shared modules in /usr/lib/portlin, but
 # shipped here, because both programs that read it are desktop programs.
@@ -615,6 +620,7 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         files[LITE_SESSION_ENTRY] = (RESOURCES / "runtime" / "portlin-lite.desktop").read_text()
         files[LITE_DISPLAY_TOOL] = (RESOURCES / "runtime" / "portlin-lite-display").read_text()
         files[LITE_IDLE_TOOL] = (RESOURCES / "runtime" / "portlin-lite-idle").read_text()
+        files[MIGRATE_LIVE_TOOL] = (RESOURCES / "runtime" / "portlin-migrate-live").read_text()
         for module in DESKTOP_MODULES:
             files[f"usr/lib/portlin/{module}"] = (RESOURCES / "runtime" / module).read_text()
         files[BACKDROP_UNIT] = (RESOURCES / "runtime" / "portlin-backdrop.service").read_text()
@@ -669,7 +675,7 @@ def executable_paths(package: str) -> set[str]:
         return {f"usr/bin/{tool}" for tool in TOOLS}
     if package == "portlin-desktop":
         return {"DEBIAN/preinst", "DEBIAN/postinst", "DEBIAN/postrm", BACKDROP_TOOL,
-                LITE_DISPLAY_TOOL, LITE_IDLE_TOOL} | {
+                LITE_DISPLAY_TOOL, LITE_IDLE_TOOL, MIGRATE_LIVE_TOOL} | {
             f"usr/bin/{tool}" for tool in DESKTOP_TOOLS
         }
     return set()

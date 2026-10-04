@@ -219,6 +219,14 @@ it comes back under another device name. A copy that fails part way, such as on 
 drive with bad sectors, keeps its plan the same way and offers **Try again**. The
 Details pane shows each file rsync writes.
 
+To upgrade without going through setup, choose **Upgrade from an old portlin** on
+first boot's welcome screen. Setup asks for the keyboard layout, grows the system
+to fill the drive, and opens Migrate on its own in a bare X session. Bring the
+account over with whatever else you want. When the copy finishes, setup applies
+the old drive's sudo and automatic-login answers, rebuilds the boot files and
+starts the desktop. Closing Migrate before then offers to open it again (a paused
+copy resumes) or to set up normally.
+
 ## Updates
 
 The Debian system updates itself: it is a real install, so `apt full-upgrade`
@@ -337,6 +345,7 @@ an answer already chosen, so Enter alone gets through it. It asks for:
 
 | Step | What it sets |
 |---|---|
+| Welcome | Start setup, or (on a stick with the desktop) **Upgrade from an old portlin**: keyboard, grow the drive, then Migrate alone in place of every step below |
 | Restore | Only shown when another portlin is plugged in; hands over to `portlin-migrate` |
 | Keyboard, Language | Searchable lists of every XKB layout and UTF-8 locale on the system |
 | Time zone | Searchable zone list, then whether the hardware clock keeps UTC or local time (preselected to local when the machine boots Windows, so the stick never shifts a Windows PC's clock) |
