@@ -558,6 +558,22 @@ class TestRsync:
     def test_progress_is_read_off_rsyncs_summary_line(self, migrate, line, percent):
         assert migrate.parse_rsync_progress(line) == percent
 
+    @pytest.mark.parametrize("line,written", [
+        ("      1,234,567  45%   12.34MB/s    0:00:01 (xfr#12, to-chk=34/56)", 1234567),
+        ("  5.000.000  100%    4.77MB/s    0:00:00 (xfr#3, to-chk=0/4)", 5000000),
+        ("    987654   3%  100.00MB/s    0:09:00", 987654),
+        ("Documents/report 45% done.odt", None),
+        ("sending incremental file list", None),
+    ])
+    def test_bytes_are_read_off_the_same_line(self, migrate, line, written):
+        # The percent moves in hundredths of the whole copy; on a large home
+        # that is a gigabyte between readings, and a speed that stands still.
+        assert migrate.parse_rsync_bytes(line) == written
+
+    def test_each_file_is_named_for_the_details(self, migrate, tmp_path):
+        argv = migrate.rsync_argv(tmp_path, tmp_path / "out", backup_dir=tmp_path / "b", chown=None)
+        assert "--info=name1" in argv
+
     def test_overall_percent_weights_the_running_step_by_its_bytes(self, migrate):
         assert migrate.overall_percent(done=0, weight=1000, step_percent=50, total=4000) == 12
         assert migrate.overall_percent(done=3000, weight=1000, step_percent=100, total=4000) == 100

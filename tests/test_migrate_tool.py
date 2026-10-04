@@ -1011,3 +1011,31 @@ class TestResumeFindsTheDrive:
         # The plan file is the user's; a uuid that climbs is not a uuid.
         assert tool.plan_source({"source": "/dev/sdb4", "kind": "stick", "uuid": "../../etc"}, tmp_path) == "/dev/sdb4"
         assert tool.plan_source({"source": "/dev/sdb4", "kind": "stick"}, tmp_path) == "/dev/sdb4"
+
+
+class TestByteProgress:
+    def test_bytes_move_between_percent_steps(self, tool, migrate):
+        steps = [migrate.Step("Copying A", argv=("rsync", "a"), progress="rsync", weight=100_000)]
+        out = io.StringIO()
+
+        def execute(step, on_line):
+            on_line("     12,345   0%   1.00MB/s    0:01:00 (xfr#1, to-chk=9/10)")
+            on_line("     45,678   0%   1.00MB/s    0:00:40 (xfr#1, to-chk=9/10)")
+            return 0
+
+        tool.run_steps(steps, total=100_000, out=out, execute=execute, control=tool.Control())
+        lines = out.getvalue().splitlines()
+        assert "::bytes 12345 100000" in lines
+        assert "::bytes 45678 100000" in lines
+        assert "::progress 45" in lines
+
+    def test_file_names_reach_the_details(self, tool, migrate):
+        steps = [migrate.Step("Copying A", argv=("rsync", "a"), progress="rsync", weight=10)]
+        out = io.StringIO()
+
+        def execute(step, on_line):
+            on_line("Documents/report.odt")
+            return 0
+
+        tool.run_steps(steps, total=10, out=out, execute=execute, control=tool.Control())
+        assert "Documents/report.odt" in out.getvalue().splitlines()

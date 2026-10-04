@@ -71,6 +71,9 @@ APP_ID = "org.portlin.Migration"
 TOOL = "/usr/bin/portlin-migrate"
 ICON_NAME = "portlin"
 PLAN_PATH = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "portlin" / "migrate-plan.json"
+# The Details log keeps this many lines. rsync names every file it writes,
+# and a home holds hundreds of thousands of them.
+LOG_LINES = 5000
 
 EXIT_OK = 0
 EXIT_PRIVILEGE = 3
@@ -1703,6 +1706,9 @@ class MigrationWindow(Gtk.ApplicationWindow):
     def _append(self, line: str) -> None:
         buffer = self.log.get_buffer()
         buffer.insert(buffer.get_end_iter(), line + "\n")
+        excess = buffer.get_line_count() - LOG_LINES
+        if excess > 0:
+            buffer.delete(buffer.get_start_iter(), buffer.get_iter_at_line(excess))
         buffer.move_mark(self.log_end, buffer.get_end_iter())
         self.log.scroll_mark_onscreen(self.log_end)
 
