@@ -69,6 +69,20 @@ MIGRATION_PLAN = Path("/run/portlin/migrate/plan.json")
 # them; portlin-wear owns the storage-wear switches the Settings window shows.
 INSTALL_TOOL = "/usr/bin/portlin-install"
 WEAR_TOOL = "/usr/bin/portlin-wear"
+# While drivers install, a policy here stops maintainer scripts starting
+# NVIDIA's daemons. They cannot work until the kernel module loads after the
+# restart, and setup runs while systemd is still booting, when a unit failure
+# is printed to the console whatever the wizard did to quiet it: straight
+# across the progress screen.
+POLICY_RC_D = Path("/usr/sbin/policy-rc.d")
+POLICY_RC_D_MARK = "# Written by portlin-firstboot while it installs drivers."
+POLICY_RC_D_TEXT = f"""#!/bin/sh
+{POLICY_RC_D_MARK}
+case "$1" in
+    nvidia*) exit 101 ;;
+esac
+exit 0
+"""
 SSHD = "/usr/sbin/sshd"
 UFW = "/usr/sbin/ufw"
 
@@ -1404,6 +1418,10 @@ class Progress:
     def start(self, index: int) -> None:
         self.current, self.fraction = index, None
         self.states[index] = "run"
+        # Each task redraws from nothing, so a line something else printed
+        # to the console lasts no longer than the task it appeared in.
+        if self.ui.screen is not None:
+            self.ui.screen.clearok(True)
         self.draw()
 
     def finish(self, index: int, state: str = "done", detail: str = "") -> None:
@@ -3306,6 +3324,31 @@ def apply_drivers(entries: list[str], progress: Progress) -> bool:
     Returns whether a kernel module was built, which needs a restart before
     the driver is in use.
     """
+    holding = _hold_nvidia_services()
+    try:
+        return _install_drivers(entries, progress)
+    finally:
+        if holding:
+            POLICY_RC_D.unlink(missing_ok=True)
+
+
+def _hold_nvidia_services() -> bool:
+    """Install the policy that keeps NVIDIA's daemons stopped, if it is ours to.
+
+    A policy-rc.d someone else put there is left alone. One of ours left
+    behind by a setup that never finished is simply rewritten.
+    """
+    try:
+        if POLICY_RC_D.exists() and POLICY_RC_D_MARK not in POLICY_RC_D.read_text():
+            return False
+        _write(POLICY_RC_D, POLICY_RC_D_TEXT, 0o755)
+        return True
+    except OSError as exc:
+        log(f"could not write {POLICY_RC_D} ({exc})")
+        return False
+
+
+def _install_drivers(entries: list[str], progress: Progress) -> bool:
     argv = [INSTALL_TOOL, "install", *entries]
     log(f"run: {' '.join(argv)}")
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
