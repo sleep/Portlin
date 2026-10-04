@@ -36,7 +36,7 @@ REPO = Path(__file__).resolve().parent.parent
 # fails in a container for reasons that look nothing like the cause.
 sys.path.insert(0, str(REPO))
 
-from portlin import __version__, progress  # noqa: E402
+from portlin import __version__, buildinfo, progress  # noqa: E402
 from portlin.config import BuildConfig, WriteConfig  # noqa: E402
 from portlin.errors import PortlinError  # noqa: E402
 from portlin.install import write_stick  # noqa: E402
@@ -515,6 +515,8 @@ def run_in_container(args: argparse.Namespace) -> int:
         "-v", f"{REPO}:/src",
         "-v", f"{out_dir}:/out",
         "-e", "LANG=C.UTF-8",
+        # Asked out here because the container has no git to ask with.
+        "-e", f"{buildinfo.COMMIT_ENV}={buildinfo.source_commit()}",
         "-w", "/src",
     ]
     if sys.stdin.isatty() and sys.stdout.isatty():
@@ -676,7 +678,7 @@ def _header(theme, unicode_ok, args, image, timings) -> list[str]:
     logo = render_logo(theme, unicode_ok)
     dot = " · " if unicode_ok else " - "
     facts = [
-        theme(f"portlin {__version__}", Theme.PAPER),
+        theme(f"portlin {buildinfo.describe(__version__, buildinfo.source_commit())}", Theme.PAPER),
         theme(f"{args.suite}{dot}amd64{dot}{args.image_size} image", Theme.INK),
         theme(describe_host(), Theme.INK),
     ]

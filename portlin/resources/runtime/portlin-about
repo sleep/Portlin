@@ -109,7 +109,9 @@ def main() -> int:
 
     dialog = Gtk.AboutDialog()
     dialog.set_program_name("Portlin")
-    dialog.set_version(release.get("PORTLIN_VERSION", "unknown"))
+    version = release.get("PORTLIN_VERSION", "unknown")
+    commit = release.get("PORTLIN_COMMIT", "")
+    dialog.set_version(f"{version} ({commit})" if commit else version)
     dialog.set_comments(f"{TAGLINE}\n\n{debian}" if debian else TAGLINE)
     dialog.set_website(WEBSITE)
     dialog.set_website_label(WEBSITE)
