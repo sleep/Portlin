@@ -17,6 +17,11 @@ Three pages: where from, what to bring, and the copy. The copy page is
 worked out by RunTracker from the protocol alone, so everything it shows
 (every phase ahead, bytes, speed, time left) is what the tool reported, not
 a guess the window made up.
+
+A copy can be paused: the window writes "pause" down the tool's stdin, the
+tool stops between files and unmounts the old drive. The plan file stays,
+so the copy can be resumed, now or the next time the window opens; rsync
+skips what is already here.
 """
 
 from __future__ import annotations
@@ -51,7 +56,16 @@ except (ImportError, AttributeError):
 
 sys.path.insert(0, "/usr/lib/portlin")
 
-from migrate import CATEGORIES, EXIT_NO_SPACE, Candidate, Inventory, describe, from_json, human  # noqa: E402
+from migrate import (  # noqa: E402
+    CATEGORIES,
+    EXIT_NO_SPACE,
+    EXIT_PAUSED,
+    Candidate,
+    Inventory,
+    describe,
+    from_json,
+    human,
+)
 
 APP_ID = "org.portlin.Migration"
 TOOL = "/usr/bin/portlin-migrate"
@@ -125,6 +139,8 @@ CSS = f"""
 .migration .stage-active .stage-text {{ color: {PAPER}; font-weight: bold; }}
 .migration .stage-done .stage-text {{ color: #B9C4D1; }}
 .migration .stage-failed .stage-text {{ color: {AMBER}; }}
+.migration .stage-paused .stage-text {{ color: {PAPER}; }}
+.migration .banner {{ border-color: {BLUE}; }}
 .migration .stage-detail {{ font-size: 9pt; color: {MUTED}; }}
 .migration .mark {{ font-weight: bold; }}
 .migration treeview.view {{ background-color: {PANEL}; color: {PAPER}; }}
@@ -206,6 +222,8 @@ def explain_exit(code: int) -> str:
         return "That was run with the wrong privileges. Nothing was changed."
     if code == EXIT_NO_SPACE:
         return "There is not enough free space on this drive for that selection. Nothing was copied."
+    if code == EXIT_PAUSED:
+        return "Paused. The old drive is unmounted and safe to unplug."
     return f"It did not finish (exit status {code}). The details say where it stopped."
 
 
@@ -243,6 +261,8 @@ def plan_document(candidate: dict, ids: list[str], inventory_data: dict) -> dict
     again on stdin, and this window hands over the one it already holds."""
     return {
         "source": candidate["path"],
+        # Finds the drive again on resume if it comes back under another name.
+        "uuid": candidate.get("uuid", ""),
         "kind": candidate["kind"],
         "encrypted": bool(candidate.get("encrypted")),
         "ids": list(ids),
@@ -266,6 +286,17 @@ def write_plan_file(path: Path, plan: dict) -> None:
     path.touch(mode=0o600, exist_ok=True)
     path.chmod(0o600)
     path.write_text(json.dumps(plan, indent=2))
+
+
+def read_plan_file(path: Path) -> dict | None:
+    """A plan left by a run that was paused or stopped, or None."""
+    try:
+        plan = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(plan, dict) or not plan.get("source") or not isinstance(plan.get("ids"), list):
+        return None
+    return plan
 
 
 def has_passwordless_sudo(run=subprocess.run) -> bool:
@@ -352,7 +383,7 @@ class RunTracker:
         self.percent = 0
         self.files: int | None = None
         self.warnings: list[str] = []
-        self.outcome: str | None = None  # None while running, then "ok" or "failed"
+        self.outcome: str | None = None  # None while running, then "ok", "failed" or "paused"
         self.message = ""
         self.rate: float | None = None
         self._sample: tuple[float, int] | None = None
@@ -426,12 +457,12 @@ class RunTracker:
     def on_warn(self, text: str) -> None:
         self.warnings.append(text)
 
-    def finish(self, ok: bool, message: str = "") -> None:
+    def finish(self, ok: bool, message: str = "", *, paused: bool = False) -> None:
         now = self.clock()
         self.finished = now
-        self.outcome = "ok" if ok else "failed"
+        self.outcome = "ok" if ok else "paused" if paused else "failed"
         self.message = message
-        self._close_active(now, "done" if ok else "failed")
+        self._close_active(now, "done" if ok else self.outcome)
         if ok:
             for stage in self.stages:
                 if stage.state == "pending":
@@ -576,6 +607,8 @@ class ProgressStrip:
                 stops = ("#3E9A70", GREEN, "#74D9AB")
             elif self.state == "failed":
                 stops = ("#9C7434", AMBER, "#F0C97D")
+            elif self.state == "paused":
+                stops = ("#4A5566", MUTED, "#A5B2C2")
             else:
                 stops = ("#3D7FB8", BLUE, "#83C4F2")
             ramp = cairo.LinearGradient(0, 0, max(filled, 1), 0)
@@ -612,10 +645,11 @@ class ProgressStrip:
 
 class StatusMark:
     """A phase's mark: a ring waiting, a pulsing blue dot under way, a green
-    tick done, an amber cross where the run stopped."""
+    tick done, an amber cross where the run stopped, two bars where it was
+    paused."""
 
     SIZE = 20
-    GLYPHS = {"pending": "○", "active": "●", "done": "✓", "failed": "✕"}
+    GLYPHS = {"pending": "○", "active": "●", "done": "✓", "failed": "✕", "paused": "‖"}
 
     def __init__(self) -> None:
         self.state = "pending"
@@ -661,6 +695,16 @@ class StatusMark:
             cr.fill()
             cr.set_source_rgb(*_rgb(BLUE))
             cr.arc(middle, middle, radius * 0.42, 0, 2 * math.pi)
+            cr.fill()
+            return False
+        if self.state == "paused":
+            cr.set_source_rgb(*_rgb(MUTED))
+            cr.arc(middle, middle, radius, 0, 2 * math.pi)
+            cr.fill()
+            cr.set_source_rgb(*_rgb(INK))
+            bar = radius * 0.22
+            for x in (middle - bar * 1.6, middle + bar * 0.6):
+                cr.rectangle(x, middle - radius * 0.45, bar, radius * 0.9)
             cr.fill()
             return False
         color = GREEN if self.state == "done" else AMBER
@@ -737,31 +781,50 @@ class Job:
     unlocks finishes, in ``MigrationWindow.passphrase``, by design: an apply
     started right after an inventory needs it again, and that field is
     cleared as soon as the job that was its last user is done.
+
+    ``keep_open`` leaves stdin open after the passphrase, for ``send``: it is
+    how an apply hears a pause.
     """
 
-    def __init__(self, argv, *, on_event, on_output, on_done, stdin_text: str | None = None) -> None:
+    def __init__(self, argv, *, on_event, on_output, on_done, stdin_text: str | None = None,
+                 keep_open: bool = False) -> None:
         self.argv = argv
         self.on_event = on_event
         self.on_output = on_output
         self.on_done = on_done
         self.proc = subprocess.Popen(
             argv,
-            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_text is not None or keep_open else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
         )
         if stdin_text is not None:
-            try:
-                self.proc.stdin.write(stdin_text + "\n")
-                self.proc.stdin.close()
-            except BrokenPipeError:
-                # A child that exits before reading its passphrase (a bad
-                # argument, an already-open source) still has to be reaped
-                # and reported, not raised past here as a write error.
-                pass
+            self.send(stdin_text + "\n")
+        if not keep_open:
+            self.close_input()
         GLib.io_add_watch(self.proc.stdout, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self._on_readable)
+
+    def send(self, text: str) -> bool:
+        """Write to the child's stdin. False when it is gone or closed: a
+        child that exits before reading (a bad argument, an already-open
+        source) still has to be reaped and reported, not raised past here."""
+        if self.proc.stdin is None or self.proc.stdin.closed:
+            return False
+        try:
+            self.proc.stdin.write(text)
+            self.proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+
+    def close_input(self) -> None:
+        if self.proc.stdin is not None and not self.proc.stdin.closed:
+            try:
+                self.proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
 
     def _on_readable(self, source, condition) -> bool:
         line = source.readline()
@@ -774,6 +837,7 @@ class Job:
                 self.on_output(line)
             return True
         self.proc.wait()
+        self.close_input()
         self.on_done(self.proc.returncode)
         return False
 
@@ -843,6 +907,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self.set_icon_name(ICON_NAME)
         self.get_style_context().add_class("migration")
         self.passwordless_sudo = has_passwordless_sudo() if sudo is None else sudo
+        # The plan the copy under way is running.
+        self.run_plan: dict | None = None
         self.candidates: list[dict] = []
         self.candidate: dict | None = None
         self.inventory_data: dict | None = None
@@ -912,6 +978,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
         page = self._page()
         self._hero(page, "Where should things come from?",
                    "Another portlin drive plugged in now, or a backup made with Back up this stick.")
+        page.pack_start(self._resume_banner(), False, False, 0)
         self.source_state = Gtk.Stack()
         self.source_state.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.source_state.set_vexpand(True)
@@ -956,6 +1023,44 @@ class MigrationWindow(Gtk.ApplicationWindow):
         buttons.pack_end(self.next_button, False, False, 0)
         page.pack_start(buttons, False, False, 0)
         return page
+
+    def _resume_banner(self) -> Gtk.Widget:
+        """A copy that was paused or stopped part way, offered first."""
+        icon = Gtk.Image.new_from_icon_name("media-playback-pause", Gtk.IconSize.DND)
+        icon.set_pixel_size(36)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        texts.set_valign(Gtk.Align.CENTER)
+        self.banner_title = _ellipsize(_label("", "card-title"))
+        self.banner_sub = _ellipsize(_label("", "muted"))
+        texts.pack_start(self.banner_title, False, False, 0)
+        texts.pack_start(self.banner_sub, False, False, 0)
+        discard = Gtk.Button(label="Discard")
+        discard.set_valign(Gtk.Align.CENTER)
+        discard.connect("clicked", lambda *_: self._discard_unfinished())
+        resume = _classed(Gtk.Button(label="Resume"), "suggested-action")
+        resume.set_valign(Gtk.Align.CENTER)
+        resume.connect("clicked", lambda *_: self._resume())
+        self.banner = _classed(Gtk.Box(spacing=14), "card", "banner")
+        self.banner.pack_start(icon, False, False, 0)
+        self.banner.pack_start(texts, True, True, 0)
+        self.banner.pack_end(resume, False, False, 0)
+        self.banner.pack_end(discard, False, False, 0)
+        return self.banner
+
+    def _check_unfinished(self) -> None:
+        plan = read_plan_file(PLAN_PATH)
+        if plan is None:
+            self.banner.hide()
+            return
+        count = len(plan["ids"])
+        self.banner_title.set_text(f"Unfinished: {plan.get('label') or plan['source']}")
+        self.banner_sub.set_text(f"{count} item{'s' if count != 1 else ''}, "
+                                 "stopped part way. Resuming skips what already came over.")
+        self.banner.show_all()
+
+    def _discard_unfinished(self) -> None:
+        PLAN_PATH.unlink(missing_ok=True)
+        self.banner.hide()
 
     def _source_card(self, candidate: dict) -> Gtk.ListBoxRow:
         title, subtitle = card_text(candidate)
@@ -1100,6 +1205,18 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self.close_button = Gtk.Button(label="Close")
         self.close_button.connect("clicked", lambda *_: self.close())
         buttons.pack_end(self.close_button, False, False, 0)
+        self.resume_button = _classed(Gtk.Button(label="Resume"), "suggested-action")
+        self.resume_button.connect("clicked", lambda *_: self._resume())
+        self.resume_button.get_child().show()
+        self.resume_button.set_no_show_all(True)
+        buttons.pack_end(self.resume_button, False, False, 0)
+        self.pause_button = Gtk.Button(label="Pause + Unmount")
+        self.pause_button.set_tooltip_text("Stop after the file being copied, and unmount the old drive "
+                                           "so it can be unplugged. Resume carries on from there.")
+        self.pause_button.connect("clicked", lambda *_: self._pause())
+        self.pause_button.get_child().show()
+        self.pause_button.set_no_show_all(True)
+        buttons.pack_end(self.pause_button, False, False, 0)
         page.pack_start(buttons, False, False, 0)
         return page
 
@@ -1119,6 +1236,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
     def _refresh(self) -> None:
         if self.job is not None:
             return
+        self._check_unfinished()
         self._show_source()
         self.loading_text.set_text("Looking for portlin drives and backups...")
         self._set_source_state("loading")
@@ -1300,22 +1418,68 @@ class MigrationWindow(Gtk.ApplicationWindow):
         if not ids:
             self.choose_note.set_text("Nothing is ticked.")
             return
-        write_plan_file(PLAN_PATH, plan_document(self.candidate, ids, self.inventory_data))
+        self.run_plan = plan_document(self.candidate, ids, self.inventory_data)
+        write_plan_file(PLAN_PATH, self.run_plan)
         title, _ = card_text(self.candidate)
-        self._begin_run("apply", "Bringing things over", f"from {title}")
+        self._launch_apply(f"from {title}")
+
+    def _resume(self) -> None:
+        """Run a plan left by a paused or stopped copy again. rsync skips
+        what already came over, so this carries on rather than starts over."""
+        if self.job is not None:
+            return
+        plan = read_plan_file(PLAN_PATH)
+        if plan is None:
+            self._check_unfinished()
+            return
+        self.passphrase = None
+        if plan.get("encrypted"):
+            self.passphrase = self._ask_passphrase()
+            if self.passphrase is None:
+                return
+        self.run_plan = plan
+        self._launch_apply(f"from {plan.get('label') or plan['source']}, resumed")
+
+    def _launch_apply(self, subtitle: str) -> None:
+        self._begin_run("apply", "Bringing things over", subtitle)
         argv = apply_argv(str(PLAN_PATH), passwordless_sudo=self.passwordless_sudo)
         self._append(f"$ {shlex.join(argv)}")
-        self._run(argv, on_done=self._on_applied, stdin_text=self.passphrase, show=True)
+        # A drive only: the tool never mounted an archive's drive to unmount
+        # it, and a tar restore cannot carry on where it stopped.
+        if (self.run_plan or {}).get("kind") == "stick":
+            self.pause_button.set_label("Pause + Unmount")
+            self.pause_button.set_sensitive(True)
+            self.pause_button.show()
+        self._run(argv, on_done=self._on_applied, stdin_text=self.passphrase, show=True, keep_open=True)
+
+    def _pause(self) -> None:
+        if self.job is None or not self.job.send("pause\n"):
+            return
+        self.pause_button.set_label("Pausing...")
+        self.pause_button.set_sensitive(False)
+        self._append("== Pausing: stopping the copy and unmounting the old drive")
 
     def _on_applied(self, code: int) -> None:
         self.passphrase = None
-        PLAN_PATH.unlink(missing_ok=True)
         self.again.set_sensitive(True)
+        self.pause_button.hide()
         ok = code == EXIT_OK
-        message = "" if ok else (self.last_failure or explain_exit(code))
+        paused = code == EXIT_PAUSED
+        if self.run_kind == "apply":
+            if ok:
+                PLAN_PATH.unlink(missing_ok=True)
+            else:
+                # The plan stays either way: a failing drive or a pulled cable
+                # is exactly when carrying on is worth more than starting over.
+                self.resume_button.set_label("Resume" if paused else "Try again")
+                self.resume_button.show()
+        if paused:
+            message = self.result_text or explain_exit(code)
+        else:
+            message = "" if ok else (self.last_failure or explain_exit(code))
         if self.tracker is not None:
-            self.tracker.finish(ok, message)
-        if not ok and message != self.last_failure:
+            self.tracker.finish(ok, message, paused=paused)
+        if not ok and not paused and message != self.last_failure:
             self._append(message)
         self._render_run()
         self._stop_clock()
@@ -1354,6 +1518,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
         self.status.set_text(subtitle)
         self.run_subtitle = subtitle
         self.again.set_sensitive(False)
+        self.resume_button.hide()
+        self.pause_button.hide()
         self.close_button.get_style_context().remove_class("suggested-action")
         self._set_step(3, "Copy")
         self.stack.set_visible_child_name("progress")
@@ -1487,6 +1653,10 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self.phase_text.set_text(self.result_text)
             self.percent_label.set_text("100")
             self.close_button.get_style_context().add_class("suggested-action")
+        elif tracker.outcome == "paused":
+            self.status_title.set_text("Paused")
+            self.status.set_text(tracker.message)
+            self.phase_text.set_text("")
         else:
             self.status_title.set_text("It stopped")
             self.status.set_text(tracker.message)
@@ -1495,7 +1665,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
 
     # -- running the tool --------------------------------------------------
 
-    def _run(self, argv, *, on_done, stdin_text: str | None = None, show: bool = False) -> None:
+    def _run(self, argv, *, on_done, stdin_text: str | None = None, show: bool = False,
+             keep_open: bool = False) -> None:
         self.collected = []
         self.last_failure = ""
         self.next_button.set_sensitive(False)
@@ -1515,7 +1686,7 @@ class MigrationWindow(Gtk.ApplicationWindow):
 
         try:
             self.job = Job(argv, on_event=self._on_event, on_output=on_output,
-                           on_done=done, stdin_text=stdin_text)
+                           on_done=done, stdin_text=stdin_text, keep_open=keep_open)
         except OSError as exc:
             self.job = None
             self.next_button.set_sensitive(True)
@@ -1541,6 +1712,8 @@ class MigrationWindow(Gtk.ApplicationWindow):
             self._append(rest)
             if rest.startswith("ok "):
                 self.result_text = rest[3:]
+            elif rest.startswith("paused"):
+                self.result_text = rest[len("paused"):].strip()
             elif rest.startswith("failed"):
                 self.last_failure = rest[len("failed"):].strip()
             return
@@ -1615,6 +1788,9 @@ def main() -> int:
         install_css()
         window = windows["window"] = MigrationWindow(application=app)
         window.show_all()
+        # After show_all, which shows the banner whether or not there is
+        # anything to resume.
+        window._check_unfinished()
 
     application.connect("activate", on_activate)
     return application.run(sys.argv)

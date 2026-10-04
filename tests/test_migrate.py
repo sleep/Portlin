@@ -36,7 +36,8 @@ LSBLK = json.dumps({
              {"path": "/dev/sdb1", "label": None, "fstype": None, "size": "1M", "partn": 1},
              {"path": "/dev/sdb2", "label": "PORTLIN-ESP", "fstype": "vfat", "size": "512M", "partn": 2},
              {"path": "/dev/sdb3", "label": "portlin-boot", "fstype": "ext4", "size": "1G", "partn": 3},
-             {"path": "/dev/sdb4", "label": None, "fstype": "crypto_LUKS", "size": "55.8G", "partn": 4},
+             {"path": "/dev/sdb4", "label": None, "fstype": "crypto_LUKS", "size": "55.8G", "partn": 4,
+              "uuid": "5d1e7c2a-93b4-4f0e-8a61-0c7d2b9e4f13"},
          ]},
         {"path": "/dev/sdc", "label": None, "fstype": None, "size": "28.9G",
          "model": "Kingston", "tran": "usb", "partn": None,
@@ -81,6 +82,21 @@ class TestCandidates:
         assert "/dev/nvme0n1p4" not in [
             c.path for c in migrate.parse_lsblk(LSBLK, running_disk="/dev/sda")
         ]
+
+    def test_a_stick_carries_its_roots_uuid_to_be_found_again(self, migrate):
+        # A paused copy resumes after the drive comes back, possibly as sdc
+        # where it was sdb; the UUID is what stays the same.
+        by_path = {c.path: c for c in migrate.parse_lsblk(LSBLK, running_disk="/dev/sda")}
+        assert by_path["/dev/sdb4"].uuid == "5d1e7c2a-93b4-4f0e-8a61-0c7d2b9e4f13"
+        assert by_path["/dev/sdc4"].uuid == ""
+        assert "UUID" in migrate.LSBLK_COLUMNS.split(",")
+
+    def test_a_missing_uuid_is_probed_for(self, migrate):
+        def probe(path):
+            return {"UUID": "c0ffee00-0000-4000-8000-000000000001"} if path == "/dev/sdc4" else {}
+
+        by_path = {c.path: c for c in migrate.parse_lsblk(LSBLK, running_disk="/dev/sda", probe=probe)}
+        assert by_path["/dev/sdc4"].uuid == "c0ffee00-0000-4000-8000-000000000001"
 
     def test_model_and_size_come_from_the_disk_not_the_partition(self, migrate):
         sdb = next(c for c in migrate.parse_lsblk(LSBLK, running_disk="/dev/sda") if c.path == "/dev/sdb4")

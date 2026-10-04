@@ -13,6 +13,7 @@ import io
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -895,3 +896,118 @@ class TestHostileSourceAtRun:
         step = migrate.Step("Restoring", argv=("tar", "x"), move_aside=((str(etc / "printers.conf"), str(backup)),))
         result = tool.run_steps([step], total=0, out=io.StringIO(), move_roots=roots, execute=lambda *a: 0)
         assert result.ok and backup.read_text() == "old"
+
+
+class TestPause:
+    """Pause + Unmount: "pause" on stdin stops the copy under way, the source
+    is closed on the way out, and the same plan run again carries on."""
+
+    @pytest.fixture
+    def control(self, tool, monkeypatch):
+        fresh = tool.Control()
+        monkeypatch.setattr(tool, "CONTROL", fresh)
+        return fresh
+
+    def test_a_pause_stops_the_run_before_the_next_step(self, tool, migrate, control):
+        steps = [
+            migrate.Step("Copying A", argv=("rsync", "a"), progress="rsync", weight=10),
+            migrate.Step("Copying B", argv=("rsync", "b"), progress="rsync", weight=10),
+        ]
+        ran = []
+
+        def execute(step, on_line):
+            ran.append(step.argv[1])
+            control.pause()
+            return 0
+
+        with pytest.raises(tool.Paused):
+            tool.run_steps(steps, total=20, out=io.StringIO(), execute=execute, control=control)
+        assert ran == ["a"]
+
+    def test_a_pause_stops_a_copy_mid_way(self, tool, migrate, control):
+        # A real child that would run for half a minute: the pause has to
+        # terminate it, not wait it out.
+        step = migrate.Step("Copying A", progress="rsync", argv=(
+            sys.executable, "-c", "import time; print('started', flush=True); time.sleep(30)"))
+        with pytest.raises(tool.Paused):
+            tool._execute(step, lambda line: control.pause())
+        assert control.proc is None
+
+    def test_an_install_is_left_to_finish_and_the_pause_comes_after(self, tool, migrate, control):
+        # Killing apt mid-install is how a system is broken; only copies stop.
+        step = migrate.Step("Installing x", passthrough=True, argv=(
+            sys.executable, "-c", "import time; print('a', flush=True); time.sleep(0.2); print('b')"))
+        lines = []
+
+        def on_line(line):
+            lines.append(line)
+            control.pause()
+
+        assert tool._execute(step, on_line) == 0
+        assert lines == ["a", "b"]
+        assert control.requested
+
+    def test_stdin_is_read_for_pause_and_anything_else_ignored(self, tool, control):
+        thread = tool.listen_for_pause(io.StringIO("hunter2\nresume\npause\n"), control=control)
+        thread.join(timeout=5)
+        assert control.requested
+
+    def test_the_end_of_stdin_is_not_a_pause(self, tool, control):
+        # A window that crashed can no longer show the copy, but stopping it
+        # would only lose work.
+        tool.listen_for_pause(io.StringIO(""), control=control).join(timeout=5)
+        assert not control.requested
+
+    def test_the_passphrase_is_read_once_because_stdin_stays_open(self, tool, monkeypatch):
+        lines = iter(["secret\n", "pause\n"])
+        monkeypatch.setattr(tool.sys, "stdin", type("In", (), {"readline": lambda self: next(lines)})())
+        read = tool.passphrase_once()
+        assert read() == "secret"
+        assert read() == ""
+
+    def test_a_paused_apply_ends_in_a_paused_result(self, tool, monkeypatch, capsys):
+        def paused(*args, **kwargs):
+            raise tool.Paused()
+
+        monkeypatch.setattr(tool, "apply_plan", paused)
+
+        class Args:
+            plan, gauge, only, skip = "plan.json", False, None, None
+
+        assert tool.cmd_apply(Args()) == tool.EXIT_PAUSED
+        assert "::result paused " in capsys.readouterr().out
+
+    def test_the_source_is_closed_on_a_pause(self, tool, migrate, monkeypatch, tmp_path):
+        from test_migrate import make_source
+        inventory = migrate.build_inventory(make_source(tmp_path / "s").parent.parent)
+        plan_path = tmp_path / "plan.json"
+        tool.write_plan(plan_path, source=tool.Source("stick", "/dev/sdb4"), ids=["identity.hostname"],
+                        inventory=inventory, firstboot=True, label="x")
+        closed = []
+        monkeypatch.setattr(tool, "open_source", lambda path, passphrase: tool.Source("stick", path, root=tmp_path))
+        monkeypatch.setattr(tool, "close_source", lambda *a: closed.append(True))
+        monkeypatch.setattr(tool, "shortfall", lambda needed, free: 0)
+
+        def paused(*args, **kwargs):
+            raise tool.Paused()
+
+        monkeypatch.setattr(tool, "run_steps", paused)
+        with pytest.raises(tool.Paused):
+            tool.apply_plan(plan_path, out=io.StringIO())
+        assert closed == [True]
+
+
+class TestResumeFindsTheDrive:
+    def test_the_uuid_wins_over_a_device_name_that_moved(self, tool, tmp_path):
+        (tmp_path / "sdc4").touch()
+        by_uuid = tmp_path / "by-uuid"
+        by_uuid.mkdir()
+        (by_uuid / "5d1e7c2a-93b4-4f0e-8a61-0c7d2b9e4f13").symlink_to(tmp_path / "sdc4")
+        plan = {"source": "/dev/sdb4", "kind": "stick", "uuid": "5d1e7c2a-93b4-4f0e-8a61-0c7d2b9e4f13"}
+        assert tool.plan_source(plan, by_uuid) == os.path.realpath(tmp_path / "sdc4")
+
+    def test_an_absent_or_malformed_uuid_keeps_the_device_name(self, tool, tmp_path):
+        assert tool.plan_source({"source": "/dev/sdb4", "kind": "stick", "uuid": "abcd1234-0000"}, tmp_path) == "/dev/sdb4"
+        # The plan file is the user's; a uuid that climbs is not a uuid.
+        assert tool.plan_source({"source": "/dev/sdb4", "kind": "stick", "uuid": "../../etc"}, tmp_path) == "/dev/sdb4"
+        assert tool.plan_source({"source": "/dev/sdb4", "kind": "stick"}, tmp_path) == "/dev/sdb4"

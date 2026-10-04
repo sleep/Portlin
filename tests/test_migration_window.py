@@ -103,12 +103,41 @@ class TestPlan:
         assert plan["label"] == "SanDisk Ultra 57.3G   portlin, encrypted"
         assert "passphrase" not in json.dumps(plan)
 
+    def test_the_plan_names_the_drive_by_uuid_too_for_resuming(self, window):
+        candidate = {"kind": "stick", "path": "/dev/sdb4", "model": "SanDisk", "size": "57.3G",
+                     "encrypted": False, "version": "", "uuid": "5d1e7c2a-93b4-4f0e-8a61-0c7d2b9e4f13"}
+        plan = window.plan_document(candidate, ["home.files.Documents"], {})
+        assert plan["uuid"] == "5d1e7c2a-93b4-4f0e-8a61-0c7d2b9e4f13"
+        # A backup chosen from the file dialog has no uuid, and needs none.
+        archive = {"kind": "archive", "path": "/media/x/a.portlin-backup.tar.zst", "model": "x",
+                   "size": "", "encrypted": False, "version": ""}
+        assert window.plan_document(archive, [], {})["uuid"] == ""
+
+    def test_an_unfinished_plan_is_found_and_junk_is_not(self, window, tmp_path):
+        path = tmp_path / "plan.json"
+        assert window.read_plan_file(path) is None
+        path.write_text("{not json")
+        assert window.read_plan_file(path) is None
+        path.write_text(json.dumps({"source": "/dev/sdb4", "ids": ["home.files.Documents"]}))
+        assert window.read_plan_file(path)["source"] == "/dev/sdb4"
+
     def test_the_plan_file_is_written_0600_from_the_start(self, window, tmp_path):
         path = tmp_path / "plan.json"
         plan = {"source": "/dev/sdb4", "kind": "stick"}
         window.write_plan_file(path, plan)
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert json.loads(path.read_text()) == plan
+
+
+class TestPauseFeedback:
+    def test_the_paused_result_text_is_kept_for_the_page(self, window):
+        fake = window.MigrationWindow.__new__(window.MigrationWindow)
+        fake.last_failure = ""
+        fake.result_text = ""
+        fake._append = lambda line: None
+        window.MigrationWindow._on_event(fake, "result", "paused Paused. Safe to unplug.")
+        assert fake.result_text == "Paused. Safe to unplug."
+        assert fake.last_failure == ""
 
 
 class TestBusyGuard:
@@ -277,6 +306,14 @@ class TestRunTracker:
         tracker.finish(True)
         assert tracker.fraction() == 1.0
         assert all(stage.state == "done" for stage in tracker.stages)
+        assert tracker.remaining() is None
+
+    def test_pausing_marks_where_it_paused_and_is_neither_done_nor_failed(self, window):
+        tracker, _ = self._tracker(window)
+        tracker.on_step("Copying Documents")
+        tracker.finish(False, "Paused. The old drive is unmounted.", paused=True)
+        assert tracker.outcome == "paused"
+        assert [stage.state for stage in tracker.stages] == ["done", "paused", "pending", "pending"]
         assert tracker.remaining() is None
 
     def test_failing_marks_where_it_stopped_and_leaves_the_rest(self, window):
