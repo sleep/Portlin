@@ -1,0 +1,50 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+ "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+<!--
+Part of portlin. Merges into the root Xfce menu from
+/etc/xdg/menus/applications-merged, adding a Portlin submenu for every
+entry in the X-Portlin category. The entries keep their standard categories
+too, so another desktop still files them somewhere sensible; here they are
+excluded from the stock submenus those categories would otherwise put them
+in, so each appears once. A <Menu> with the Name of a stock one merges into
+it, and an Exclude after the stock Include takes the entries back out.
+Where the submenu sits among the root items is set in portlin-about.menu,
+which owns the root Layout.
+-->
+<Menu>
+  <Name>Xfce</Name>
+  <Menu>
+    <Name>Portlin</Name>
+    <Directory>portlin.directory</Directory>
+    <Include>
+      <Category>X-Portlin</Category>
+    </Include>
+    <Layout>
+      <Filename>portlin-software.desktop</Filename>
+      <Filename>portlin-drivers.desktop</Filename>
+      <Filename>portlin-migration.desktop</Filename>
+      <Filename>portlin-caffeine.desktop</Filename>
+      <Separator/>
+      <Filename>portlin-settings.desktop</Filename>
+      <Merge type="all"/>
+    </Layout>
+  </Menu>
+  <Menu>
+    <Name>Accessories</Name>
+    <Exclude>
+      <Category>X-Portlin</Category>
+    </Exclude>
+  </Menu>
+  <Menu>
+    <Name>Settings</Name>
+    <Exclude>
+      <Category>X-Portlin</Category>
+    </Exclude>
+  </Menu>
+  <Menu>
+    <Name>System</Name>
+    <Exclude>
+      <Category>X-Portlin</Category>
+    </Exclude>
+  </Menu>
+</Menu>

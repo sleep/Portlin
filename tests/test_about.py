@@ -133,11 +133,26 @@ class TestMenuLayout:
             for line in content.splitlines()
             if "<Filename>" in line
         ]
-        assert filenames == ["portlin-about.desktop", "xfce4-about.desktop"]
+        index = filenames.index("portlin-about.desktop")
+        assert filenames[index + 1] == "xfce4-about.desktop"
+
+    def test_it_keeps_every_root_item_the_stock_layout_places(self):
+        # The last Layout wins outright, so anything the stock one names and
+        # this one leaves out drops into the merged block in name order: Log
+        # Out ended up between File Manager and Mail Reader that way.
+        content = LAYOUT.read_text()
+        for name in ("xfce4-run.desktop", "xfce4-terminal-emulator.desktop", "xfce4-file-manager.desktop",
+                     "xfce4-mail-reader.desktop", "xfce4-web-browser.desktop", "xfce4-session-logout.desktop"):
+            assert f"<Filename>{name}</Filename>" in content
+        assert content.index("xfce4-about.desktop") < content.index("xfce4-session-logout.desktop")
+
+    def test_it_puts_the_portlin_submenu_beside_settings(self):
+        content = LAYOUT.read_text()
+        assert "<Menuname>Portlin</Menuname>\n    <Menuname>Settings</Menuname>" in content
 
     def test_it_ships_under_the_merge_directory_xfce_reads(self):
         destination = package.MENU_LAYOUT_ENTRIES["portlin-about.menu"]
-        assert destination == "etc/xdg/menus/xfce-applications-merged/portlin-about.menu"
+        assert destination == "etc/xdg/menus/applications-merged/portlin-about.menu"
         assert destination in package.text_files("portlin-desktop")
 
     def test_it_is_declared_a_conffile(self):
@@ -147,3 +162,53 @@ class TestMenuLayout:
         conffiles = package.text_files("portlin-desktop")["DEBIAN/conffiles"].splitlines()
         destination = package.MENU_LAYOUT_ENTRIES["portlin-about.menu"]
         assert f"/{destination}" in conffiles
+
+
+TOOLS_MENU = RUNTIME / "portlin-tools.menu"
+DIRECTORY = RUNTIME / "portlin.directory"
+CATEGORISED = ["portlin-software.desktop", "portlin-migration.desktop", "portlin-caffeine.desktop",
+               "portlin-settings.desktop"]
+
+
+class TestPortlinSubmenu:
+    """The Portlin submenu, which gathers portlin's own tools in one place."""
+
+    def _categories(self, name: str) -> list[str]:
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.optionxform = str
+        parser.read_string((RUNTIME / name).read_text())
+        return parser["Desktop Entry"]["Categories"].strip(";").split(";")
+
+    def test_it_gathers_the_x_portlin_category(self):
+        content = TOOLS_MENU.read_text()
+        assert "<Name>Portlin</Name>" in content
+        assert "<Include>\n      <Category>X-Portlin</Category>" in content
+
+    def test_each_tool_is_in_the_category_and_keeps_a_standard_one(self):
+        # The standard category is for any other desktop, which knows nothing
+        # of X-Portlin and would otherwise file the tool under Other.
+        for name in CATEGORISED:
+            categories = self._categories(name)
+            assert "X-Portlin" in categories, name
+            assert any(not category.startswith("X-") for category in categories), name
+
+    def test_the_stock_submenus_those_categories_reach_give_the_tools_up(self):
+        # Without these each tool would appear twice: in Portlin, and wherever
+        # its standard category files it.
+        content = TOOLS_MENU.read_text()
+        for submenu in ("Accessories", "Settings", "System"):
+            block = content[content.index(f"<Name>{submenu}</Name>"):]
+            block = block[:block.index("</Menu>")]
+            assert "<Exclude>" in block and "<Category>X-Portlin</Category>" in block, submenu
+
+    def test_the_submenu_has_a_name_and_icon(self):
+        content = DIRECTORY.read_text()
+        assert "Type=Directory" in content and "Name=Portlin" in content and "Icon=portlin" in content
+        assert "<Directory>portlin.directory</Directory>" in TOOLS_MENU.read_text()
+
+    def test_both_ship_where_xfce_looks(self):
+        files = package.text_files("portlin-desktop")
+        assert package.MENU_LAYOUT_ENTRIES["portlin-tools.menu"] == (
+            "etc/xdg/menus/applications-merged/portlin-tools.menu")
+        assert "etc/xdg/menus/applications-merged/portlin-tools.menu" in files
+        assert "usr/share/desktop-directories/portlin.directory" in files

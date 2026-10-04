@@ -7,5 +7,5 @@ Exec=portlin-settings
 Icon=portlin
 Terminal=false
 StartupNotify=true
-Categories=Settings;X-XFCE-SettingsDialog;
+Categories=Settings;X-XFCE-SettingsDialog;X-Portlin;
 Keywords=portlin;settings;storage;wear;logs;cache;downloads;

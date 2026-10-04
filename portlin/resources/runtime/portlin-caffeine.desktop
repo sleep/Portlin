@@ -11,5 +11,5 @@ StartupNotify=false
 # Utility rather than Settings: it is a switch that runs, not a page of
 # options, and the applications menu files Settings entries away where nobody
 # looks for a program to launch.
-Categories=Utility;
+Categories=Utility;X-Portlin;
 Keywords=caffeine;sleep;suspend;awake;insomnia;screensaver;blank;dpms;

@@ -12,5 +12,5 @@ StartupNotify=true
 # applications menu files Settings entries away where nobody looks for a
 # program to launch. PackageManager is what the menu specification calls this
 # kind of program.
-Categories=System;PackageManager;
+Categories=System;PackageManager;X-Portlin;
 Keywords=software;install;apps;drivers;nvidia;vpn;browser;packages;
