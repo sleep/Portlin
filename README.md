@@ -148,6 +148,26 @@ Entries that need Debian's `non-free` component get it through a drop-in under
 `/etc/apt/sources.list.d/`, so sticks written before that component was enabled by default are
 not left out. Deleting that file takes it away again.
 
+## Drivers
+
+**Drivers**, in the applications menu, is the same hardware report on its own, for after setup:
+the stick moved to a new machine, setup ran with no network, or a driver was skipped then. It names
+the graphics and wifi hardware the stick is plugged into, lists the drivers that fit it with the
+same explanations first boot gives, marks which are already installed, and installs or removes
+them with live progress and apt's output a click away. When a driver builds a kernel module, as
+NVIDIA's and Broadcom's do, it says a restart is needed and offers one.
+
+Installing needs a network, and the window says so rather than starting a download that cannot
+finish: the Install buttons wait, and come back by themselves once NetworkManager reports a
+connection. Removing works offline. It is another reader of `portlin-install`, under `pkexec` like
+Software, so it knows nothing about drivers the command line does not:
+
+```
+portlin-install scan --json                      # what the window shows about this machine
+portlin-install list --json --category Drivers   # every driver, and whether it is installed
+portlin-install install nvidia-driver            # what its Install buttons run
+```
+
 ## Migrating
 
 Plug your old portlin into a machine booted from a new one, and **Migrate** in the
@@ -177,7 +197,7 @@ The Debian system updates itself: it is a real install, so `apt full-upgrade`
 and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
-the wallpapers, the caffeine applet, the Software app and its catalog, the About Portlin menu
+the wallpapers, the caffeine applet, the Software app and its catalog, the Drivers app, the About Portlin menu
 entry and the `portlin-info`, `portlin-expand`, `portlin-encrypt` and `portlin-install`
 commands are Debian packages, and will update from portlin's archive like
 anything else once that archive is published; until then they stay at
@@ -296,7 +316,7 @@ an answer already chosen, so Enter alone gets through it. It asks for:
 | Account | Full name, username and password on one form |
 | Security | Automatic login, whether sudo asks for a password, screen lock delay and lock on suspend, a new LUKS passphrase (only when someone else chose the current one), and an "if found" message shown on the boot menu and above the passphrase prompt |
 | Appearance | Theme, icons, and display scale: automatic picks 100% or 200% at every login for whatever screen the stick is plugged into |
-| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network; compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
+| Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network (or later from Drivers in the menu); compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
 | Services | SSH server (off by default, host keys generated on first enable) and the ufw firewall (on by default, letting SSH through rate-limited when it is on) |
 | Storage | Growing the system to fill the drive, and the storage-wear switches `portlin-wear` owns |
 
