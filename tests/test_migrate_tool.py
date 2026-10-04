@@ -765,12 +765,13 @@ class TestHostileSourceAtRun:
                                 execute=lambda *a: 0)
         assert result.ok and backup.read_text() == "mine" and not existing.exists()
 
-    def test_apply_plan_confines_moves_to_the_home_etc_and_var(self, tool, migrate):
+    def test_apply_plan_confines_moves_to_the_home_etc_var_and_the_keyrings(self, tool, migrate):
         backups = Path("/var/backups")
+        system = ((Path("/etc"), backups), (Path("/var"), backups), (Path("/usr/share/keyrings"), backups))
         assert tool.move_roots(migrate.Target(Path("/"), "alice", 1000, 1000, "home/alice")) == (
-            (Path("/home/alice"), Path("/home/alice")), (Path("/etc"), backups), (Path("/var"), backups),
+            (Path("/home/alice"), Path("/home/alice")), *system,
         )
-        assert tool.move_roots(migrate.Target(Path("/"))) == ((Path("/etc"), backups), (Path("/var"), backups))
+        assert tool.move_roots(migrate.Target(Path("/"))) == system
 
     def test_a_private_write_is_created_unreadable_to_others(self, tool, migrate, tmp_path):
         path = tmp_path / "export/manifest.json"

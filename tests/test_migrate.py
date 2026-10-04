@@ -1483,6 +1483,103 @@ class TestOtherPackages:
         assert install.text == "Installing 2 other packages"
         assert migrate.package_steps([]) == []
 
-    def test_the_heading_sits_after_software(self, migrate):
+    def test_the_headings_sit_after_software_sources_first(self, migrate):
+        # Sources before packages, the order apply copies and installs them in.
         order = [key for key, _ in migrate.CATEGORIES]
-        assert order.index("packages") == order.index("software") + 1
+        assert order.index("repos") == order.index("software") + 1
+        assert order.index("packages") == order.index("repos") + 1
+
+
+VSCODIUM_LIST = (
+    "# added by hand\n"
+    "deb [arch=amd64 signed-by=/usr/share/keyrings/vscodium-archive-keyring.gpg] "
+    "https://download.vscodium.com/debs vscodium main\n"
+)
+SYNCTHING_SOURCES = """\
+Types: deb
+URIs: https://apt.syncthing.net/
+Suites: syncthing
+Components: stable
+Signed-By: /etc/apt/keyrings/syncthing-archive-keyring.gpg
+"""
+
+
+class TestPackageSources:
+    @pytest.fixture
+    def source(self, tmp_path):
+        root = tmp_path / "source"
+        make_source(root)
+        lists = root / "etc/apt/sources.list.d"
+        lists.mkdir(parents=True)
+        (root / "usr/share/keyrings").mkdir(parents=True)
+        (root / "etc/apt/keyrings").mkdir(parents=True)
+        (lists / "vscodium.list").write_text(VSCODIUM_LIST)
+        (root / "usr/share/keyrings/vscodium-archive-keyring.gpg").write_bytes(b"\x99key")
+        (lists / "syncthing.sources").write_text(SYNCTHING_SOURCES)
+        (root / "etc/apt/keyrings/syncthing-archive-keyring.gpg").write_bytes(b"\x99key")
+        # Debian's own mirror, portlin's own archive, a disabled source.
+        (lists / "backports.list").write_text("deb http://deb.debian.org/debian trixie-backports main\n")
+        (lists / "portlin.sources").write_text("Types: deb\nURIs: https://example.org/portlin\n")
+        (lists / "old.sources").write_text("Enabled: no\nTypes: deb\nURIs: https://old.example.com/\n")
+        return root
+
+    def repos(self, migrate, root):
+        return {item.id: item for item in migrate.build_inventory(root).items if item.category == "repos"}
+
+    def test_third_party_sources_are_offered_with_their_keyrings_and_off(self, migrate, source):
+        repos = self.repos(migrate, source)
+        assert set(repos) == {"repos.vscodium.list", "repos.syncthing.sources"}
+        codium = repos["repos.vscodium.list"]
+        assert codium.paths == ("etc/apt/sources.list.d/vscodium.list",
+                                "usr/share/keyrings/vscodium-archive-keyring.gpg")
+        assert codium.label == "download.vscodium.com (vscodium.list)"
+        assert not codium.default and not codium.note
+        assert repos["repos.syncthing.sources"].paths[1] == "etc/apt/keyrings/syncthing-archive-keyring.gpg"
+
+    def test_a_source_the_catalog_writes_is_left_to_its_software_item(self, migrate, source):
+        catalog = load_tool("catalog.py")
+        managed = next(e for e in catalog.ENTRIES if e.repo is not None)
+        path = source / managed.repo.sources_path.lstrip("/")
+        path.write_text("deb [signed-by=/usr/share/keyrings/x.gpg] https://vendor.example.com/ stable main\n")
+        assert f"repos.{path.name}" not in self.repos(migrate, source)
+
+    def test_a_keyring_named_outside_the_keyring_directories_never_comes(self, migrate, source):
+        lists = source / "etc/apt/sources.list.d"
+        (lists / "sneaky.list").write_text("deb [signed-by=/etc/shadow] https://sneaky.example.com/ x main\n")
+        (source / "usr/share/keyrings/linked.gpg").symlink_to(source / "etc/shadow")
+        (lists / "linked.list").write_text(
+            "deb [signed-by=/usr/share/keyrings/linked.gpg] https://linked.example.com/ x main\n")
+        repos = self.repos(migrate, source)
+        for name in ("sneaky.list", "linked.list"):
+            item = repos[f"repos.{name}"]
+            assert item.paths == (f"etc/apt/sources.list.d/{name}",)
+            assert item.note == "its signing key does not come with it"
+
+    def test_one_line_and_deb822_sources_are_read(self, migrate):
+        parsed = migrate.parse_apt_source("x.list", VSCODIUM_LIST + "deb-src [ signed-by=/a.gpg,/b.gpg ] https://y.example/ s c\n")
+        assert parsed.uris == ("https://download.vscodium.com/debs", "https://y.example/")
+        assert parsed.keyrings == ("/usr/share/keyrings/vscodium-archive-keyring.gpg", "/a.gpg", "/b.gpg")
+        inline = migrate.parse_apt_source("y.sources",
+                                          "Types: deb\nURIs: https://z.example/\nSigned-By:\n -----BEGIN PGP PUBLIC KEY BLOCK-----\n .\n")
+        assert inline.uris == ("https://z.example/",) and inline.keyrings == ()
+
+    def test_the_paths_pass_the_plans_checks_and_copy_as_root(self, migrate, source, tmp_path):
+        inventory = migrate.build_inventory(source)
+        ids = ["repos.vscodium.list"]
+        assert migrate.unsafe_paths(inventory, ids) == []
+        target = migrate.Target(root=tmp_path / "t", user="alice", uid=1000, gid=1000, home="home/alice")
+        steps = migrate.plan_stick(inventory, ids, source, target, STAMP)
+        assert [s.argv[-1] for s in steps] == [
+            str(tmp_path / "t/etc/apt/sources.list.d/vscodium.list"),
+            str(tmp_path / "t/usr/share/keyrings/vscodium-archive-keyring.gpg"),
+        ]
+        assert not any(arg.startswith("--chown") for step in steps for arg in step.argv)
+        assert all(f"--backup-dir={tmp_path / 't' / migrate.SYSTEM_BACKUP_ROOT}" in " ".join(step.argv)
+                   for step in steps)
+
+    def test_anything_else_under_apt_is_refused(self, migrate):
+        for path in ("etc/apt/apt.conf.d/99evil", "etc/apt/sources.list.d/../../shadow",
+                     "etc/apt/sources.list.d/sub/x.list", "usr/share/keyrings"):
+            inventory = migrate.Inventory("0.1.2", "h", "home/u", (
+                migrate.Item("repos.x", "repos", "x", paths=(path,)),))
+            assert migrate.unsafe_paths(inventory, ["repos.x"]) == [path], path
