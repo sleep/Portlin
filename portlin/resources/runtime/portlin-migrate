@@ -30,7 +30,8 @@ window reads it with the same code Software uses:
     ::progress <0-100>       bytes copied over bytes planned
     ::bytes <copied> <total> the same, in bytes, for rates and estimates
     ::files <count>          files written so far, where rsync counts them
-    ::copy <text>            rsync's own progress line, as it printed it
+    ::copy <text>            rsync's own progress line, as it printed it, or
+                             one made to match from tar's checkpoints
     ::warn <text>            something was skipped and the run went on
     ::result ok|failed|paused [text]
 
@@ -619,6 +620,15 @@ def _execute(step: Step, on_line: Callable[[str], None]) -> int:
     return code
 
 
+def tar_progress_line(copied: int, weight: int, seconds: float) -> str:
+    """tar's checkpoints as a line of the kind rsync prints by itself: how
+    much, how far, how fast. No rate in the first second, when it is noise."""
+    line = f"{human(copied)} of {human(weight)}  {min(100, copied * 100 // max(weight, 1))}%"
+    if seconds >= 1:
+        line += f"  {human(int(copied / seconds))}/s"
+    return line
+
+
 def run_steps(steps, *, total: int, out=None, execute=None,
               move_roots: tuple[tuple[Path, Path], ...] = (), control: Control | None = None) -> RunResult:
     """Run a plan's steps in order. ``move_roots`` is where a step's
@@ -655,7 +665,7 @@ def run_steps(steps, *, total: int, out=None, execute=None,
         except OSError as exc:
             return RunResult(False, tuple(warnings), str(exc))
         if step.argv:
-            def on_line(line: str, step=step, done=done) -> None:
+            def on_line(line: str, step=step, done=done, started=time.monotonic()) -> None:
                 if step.passthrough and line.startswith("::"):
                     kind, _, rest = line[2:].partition(" ")
                     if kind == "result":
@@ -687,6 +697,7 @@ def run_steps(steps, *, total: int, out=None, execute=None,
                         percent = min(100, checkpoint_bytes(records) * 100 // max(step.weight, 1))
                         emit("progress", str(overall_percent(done, step.weight, percent, total)), out=out)
                         emit("bytes", str(done + copied), str(total), out=out)
+                        emit("copy", tar_progress_line(copied, step.weight, time.monotonic() - started), out=out)
                         return
                 print(line, file=out, flush=True)
             before = len(warnings)
