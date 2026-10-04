@@ -389,6 +389,7 @@ CATEGORIES = [
     ("home.files", "Home: files"),
     ("home.settings", "Home: app settings"),
     ("software", "Software"),
+    ("packages", "Other packages"),
     ("network", "Network"),
     ("extras", "System extras"),
 ]
@@ -409,6 +410,27 @@ BACKUP_DIRNAME = ".portlin-migrate-backup"
 UNTICKED_SETTINGS = frozenset({".cache"})
 
 FIRSTBOOT_SOFTWARE_NOTE = "needs network; install later from Software"
+
+DPKG_STATUS = "var/lib/dpkg/status"
+EXTENDED_STATES = "var/lib/apt/extended_states"
+# Every package the image itself installs, shipped by portlin-runtime. Never
+# offered: the new stick has them already, or its setup removed them on
+# purpose (the desktop it was not given), and either way the old stick's copy
+# is not a choice anyone made.
+IMAGE_PACKAGES = Path("/usr/share/portlin/image-packages")
+# Debian policy's package name, which is also what keeps a name read off the
+# source from reaching apt-get's argv as an option.
+PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+NATIVE_ARCHES = ("amd64", "all")
+# Never offered, whatever the old stick had. Kernels, drivers, firmware and
+# boot loaders describe the old machine and the old release; portlin's own
+# packages come with the new image; and a runtime library with its soname in
+# its name (libssl3, libssl3t64) is renamed between releases and is only ever
+# there for something else. Its -dev package stays on offer.
+EXCLUDED_PACKAGES = re.compile(
+    r"linux-(image|headers|modules|kbuild|support)-.*|.*-dkms|(lib)?nvidia-.*|firmware-.*"
+    r"|.*-microcode|grub-.*|grub2.*|shim-.*|portlin-.*|lib.*[0-9](t64)?"
+)
 
 _XSETTINGS_NAME = re.compile(r'name="(ThemeName|IconThemeName)"[^>]*value="([^"]*)"')
 
@@ -534,6 +556,90 @@ def _software_items(root: Path, home: str, entries, dpkg_status: str, firstboot:
     return items
 
 
+def _stanzas(text: str):
+    """The paragraphs of a dpkg or apt state file, as dicts."""
+    for block in text.split("\n\n"):
+        fields = {}
+        for line in block.splitlines():
+            if line[:1] in (" ", "\t"):
+                continue
+            key, sep, value = line.partition(":")
+            if sep:
+                fields[key] = value.strip()
+        if fields:
+            yield fields
+
+
+def installed_packages(status_text: str) -> dict[str, str]:
+    """Installed packages of the native architectures, name to one-line summary.
+    Held packages count: a hold is still something someone wanted kept."""
+    installed = {}
+    for fields in _stanzas(status_text):
+        status = fields.get("Status", "").split()
+        if len(status) != 3 or status[0] not in ("install", "hold") or status[2] != "installed":
+            continue
+        if fields.get("Architecture") not in NATIVE_ARCHES:
+            continue
+        installed[fields.get("Package", "")] = fields.get("Description", "")
+    return installed
+
+
+def auto_installed(extended_text: str) -> set[str]:
+    """Packages apt pulled in for something else, from extended_states."""
+    return {
+        fields.get("Package", "") for fields in _stanzas(extended_text)
+        if fields.get("Auto-Installed") == "1"
+    }
+
+
+def offerable_package(name: str) -> bool:
+    return bool(PACKAGE_RE.fullmatch(name)) and not EXCLUDED_PACKAGES.fullmatch(name)
+
+
+def _package_items(root: Path, entries, firstboot: bool) -> list[Item]:
+    """What apt installed on the source because someone asked for it.
+
+    Catalog programs are left out, since the software items cover them
+    through their own installer. What is already on the target, or is part
+    of the image, is taken off later, on the target: see drop_unwanted_packages.
+    """
+    auto = auto_installed(_read(root, EXTENDED_STATES))
+    catalog = {
+        name for entry in entries
+        for name in (*entry.packages, *(entry.check.values if entry.check.kind == "dpkg" else ()))
+    }
+    return [
+        Item(
+            id=f"packages.{name}",
+            category="packages",
+            label=f"{name} - {summary}" if summary else name,
+            default=not firstboot,
+            note=FIRSTBOOT_SOFTWARE_NOTE if firstboot else "",
+            value=name,
+        )
+        for name, summary in sorted(installed_packages(_read(root, DPKG_STATUS)).items())
+        if name not in auto and name not in catalog and offerable_package(name)
+    ]
+
+
+def drop_unwanted_packages(inventory: Inventory, installed_here: set[str], image: set[str]) -> Inventory:
+    """Take off every package item this system has already, or ships as part
+    of its image: the first would install nothing, and the second would put
+    back what setup removed."""
+    items = tuple(
+        item for item in inventory.items
+        if item.category != "packages" or (item.value not in installed_here and item.value not in image)
+    )
+    return dataclasses.replace(inventory, items=items)
+
+
+def read_image_packages(path: Path = IMAGE_PACKAGES) -> set[str]:
+    try:
+        return {line.strip() for line in path.read_text().splitlines() if line.strip()}
+    except OSError:
+        return set()
+
+
 def _system_items(root: Path) -> list[Item]:
     items = []
     connections = root / CONNECTIONS
@@ -574,6 +680,7 @@ def build_inventory(root: Path, *, entries=None, dpkg_status: str = "", firstboo
     if home:
         items += _home_items(root, home)
     items += _software_items(root, home, entries, dpkg_status, firstboot)
+    items += _package_items(root, entries, firstboot)
     items += _system_items(root)
     return Inventory(
         version=read_release(root).get("PORTLIN_VERSION", ""),
@@ -1107,6 +1214,8 @@ def plan_archive(inventory: Inventory, ids: list[str], archive: Path, listing: s
 
 
 INSTALLER = "/usr/bin/portlin-install"
+# Other packages go through this tool's own install-packages verb.
+PACKAGE_INSTALLER = "/usr/bin/portlin-migrate"
 
 # Copies of the wizard's THEME_TARGETS and ICON_THEME_TARGETS. The wizard is
 # frozen at write time and cannot import this module, so both hold the same
@@ -1316,6 +1425,22 @@ def software_steps(ids: list[str]) -> list[Step]:
         Step(f"Installing {entry_id}", argv=(INSTALLER, "install", entry_id), passthrough=True, optional=True)
         for entry_id in ids
     ]
+
+
+def package_steps(names: list[str]) -> list[Step]:
+    """One apt run for every other package, through install-packages, which
+    speaks the protocol and skips what the new stick's sources do not have.
+    The names come from the plan, so each is checked before it is an argument."""
+    steps = [
+        Step("", warn=f"ignoring the source's package {name!r}: not a package name it can install")
+        for name in names if not offerable_package(name)
+    ]
+    wanted = [name for name in names if offerable_package(name)]
+    if wanted:
+        count = f"{len(wanted)} other package{'s' if len(wanted) != 1 else ''}"
+        steps.append(Step(f"Installing {count}", argv=(PACKAGE_INSTALLER, "install-packages", *wanted),
+                          passthrough=True, optional=True))
+    return steps
 
 
 def dpkg_status_lines(status_file: str) -> str:

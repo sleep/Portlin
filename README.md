@@ -193,8 +193,8 @@ portlin-install install nvidia-driver            # what its Install buttons run
 Plug your old portlin into a machine booted from a new one, and **Migrate** in the
 Portlin menu brings across what you tick: the account with its password, the
 home directory folder by folder (`Documents` but not `Downloads`, Firefox but not
-`.ssh`), what Software installed, saved wifi passwords, Bluetooth pairings,
-printers and the desktop theme. First boot offers the same thing before it asks
+`.ssh`), what Software installed, the other packages you installed with apt,
+saved wifi passwords, Bluetooth pairings, printers and the desktop theme. First boot offers the same thing before it asks
 for an account, so a new stick can start out as the old one. The same verbs work
 from a terminal:
 
@@ -207,7 +207,12 @@ The old drive is opened read-only and never written to. Files already on the new
 stick with the same names are moved aside into `~/.portlin-migrate-backup/<date>`
 rather than deleted, and a directory that exists on both sides is merged. Software
 is brought back by running the installer again rather than by copying files, so it
-needs network and fits the machine the stick is in now. An archive holds the
+needs network and fits the machine the stick is in now. Other packages are the
+ones apt installed because you asked for them (not their dependencies), less what
+the new stick already has or ships in its image; kernels, drivers, firmware and
+versioned libraries are never offered. They are installed from the new stick's own
+package sources, and any it cannot find there (another release's names, or a
+third-party repository's) are named in a warning. An archive holds the
 password hash and every saved wifi password, so `export` writes it `0600` and
 says so.
 

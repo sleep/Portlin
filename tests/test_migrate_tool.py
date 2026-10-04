@@ -1039,3 +1039,107 @@ class TestByteProgress:
 
         tool.run_steps(steps, total=10, out=out, execute=execute, control=tool.Control())
         assert "Documents/report.odt" in out.getvalue().splitlines()
+
+
+POLICY = """\
+htop:
+  Installed: (none)
+  Candidate: 3.4.1-5
+  Version table:
+     3.4.1-5 500
+        500 http://deb.debian.org/debian trixie/main amd64 Packages
+mail-transport-agent:
+  Installed: (none)
+  Candidate: (none)
+  Version table:
+cowsay:
+  Installed: (none)
+  Candidate: 3.03+dfsg2-8
+"""
+
+
+class TestInstallPackages:
+    def test_only_names_with_a_candidate_are_installable(self, tool):
+        assert tool.parse_policy_candidates(POLICY) == {"htop", "cowsay"}
+
+    def run_verb(self, tool, names, *, update=0, install=0):
+        calls = []
+
+        class Done:
+            def __init__(self, code, stdout=""):
+                self.returncode, self.stdout = code, stdout
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[:1] == ["apt-cache"]:
+                return Done(0, POLICY)
+            return Done(update if "update" in argv else install)
+
+        args = type("Args", (), {"names": names})()
+        return tool.cmd_install_packages(args, run=run), calls
+
+    def test_missing_names_are_warned_about_and_the_rest_installed(self, tool, capsys):
+        code, calls = self.run_verb(tool, ["htop", "google-chrome-stable", "cowsay"])
+        out = capsys.readouterr().out
+        assert code == tool.EXIT_OK
+        install = next(argv for argv in calls if "install" in argv)
+        assert install[-2:] == ["htop", "cowsay"]
+        assert "-y" in install and "DPkg::Lock::Timeout=300" in install
+        assert "::warn not in this stick's package sources, so not installed: google-chrome-stable" in out
+        assert "::result ok installed 2 packages" in out
+
+    def test_no_network_fails_before_asking_apt_for_anything(self, tool, capsys):
+        code, calls = self.run_verb(tool, ["htop"], update=100)
+        assert code == tool.EXIT_FAILED
+        assert not any("install" in argv for argv in calls)
+        assert "::result failed the package lists could not be refreshed" in capsys.readouterr().out
+
+    def test_a_name_that_could_be_an_option_never_reaches_apt(self, tool, capsys):
+        code, calls = self.run_verb(tool, ["-o=APT::Get::x", "htop"])
+        assert all("-o=APT::Get::x" not in argv for argv in calls)
+        assert "::warn not a package name" in capsys.readouterr().out
+
+    def test_the_verb_is_wired_up(self, tool):
+        args = tool.build_parser().parse_args(["install-packages", "htop", "cowsay"])
+        assert args.names == ["htop", "cowsay"] and tool.VERBS["install-packages"] is tool.cmd_install_packages
+
+
+class TestOtherPackagesInThePlan:
+    def test_they_install_after_the_software(self, tool, migrate, tmp_path):
+        from test_migrate import make_source
+        source_root = tmp_path / "source"
+        make_source(source_root)
+        inventory = migrate.Inventory("0.1.2", "office", "home/olduser", (
+            migrate.Item("software.mullvad", "software", "Mullvad", value="mullvad"),
+            migrate.Item("packages.htop", "packages", "htop", value="htop"),
+        ))
+        target = migrate.Target(root=tmp_path / "t", user="alice", uid=1000, gid=1000, home="home/alice")
+        steps = tool.apply_steps(inventory, ["software.mullvad", "packages.htop"],
+                                 tool.Source("stick", "/dev/sdb4", root=source_root), target, "stamp",
+                                 firstboot=False, hosts_text="", icon_theme_installed=lambda n: True)
+        assert [s.argv[:2] for s in steps] == [
+            (migrate.INSTALLER, "install"), (migrate.PACKAGE_INSTALLER, "install-packages"),
+        ]
+
+    def test_the_image_list_is_shipped_where_the_tool_reads_it(self, migrate):
+        from portlin import package
+
+        assert f"/{package.IMAGE_PACKAGES}" == str(migrate.IMAGE_PACKAGES)
+        shipped = package.text_files("portlin-runtime")[package.IMAGE_PACKAGES].split()
+        # Both desktops, so neither comes back when setup removed one.
+        assert "xfce4" in shipped and "labwc" in shipped
+        assert all(migrate.PACKAGE_RE.fullmatch(name) for name in shipped)
+
+    def test_the_target_drops_what_it_has_and_what_its_image_ships(self, tool, migrate, monkeypatch, tmp_path):
+        (tmp_path / "var/lib/dpkg").mkdir(parents=True)
+        (tmp_path / "var/lib/dpkg/status").write_text(
+            "Package: vim\nStatus: install ok installed\nArchitecture: amd64\n")
+        image = tmp_path / "image-packages"
+        image.write_text("xfce4\nlabwc\n")
+        monkeypatch.setattr(tool, "LOCAL_ROOT", tmp_path)
+        monkeypatch.setattr(migrate, "IMAGE_PACKAGES", image)
+        monkeypatch.setattr(tool, "read_image_packages", lambda: migrate.read_image_packages(image))
+        inventory = migrate.Inventory("0.1.2", "office", "home/olduser", tuple(
+            migrate.Item(f"packages.{n}", "packages", n, value=n) for n in ("vim", "xfce4", "htop")))
+        kept = tool.without_local_packages(inventory)
+        assert [item.value for item in kept.items] == ["htop"]
