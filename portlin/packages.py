@@ -70,6 +70,13 @@ SYSTEM = [
     # Ghidra's official GitHub release is a ZIP. portlin-runtime unpacks it
     # under /opt, including on a --minimal stick written without a network.
     "unzip",
+    # What the AI agents' installer scripts in the Software catalog expect
+    # the system to have already: Goose ships as a .tar.bz2, and the Node.js
+    # Hermes fetches links libatomic. The scripts run as the user and cannot
+    # apt-get what is missing. Both are small; git, which Hermes and OpenClaw
+    # also need, is not, and their entries ask for Build tools instead.
+    "bzip2",
+    "libatomic1",
     "zram-tools",
     "bash-completion",
     "less",

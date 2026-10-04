@@ -63,6 +63,7 @@ from catalog import (  # noqa: E402
     expand_home,
     installed,
     is_privileged,
+    missing_requirements,
     parse_dpkg_status,
     search,
     to_dict,
@@ -476,7 +477,8 @@ def plan_user_script(entry: Entry, ctx: Context) -> list[Step]:
         # A file, run by bash, rather than a pipe: a download cut off halfway
         # then fails to parse instead of executing half a script. bash rather
         # than sh because vendors write these against bash.
-        Step(f"Running {entry.name}'s installer", argv=("bash", script), remove=(script,)),
+        Step(f"Running {entry.name}'s installer", argv=("bash", script, *entry.script_args),
+             env=entry.script_env, remove=(script,)),
     ] + _plan_after(entry, ctx)
 
 
@@ -1195,6 +1197,13 @@ def _finish(result: PlanResult, entry: Entry, steps) -> int:
 
 
 def install_one(entry: Entry, ctx: Context, *, dry_run: bool) -> int:
+    if entry.requires:
+        missing = missing_requirements(entry, dpkg_installed(), Path(ctx.home))
+        if missing:
+            names = " and ".join(required.name for required in missing)
+            emit("result", "failed", entry.id,
+                 f"{entry.name} needs {names} installed first. Install that, then this.")
+            return EXIT_FAILED
     resolved = None
     asset_url = None
     if entry.kind in ("github-deb", "github-zip-opt") and not dry_run:

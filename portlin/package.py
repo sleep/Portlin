@@ -522,6 +522,10 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
                     "rsync",
                     "zstd",
                     "unzip",
+                    # What the catalog's AI agent installer scripts expect to
+                    # find: they run as the user and cannot install these.
+                    "bzip2",
+                    "libatomic1",
                 ],
                 recommends=["portlin-desktop"],
             ),
