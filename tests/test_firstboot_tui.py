@@ -766,3 +766,49 @@ class TestTheImageCarriesWhatSetupOffers:
 
     def test_setup_starts_after_networkmanager(self):
         assert "After=NetworkManager.service" in UNIT.read_text()
+
+
+class TestConsoleFont:
+    """The console font grows with the screen, so setup stays legible on 4K."""
+
+    @pytest.fixture
+    def fonts(self, tmp_path):
+        directory = tmp_path / "consolefonts"
+        directory.mkdir()
+        for face in ("Terminus", "TerminusBold"):
+            for size in ("18x10", "20x10", "22x11", "24x12", "28x14", "32x16"):
+                (directory / f"Uni2-{face}{size}.psf.gz").touch()
+        return directory
+
+    def pick(self, fb, tmp_path, fonts, size):
+        size_file = tmp_path / "virtual_size"
+        size_file.write_text(f"{size}\n")
+        font = fb.console_font(size_file, fonts)
+        return font and font.name
+
+    @pytest.mark.parametrize("size, font", [
+        ("3840,2160", "Uni2-TerminusBold32x16.psf.gz"),
+        ("3200,1800", "Uni2-TerminusBold24x12.psf.gz"),
+        ("2560,1440", "Uni2-TerminusBold20x10.psf.gz"),
+        ("1920,1200", None),
+        ("1920,1080", None),
+        ("1366,768", None),
+    ])
+    def test_it_scales_with_the_screen_height(self, fb, tmp_path, fonts, size, font):
+        assert self.pick(fb, tmp_path, fonts, size) == font
+
+    def test_it_falls_back_to_the_regular_face(self, fb, tmp_path, fonts):
+        (fonts / "Uni2-TerminusBold32x16.psf.gz").unlink()
+        assert self.pick(fb, tmp_path, fonts, "3840,2160") == "Uni2-Terminus32x16.psf.gz"
+
+    def test_no_framebuffer_or_fonts_leaves_the_kernel_font(self, fb, tmp_path, fonts):
+        assert fb.console_font(tmp_path / "missing", fonts) is None
+        assert self.pick(fb, tmp_path, tmp_path / "nofonts", "3840,2160") is None
+        assert self.pick(fb, tmp_path, fonts, "garbage") is None
+
+    def test_the_font_is_set_before_curses_starts(self):
+        source = WIZARD.read_text()
+        body = source[source.index("def claim_console"):source.index("def log(")]
+        assert 'attempt(["setfont", str(font)])' in body
+        main_body = source[source.index("def main()"):]
+        assert main_body.index("claim_console(True)") < main_body.index("ui.start()")
