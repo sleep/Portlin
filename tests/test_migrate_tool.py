@@ -211,6 +211,12 @@ class TestRunSteps:
 
         tool.run_steps([step], total=step.weight, out=out, execute=execute)
         assert "::progress 50" in out.getvalue().splitlines()
+        # And a line for the window's log, as rsync gives one.
+        assert any(line.startswith("::copy ") and "  50%" in line for line in out.getvalue().splitlines())
+
+    def test_a_tar_line_says_how_much_how_far_and_how_fast(self, tool):
+        assert tool.tar_progress_line(1_200_000_000, 4_800_000_000, 0.4) == "1.2 GB of 4.8 GB  25%"
+        assert tool.tar_progress_line(1_200_000_000, 4_800_000_000, 100) == "1.2 GB of 4.8 GB  25%  12 MB/s"
 
     def test_a_tolerated_exit_is_a_warning_and_the_run_goes_on(self, tool, migrate):
         steps = [
