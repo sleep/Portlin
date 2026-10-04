@@ -352,15 +352,11 @@ def test_every_surface_that_names_a_theme_asks_for_the_default_icons():
     ]
 
 
-def test_the_applications_menu_button_is_labelled_with_the_running_version():
-    # plugin-1 is applicationsmenu in Debian's shipped panel layout, and the
-    # label is templated from __version__ rather than typed out here, so a
-    # version bump can never leave the button naming an old release.
+def test_the_applications_menu_button_is_labelled_with_the_name_alone():
+    # The version and commit live in About Portlin; the panel only says what
+    # the button opens.
     panel_defaults = package.text_files("portlin-desktop")[package.PANEL_DEFAULTS_FILE]
-    assert package.PANEL_VERSION_PLACEHOLDER not in panel_defaults
-    assert (
-        f'"button-title" type="string" value="Portlin {__version__}"' in panel_defaults
-    )
+    assert '"button-title" type="string" value="Portlin"' in panel_defaults
     assert '"show-button-title" type="bool" value="true"' in panel_defaults
 
 
