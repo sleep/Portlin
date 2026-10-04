@@ -840,6 +840,22 @@ def message(title: str, text: str) -> None:
     _whiptail(["--title", title, "--msgbox", text, str(_height(text, 14)), "76"])
 
 
+def infobox_env(environ=os.environ) -> dict[str, str]:
+    """An infobox is drawn and left, and a terminal with an alternate screen
+    takes it away again the moment whiptail exits. As plain ansi there is no
+    such screen to switch to; the console proper has none either way."""
+    env = dict(environ)
+    if env.get("TERM", "") != "linux":
+        env["TERM"] = "ansi"
+    return env
+
+
+def infobox(title: str, text: str) -> None:
+    """A box that stays up without waiting for a key, for what is under way."""
+    subprocess.run(["whiptail", "--backtitle", BACKTITLE, "--title", title, "--infobox", text, "8", "76"],
+                   env=infobox_env(), check=False)
+
+
 def confirm(title: str, text: str) -> bool:
     argv = ["whiptail", "--backtitle", BACKTITLE, "--title", title, "--yesno", text, str(_height(text)), "76"]
     return subprocess.run(argv).returncode == 0
@@ -1003,7 +1019,9 @@ def interactive_plan(source_path: str | None, *, firstboot: bool, keep_open: boo
     source = open_source(path, passphrase=lambda: ask_password(
         "Unlock the old drive", "\nEnter the passphrase for the old drive:"))
     try:
-        inventory = source_inventory(source, firstboot=firstboot)
+        # Sizing a full home takes minutes, with nothing else on the screen.
+        inventory = source_inventory(source, firstboot=firstboot,
+                                     report=lambda text: infobox("Reading the old drive", f"\n{text}"))
         if not firstboot:
             inventory = mark_existing_account(inventory, local_target().user)
         if candidate:

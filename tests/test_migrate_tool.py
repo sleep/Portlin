@@ -497,6 +497,27 @@ class TestChecklist:
         assert "moved aside" in text
 
 
+class TestInfobox:
+    def test_the_console_is_left_alone_and_anything_else_is_drawn_as_ansi(self, tool):
+        assert tool.infobox_env({"TERM": "linux"})["TERM"] == "linux"
+        assert tool.infobox_env({"TERM": "xterm-256color"})["TERM"] == "ansi"
+
+    def test_the_plan_shows_what_is_being_read(self, tool, migrate, monkeypatch, tmp_path):
+        shown = []
+        monkeypatch.setattr(tool, "open_source", lambda path, passphrase: tool.Source("archive", "/x"))
+        monkeypatch.setattr(tool, "infobox", lambda title, text: shown.append((title, text)))
+
+        def inventory(source, firstboot, report):
+            report("Measuring Documents")
+            return migrate.Inventory("0.1.2", "office", "home/x", ())
+
+        monkeypatch.setattr(tool, "source_inventory", inventory)
+        monkeypatch.setattr(tool, "checklist", lambda title, text, rows: [])
+        monkeypatch.setattr(tool, "message", lambda title, text: None)
+        tool.interactive_plan("/x", firstboot=True, keep_open=False, out_path=tmp_path / "plan.json")
+        assert shown == [("Reading the old drive", "\nMeasuring Documents")]
+
+
 class TestScanWatch:
     def test_names_come_at_once_and_counts_no_faster_than_the_interval(self, tool):
         now = [0.0]
@@ -609,7 +630,7 @@ class TestInteractivePlanCleanup:
     def stubbed(self, tool, migrate, monkeypatch):
         monkeypatch.setattr(tool, "open_source", lambda path, passphrase: tool.Source("stick", "/dev/sdb4"))
         monkeypatch.setattr(tool, "source_inventory",
-                            lambda source, firstboot: migrate.Inventory("0.1.2", "office", "home/x", ()))
+                            lambda source, firstboot, report: migrate.Inventory("0.1.2", "office", "home/x", ()))
         monkeypatch.setattr(tool, "message", lambda title, text: None)
         closed = []
         monkeypatch.setattr(tool, "close_source", lambda: closed.append(True))
