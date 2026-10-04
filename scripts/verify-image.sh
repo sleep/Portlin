@@ -580,7 +580,6 @@ if test -x "$MNT/usr/bin/startxfce4"; then
     # own, so the label no longer depends on Debian's numbering and there is no
     # longer a check here for it.
     PANEL_DEFAULTS="$MNT/etc/xdg/xdg-portlin/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
-    PORTLIN_VERSION="$(sed -n 's/^PORTLIN_VERSION=//p' "$MNT/etc/portlin-release" 2>/dev/null)"
 
     # configver, and its absence is the silent failure of this whole file.
     # xfce4-panel/migrate reads it, and below the current version it loads
@@ -612,10 +611,9 @@ if test -x "$MNT/usr/bin/startxfce4"; then
         fail "no genmon rc file (the readout runs with genmon's own defaults)"
     fi
 
-    grep -qF "\"button-title\" type=\"string\" value=\"Portlin ${PORTLIN_VERSION:-unknown}\"" \
-        "$PANEL_DEFAULTS" 2>/dev/null \
-        && pass "the menu button is labelled with the installed version" \
-        || fail "the panel button-title does not match /etc/portlin-release"
+    grep -qF '"button-title" type="string" value="Portlin"' "$PANEL_DEFAULTS" 2>/dev/null \
+        && pass "the menu button is labelled Portlin" \
+        || fail "the panel button-title is not Portlin"
 
     grep -q '"show-button-title" type="bool" value="true"' "$PANEL_DEFAULTS" 2>/dev/null \
         && pass "the menu button is set to show its label" \

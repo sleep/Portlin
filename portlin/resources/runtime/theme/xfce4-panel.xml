@@ -9,7 +9,7 @@
   append, so adding one plugin means restating the whole list, and restating the
   whole list is owning the layout. There is no third option.
 
-  Owning it pays for itself twice over. The version label no longer rides on a
+  Owning it pays for itself twice over. The menu button label no longer rides on a
   number Debian chose, so the check that policed Debian's numbering is gone
   rather than updated. And whiskermenu takes its button icon from the property
   below, which is what the one-icon "Portlin" icon theme existed to work around:
@@ -79,7 +79,7 @@
     -->
     <property name="plugin-1" type="string" value="whiskermenu">
       <property name="button-icon" type="string" value="portlin"/>
-      <property name="button-title" type="string" value="Portlin @PORTLIN_VERSION@"/>
+      <property name="button-title" type="string" value="Portlin"/>
       <property name="show-button-icon" type="bool" value="true"/>
       <property name="show-button-title" type="bool" value="true"/>
     </property>

@@ -226,15 +226,11 @@ XDG_DEFAULTS = {
 # append, so adding the readout means restating the list, and restating the
 # list is owning the layout.
 #
-# Owning it removes more than it costs. The version label used to sit at the
-# numeric path of whichever plugin Debian made plugin-1, so it depended on
+# Owning it removes more than it costs. The menu button's label used to sit at
+# the numeric path of whichever plugin Debian made plugin-1, so it depended on
 # Debian never renumbering; now portlin assigns the ids and the dependency is
 # gone rather than merely checked.
 PANEL_DEFAULTS_FILE = f"{XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
-
-# Substituted into PANEL_DEFAULTS_FILE after it is read, so the button label
-# can never drift from the version everything else on the stick reports.
-PANEL_VERSION_PLACEHOLDER = "@PORTLIN_VERSION@"
 
 # Every file portlin-desktop ships under /etc, by destination. The greeter
 # configuration stays outside the overlay because it is not an XDG path:
@@ -594,9 +590,6 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         }
         for destination, source in THEME_FILES.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
-        files[PANEL_DEFAULTS_FILE] = files[PANEL_DEFAULTS_FILE].replace(
-            PANEL_VERSION_PLACEHOLDER, __version__
-        )
         # The themed shell: skel for every account the wizard creates, root's
         # own copies for root. The skel path is diverted above; root's home
         # exists at install time and no package owns these paths.
