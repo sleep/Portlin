@@ -92,6 +92,16 @@ MAC_CONF = (
 
 ADJTIME = Path("/etc/adjtime")
 ZRAM_CONFIG = Path("/etc/default/zramswap")
+# Swap on the drive itself, for when compressed RAM is not enough. A file
+# rather than a partition, so it needs no repartitioning and lives inside the
+# LUKS mapping on an encrypted stick. Its priority sits below zram-tools'
+# default of 100, so memory is compressed first and paged to the drive last.
+SWAPFILE = Path("/swapfile")
+FSTAB = Path("/etc/fstab")
+SWAPFILE_PRIORITY = 10
+SWAPFILE_SIZES = [2, 4, 8, 16, 32]
+# Left free on the drive after the swap file, so it never fills the system.
+SWAPFILE_HEADROOM = 4 * 1024**3
 
 # Defaults for channels portlin does not otherwise ship, in the directory the
 # desktop's XDG_CONFIG_DIRS puts first. A whole channel file is only written
@@ -1448,12 +1458,15 @@ class State:
         self.scan: dict | None = None
         self.drivers: list[str] = []
         self.swap: int | None = None
+        self.swapfile: int | None = None
+        self.drive: dict | None = None
         self.ssh = False
         self.firewall = True
         self.expand: bool | None = None
         self.expand_free: int | None = None
         self.wear: dict | None = None
         self.wear_initial: dict | None = None
+        self.wear_checked = False
         self.reboot = False
         self.warnings: list[str] = []
 
@@ -2246,6 +2259,9 @@ def step_hardware(state: State):
         state.scan = hardware_scan()
     if state.swap is None:
         state.swap = _zram_percent()
+    drive = measure_drive(state)
+    if state.swapfile is None:
+        state.swapfile = _swapfile_gigabytes()
     # A card the PCI ID database does not know is named just "Device", which
     # says nothing; its vendor and device numbers at least identify it.
     gpus = [
@@ -2282,11 +2298,83 @@ def step_hardware(state: State):
     rows.append(Row("swap", "Compressed swap", [(0, "off"), (25, "25% of RAM"), (50, "50% of RAM"),
                                                 (75, "75% of RAM"), (100, "100% of RAM")],
                     state.swap if state.swap in (0, 25, 50, 75, 100) else 50, help=swap_help))
+    rows.append(swapfile_row(drive, state.swapfile))
     values = ui.settings("Hardware", "Drivers for this machine, and how memory is stretched.", rows,
                          preface=preface)
     state.drivers = [key.split(":", 1)[1] for key, chosen in values.items() if key.startswith("driver:") and chosen]
     state.swap = values["swap"]
+    state.swapfile = values["swapfile"]
     return True
+
+
+def drive_kind(disk: str) -> str:
+    """What the system drive is, as far as the kernel can tell: hdd, usb or ssd.
+
+    A spinning disk says so in its queue attributes. Anything else behind USB
+    is reported as usb, because a flash stick and a USB SSD look the same from
+    here, and paging is only a problem on the first.
+    """
+    name = Path(disk).name
+    try:
+        if Path(f"/sys/block/{name}/queue/rotational").read_text().strip() == "1":
+            return "hdd"
+    except OSError:
+        pass
+    return "usb" if "/usb" in str(Path(f"/sys/block/{name}").resolve()) else "ssd"
+
+
+def measure_drive(state: State) -> dict:
+    """The system drive's kind and the room it has for a swap file, measured once.
+
+    Room counts the space expansion would add, since the Storage step offers
+    that by default and expansion runs before the swap file is made.
+    """
+    if state.drive is None:
+        ui.busy("Hardware", "Measuring the drive.")
+        if state.expand_free is None:
+            state.expand_free = expansion_offer()
+        located = _root_devices()
+        try:
+            stats = os.statvfs(SWAPFILE.parent)
+            free = stats.f_bavail * stats.f_frsize
+        except OSError:
+            free = 0
+        # A swap file that already exists is replaced, so its space counts too.
+        state.drive = {
+            "kind": drive_kind(located[0]) if located else "unknown",
+            "free": free + (state.expand_free or 0) + _swapfile_gigabytes() * 1024**3,
+        }
+    return state.drive
+
+
+def swapfile_sizes(room: int) -> list[int]:
+    """Swap file sizes, in GB, that leave the drive its headroom."""
+    return [size for size in SWAPFILE_SIZES if size * 1024**3 + SWAPFILE_HEADROOM <= room]
+
+
+def swapfile_row(drive: dict, current: int) -> Row:
+    room = drive["free"]
+    sizes = swapfile_sizes(room)
+    choices = [(0, "off")] + [(size, f"{size} GB") for size in sizes]
+    where = {"hdd": "this hard disk", "ssd": "this drive", "usb": "this USB drive"}.get(drive["kind"], "the drive")
+
+    def describe(values):
+        size = values["swapfile"]
+        if not sizes:
+            return "There is not enough room on the drive for a swap file."
+        if not size:
+            return (f"No swap on the drive. Choose a size to page out to {where} once compressed swap "
+                    "is full, rather than closing programs.")
+        text = f"A {size} GB file on {where}, used only once compressed swap is full."
+        if drive["kind"] == "usb":
+            return (text + " Fine on a USB hard disk or SSD. On a flash stick it is slow and wears the "
+                    "stick out.", True)
+        if drive["kind"] == "hdd":
+            return text + " Slower than memory, but far better than programs being closed."
+        return text
+
+    return Row("swapfile", "Swap on the drive", choices, current if current in dict(choices) else 0,
+               help=describe)
 
 
 # -- services --------------------------------------------------------------
@@ -2346,8 +2434,10 @@ def step_storage(state: State):
     if state.expand_free is None:
         ui.busy("Storage", "Measuring the drive.")
         state.expand_free = expansion_offer()
+    if not state.wear_checked:
         state.wear = wear_status()
         state.wear_initial = dict(state.wear) if state.wear else None
+        state.wear_checked = True
     rows = []
     if state.expand_free:
         gigabytes = state.expand_free / 1024**3
@@ -2416,8 +2506,9 @@ def summary_groups(state: State) -> list[tuple[str, str, str]]:
         appearance.append({"auto": "automatic scale", "1": "100% scale", "2": "200% scale"}[state.scale])
         groups.append(("appearance", "Appearance", ", ".join(appearance)))
     drivers = ", ".join(DRIVER_LABELS.get(entry, entry) for entry in state.drivers) or "no drivers to install"
-    groups.append(("hardware", "Hardware",
-                   f"{drivers}, swap {state.swap}% of RAM" if state.swap else f"{drivers}, no swap"))
+    swap = [f"compressed swap {state.swap}% of RAM" if state.swap else "no compressed swap"]
+    swap.append(f"{state.swapfile} GB swap file" if state.swapfile else "no swap file")
+    groups.append(("hardware", "Hardware", ", ".join([drivers, *swap])))
     if Path(SSHD).exists() or Path(UFW).exists():
         groups.append(("services", "Services",
                        f"SSH {_yes(state.ssh, 'on', 'off')}, firewall {_yes(state.firewall, 'on', 'off')}"))
@@ -3125,6 +3216,55 @@ def apply_swap(percent: int) -> None:
     run(["systemctl", "restart", "zramswap.service"], check=False)
 
 
+def _is_swapfile_entry(line: str) -> bool:
+    fields = line.split()
+    return len(fields) >= 3 and fields[0] == str(SWAPFILE) and fields[2] == "swap"
+
+
+def _swapfile_gigabytes() -> int:
+    """Size of the swap file fstab already names, in whole GB, or 0."""
+    try:
+        listed = any(_is_swapfile_entry(line) for line in FSTAB.read_text().splitlines())
+        return SWAPFILE.stat().st_size // 1024**3 if listed else 0
+    except OSError:
+        return 0
+
+
+def apply_swapfile(gigabytes: int) -> None:
+    """Make, resize or remove the swap file, and list it in fstab.
+
+    fstab only names the file once it is a working swap area, so a failure
+    part way leaves a boot that ignores it rather than one that waits on it.
+    """
+    if gigabytes == _swapfile_gigabytes():
+        return
+    try:
+        lines = FSTAB.read_text().splitlines()
+    except OSError:
+        lines = []
+    lines = [line for line in lines if not _is_swapfile_entry(line)]
+    if SWAPFILE.exists():
+        run(["swapoff", str(SWAPFILE)], check=False)
+        SWAPFILE.unlink()
+    FSTAB.write_text("\n".join(lines) + "\n")
+    if not gigabytes:
+        return
+    stats = os.statvfs(SWAPFILE.parent)
+    if gigabytes * 1024**3 + SWAPFILE_HEADROOM > stats.f_bavail * stats.f_frsize:
+        raise RuntimeError(f"not enough room on the drive for a {gigabytes} GB swap file")
+    # Created owner-only before it holds anything: it will hold pages of memory.
+    os.close(os.open(SWAPFILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    try:
+        run(["fallocate", "-l", f"{gigabytes}G", str(SWAPFILE)])
+        run(["mkswap", str(SWAPFILE)])
+    except Exception:
+        SWAPFILE.unlink(missing_ok=True)
+        raise
+    lines.append(f"{SWAPFILE}\tnone\tswap\tsw,pri={SWAPFILE_PRIORITY}\t0\t0")
+    FSTAB.write_text("\n".join(lines) + "\n")
+    run(["swapon", "--priority", str(SWAPFILE_PRIORITY), str(SWAPFILE)], check=False)
+
+
 def apply_ssh(enabled: bool) -> None:
     """Turn the SSH server on or off.
 
@@ -3298,6 +3438,8 @@ def apply_all(state: State) -> None:
         if not state.swap or state.swap != _zram_percent():
             apply_swap(state.swap)
     task("Compressed swap", swap, True)
+    if state.swapfile or _swapfile_gigabytes():
+        task("Swap file", lambda: apply_swapfile(state.swapfile), True)
     if Path(SSHD).exists():
         task("SSH server", lambda: apply_ssh(state.ssh), True)
     if Path(UFW).exists():
