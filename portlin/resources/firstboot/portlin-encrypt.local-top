@@ -236,6 +236,10 @@ say ""
 # the filesystem, which is why the partition ends up slightly smaller. The
 # argon2id cost is capped for the same reason it is capped at build time: the
 # stick has to be openable on whatever low-RAM machine it meets next.
+#
+# No --batch-mode: besides skipping questions, it silences cryptsetup's progress
+# output entirely, --progress-frequency included, leaving a blank screen for
+# minutes. Encrypting with a key file asks nothing anyway.
 if printf '%s' "$pass1" | cryptsetup reencrypt --encrypt \
         --type luks2 \
         --reduce-device-size 32M \
@@ -245,7 +249,6 @@ if printf '%s' "$pass1" | cryptsetup reencrypt --encrypt \
         --cipher aes-xts-plain64 \
         --key-size 512 \
         --hash sha256 \
-        --batch-mode \
         --key-file - \
         --progress-frequency 5 \
         "$ROOT_DEV" > "$CONSOLE" 2>&1; then
