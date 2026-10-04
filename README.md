@@ -85,7 +85,7 @@ is decided on every boot, before the login screen, because a stick can be encryp
 after it was written.
 
 One panel, along the top, with a searchable applications menu under the portlin mark. portlin's own
-tools (Software, Migrate, Caffeine and Portlin Settings) share a Portlin submenu beside Settings. At the right
+tools (Software, Drivers, Migrate, Caffeine and Portlin Settings) share a Portlin submenu beside Settings. At the right
 end sits a readout of what the machine is doing:
 
 ```
@@ -150,7 +150,7 @@ not left out. Deleting that file takes it away again.
 
 ## Drivers
 
-**Drivers**, in the applications menu, is the same hardware report on its own, for after setup:
+**Drivers**, in the Portlin menu, is the same hardware report on its own, for after setup:
 the stick moved to a new machine, setup ran with no network, or a driver was skipped then. It names
 the graphics and wifi hardware the stick is plugged into, lists the drivers that fit it with the
 same explanations first boot gives, marks which are already installed, and installs or removes
