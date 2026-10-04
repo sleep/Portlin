@@ -166,10 +166,12 @@ not left out. Deleting that file takes it away again.
 
 **Drivers**, in the Portlin menu, looks at the machine the stick is plugged into, for after
 setup: the stick moved to a new machine, setup ran with no network, or a driver was skipped then.
-It names the graphics and wifi hardware it found and offers what fits, with the same explanations
-first boot gives: NVIDIA's proprietary driver, picked for that exact card by `nvidia-detect`,
-video acceleration and Vulkan for Intel and AMD, the Broadcom STA driver for the chips the open
-ones do not cover, and printing and scanning. It marks which are already installed, and installs
+It names the machine, its graphics and its wifi hardware, and offers what fits, with the same
+explanations first boot gives: NVIDIA's proprietary driver, picked for that exact card by
+`nvidia-detect`, video acceleration and Vulkan for Intel and AMD, the Broadcom STA driver for the
+chips the open ones do not cover, TLP for ThinkPads (power tuning and battery charge limits,
+suggested when the firmware or the `thinkpad_acpi` driver says the machine is one), and printing
+and scanning. TLP's USB autosuspend stays off, because the system itself runs from a USB drive. It marks which are already installed, and installs
 or removes them with live progress and apt's output a click away. A stick travels, so the NVIDIA
 entry says plainly what installing it does to the next machine, and how to undo it from a text
 console. When a driver builds a kernel module, as NVIDIA's and Broadcom's do, it says a restart

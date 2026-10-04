@@ -178,6 +178,15 @@ def test_runtime_ships_the_polkit_action_beside_the_program_it_names():
     assert named.lstrip("/") in package.executable_paths("portlin-runtime")
 
 
+def test_desktop_ships_tlp_settings_that_keep_the_stick_awake():
+    # TLP arrives later, from the ThinkPad entry in Drivers. Its default lets
+    # the kernel suspend idle USB devices, and the root filesystem is on one.
+    files = package.text_files("portlin-desktop")
+    settings = files["etc/tlp.d/50-portlin.conf"]
+    assert re.search(r"(?m)^USB_AUTOSUSPEND=0$", settings)
+    assert "/etc/tlp.d/50-portlin.conf\n" in files["DEBIAN/conffiles"]
+
+
 def test_runtime_depends_on_what_the_installer_shells_out_to():
     # Neither is visible in the file list: portlin-install downloads with
     # curl and reads the hardware with lspci, and without them it starts,
@@ -453,6 +462,7 @@ def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
             *package.THEME_FILES,
             *package.AUTOSTART_ENTRIES.values(),
             *package.MENU_LAYOUT_ENTRIES.values(),
+            *package.DRIVER_SETTINGS.values(),
             package.CACHE_SESSION_HOOK,
             package.SKEL_BASHRC,
         )

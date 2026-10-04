@@ -12,6 +12,7 @@ a home directory's tools out of root.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -635,13 +636,89 @@ class TestDriverSuggestions:
             for suggestion in report["suggestions"]:
                 assert catalog.by_id(suggestion["entry"])
 
-    def test_the_report_is_json_with_the_four_keys(self, tool):
+    def test_the_report_is_json_with_the_five_keys(self, tool):
         report = tool.recommend(tool.parse_lspci(LAPTOP_LSPCI))
-        assert set(report) == {"gpus", "wifi", "suggestions", "notes"}
+        assert set(report) == {"machine", "gpus", "wifi", "suggestions", "notes"}
         json.dumps(report)
 
 
+def _dmi(root, **fields):
+    """A fake /sys for read_machine, with the DMI fields given."""
+    dmi = root / "sys" / "devices" / "virtual" / "dmi" / "id"
+    dmi.mkdir(parents=True)
+    for name, value in fields.items():
+        (dmi / name).write_text(value + "\n")
+    return root
+
+
+class TestReadingTheMachine:
+    def test_a_thinkpad_is_named_by_its_version_field(self, tool, tmp_path):
+        root = _dmi(tmp_path, sys_vendor="LENOVO", product_name="21AH00F1UK",
+                    product_version="ThinkPad T14 Gen 3", product_family="ThinkPad T14 Gen 3")
+        assert tool.read_machine(root) == {"model": "LENOVO ThinkPad T14 Gen 3", "thinkpad": True}
+
+    def test_the_family_field_alone_is_enough(self, tool, tmp_path):
+        root = _dmi(tmp_path, sys_vendor="LENOVO", product_name="20XW",
+                    product_version="", product_family="ThinkPad X1 Carbon Gen 9")
+        assert tool.read_machine(root)["thinkpad"] is True
+
+    def test_the_thinkpad_driver_is_a_witness_of_its_own(self, tool, tmp_path):
+        root = _dmi(tmp_path, sys_vendor="LENOVO", product_name="20XW")
+        (root / "sys" / "devices" / "platform" / "thinkpad_acpi").mkdir(parents=True)
+        assert tool.read_machine(root)["thinkpad"] is True
+
+    def test_another_lenovo_is_not_a_thinkpad(self, tool, tmp_path):
+        root = _dmi(tmp_path, sys_vendor="LENOVO", product_name="82RG",
+                    product_version="IdeaPad 5 Pro 16ARH7", product_family="IdeaPad 5 Pro 16ARH7")
+        assert tool.read_machine(root)["thinkpad"] is False
+
+    def test_a_machine_with_no_dmi_is_nothing_in_particular(self, tool, tmp_path):
+        assert tool.read_machine(tmp_path) == {"model": "", "thinkpad": False}
+
+
+class TestThinkPadSuggestion:
+    def test_a_thinkpad_suggests_the_thinkpad_entry(self, tool, catalog):
+        machine = {"model": "LENOVO ThinkPad T14 Gen 3", "thinkpad": True}
+        report = tool.recommend(tool.parse_lspci(QEMU_LSPCI), machine=machine)
+        assert [s["entry"] for s in report["suggestions"]] == ["thinkpad"]
+        assert "ThinkPad T14 Gen 3" in report["suggestions"][0]["reason"]
+        assert report["machine"] == "LENOVO ThinkPad T14 Gen 3"
+        assert catalog.by_id("thinkpad").category == "Drivers"
+
+    def test_other_machines_are_not_offered_it(self, tool):
+        machine = {"model": "Dell Inc. XPS 13 9310", "thinkpad": False}
+        report = tool.recommend(tool.parse_lspci(LAPTOP_LSPCI), machine=machine)
+        assert "thinkpad" not in [s["entry"] for s in report["suggestions"]]
+
+    def test_the_entry_installs_tlp_from_debian(self, catalog):
+        entry = catalog.by_id("thinkpad")
+        assert entry.kind == "apt" and "tlp" in entry.packages
+        assert not entry.needs_components
+
+
 class TestTheScanCommand:
+    def test_a_captured_report_ignores_this_machines_firmware(
+        self, tool, ctx, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(tool, "read_machine",
+                            lambda *a: {"model": "LENOVO ThinkPad T14", "thinkpad": True})
+        captured = tmp_path / "lspci.txt"
+        captured.write_text(QEMU_LSPCI)
+        args = tool.build_parser().parse_args(["scan", "--json", "--from", str(captured)])
+        assert args.func(args, ctx) == tool.EXIT_OK
+        report = json.loads(capsys.readouterr().out)
+        assert report["suggestions"] == [] and report["machine"] == ""
+
+    def test_a_live_scan_reads_the_firmware(self, tool, ctx, monkeypatch, capsys):
+        monkeypatch.setattr(tool, "read_machine",
+                            lambda *a: {"model": "LENOVO ThinkPad T14", "thinkpad": True})
+        monkeypatch.setattr(tool.subprocess, "run",
+                            lambda *a, **k: subprocess.CompletedProcess(a, 0, QEMU_LSPCI, ""))
+        args = tool.build_parser().parse_args(["scan", "--json"])
+        assert args.func(args, ctx) == tool.EXIT_OK
+        report = json.loads(capsys.readouterr().out)
+        assert [s["entry"] for s in report["suggestions"]] == ["thinkpad"]
+
     def test_it_reads_a_captured_report_without_running_lspci(
         self, tool, ctx, tmp_path, monkeypatch, capsys
     ):

@@ -68,6 +68,7 @@ from catalog import (  # noqa: E402
     to_dict,
     validate,
 )
+from hostinfo import DMI, parse_dmi_model  # noqa: E402
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -729,6 +730,36 @@ def parse_nvidia_detect(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+# The kernel's ThinkPad driver, present once it has bound to the firmware.
+THINKPAD_ACPI = "sys/devices/platform/thinkpad_acpi"
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def read_machine(root: Path = Path("/")) -> dict:
+    """The maker and model the firmware reports, and whether it is a ThinkPad.
+
+    Lenovo puts the readable name ("ThinkPad T14 Gen 3") in product_version
+    and a bare model code in product_name, which parse_dmi_model already
+    sorts out for the About window. The thinkpad_acpi driver is the second
+    witness: it only binds on ThinkPad firmware, whatever the DMI strings say.
+    DMI is world-readable, so the scan still runs as the user.
+    """
+    dmi = root / DMI
+    vendor = _read_text(dmi / "sys_vendor")
+    model = parse_dmi_model(vendor, _read_text(dmi / "product_name"), _read_text(dmi / "product_version"))
+    family = _read_text(dmi / "product_family")
+    thinkpad = (
+        vendor.upper() == "LENOVO" and "thinkpad" in f"{model} {family}".lower()
+    ) or (root / THINKPAD_ACPI).exists()
+    return {"model": model, "thinkpad": thinkpad}
+
+
 def _device_summary(device: PciDevice) -> dict:
     return {
         "slot": device.slot,
@@ -738,8 +769,12 @@ def _device_summary(device: PciDevice) -> dict:
     }
 
 
-def recommend(devices, *, nvidia_detect_output: str | None = None) -> dict:
-    """Which catalog entries fit this hardware, and why."""
+def recommend(devices, *, nvidia_detect_output: str | None = None, machine: dict | None = None) -> dict:
+    """Which catalog entries fit this hardware, and why.
+
+    ``devices`` is what lspci saw; ``machine`` is read_machine's answer, or
+    None when the scan is of a captured report rather than this machine.
+    """
     gpus = [d for d in devices if d.class_code in GPU_CLASSES]
     wifi = [d for d in devices if d.class_code == WIFI_CLASS]
     suggestions: list[dict] = []
@@ -772,6 +807,10 @@ def recommend(devices, *, nvidia_detect_output: str | None = None) -> dict:
                               "only needed if wifi does not work",
                 }
             )
+    if machine and machine.get("thinkpad"):
+        suggestions.append(
+            {"entry": "thinkpad", "reason": f"{machine.get('model') or 'A ThinkPad'} found"}
+        )
     if len(gpus) > 1 and len(set(vendors)) > 1:
         notes.append(
             "Two GPUs: a hybrid laptop. One drives the screen; the other is "
@@ -783,6 +822,7 @@ def recommend(devices, *, nvidia_detect_output: str | None = None) -> dict:
         notes.append("A virtual machine's display. No driver is needed.")
 
     return {
+        "machine": (machine or {}).get("model", ""),
         "gpus": [_device_summary(gpu) for gpu in gpus],
         "wifi": [_device_summary(chip) for chip in wifi],
         "suggestions": suggestions,
@@ -1278,11 +1318,16 @@ def cmd_scan(args, ctx: Context) -> int:
                 ).stdout
             except (OSError, subprocess.SubprocessError):
                 detect_output = None
-    report = recommend(devices, nvidia_detect_output=detect_output)
+    # A captured lspci report is some other machine's, so this one's firmware
+    # has nothing to say about it.
+    machine = None if args.source else read_machine()
+    report = recommend(devices, nvidia_detect_output=detect_output, machine=machine)
     report["notes"] = notes + report["notes"]
     if args.json:
         print(json.dumps(report, indent=2))
         return EXIT_OK
+    if report["machine"]:
+        print(f"Machine: {report['machine']}")
     for label, devices_found in (("GPU", report["gpus"]), ("Wifi", report["wifi"])):
         for device in devices_found:
             print(f"{label}: {device['name']} [{device['id']}]")
