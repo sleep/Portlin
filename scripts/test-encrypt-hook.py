@@ -151,6 +151,10 @@ def main() -> int:
         failures = []
         if "Encryption complete" not in transcript:
             failures.append("the script never reported completing encryption")
+        # cryptsetup's own summary line, printed only when progress reporting
+        # is live. Without it the console sits blank for the whole encryption.
+        if "Finished, time" not in transcript:
+            failures.append("cryptsetup showed no progress on the console")
         if run(["cryptsetup", "isLuks", root_part]).returncode != 0:
             failures.append("the partition is not a LUKS container")
 
