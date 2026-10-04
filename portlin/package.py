@@ -77,6 +77,9 @@ DESKTOP_TOOLS = [
     # because the session it starts only exists where this package's theme
     # files do.
     "portlin-lite-session",
+    # Caffeine for the lite session: the logind lock and swayidle, drawn by
+    # waybar. The Xfce applet above is an X tray icon and cannot run there.
+    "portlin-caffeine-lite",
 ]
 
 # The panel id genmon is given, which is also the id in the filename genmon
@@ -136,6 +139,14 @@ LITE_SESSION_ENTRY = "usr/share/wayland-sessions/portlin-lite.desktop"
 # Run once by the lite session's autostart to scale each screen. Not on PATH,
 # like BACKDROP_TOOL: nobody has a reason to run it by hand.
 LITE_DISPLAY_TOOL = "usr/lib/portlin/portlin-lite-display"
+
+# The lite session's screen lock, started and stopped by portlin-caffeine-lite.
+LITE_IDLE_TOOL = "usr/lib/portlin/portlin-lite-idle"
+
+# What both Caffeine applets import: the lock, the durations and the settings
+# file. Beside portlin-runtime's shared modules in /usr/lib/portlin, but
+# shipped here, because both programs that read it are desktop programs.
+DESKTOP_MODULES = ["caffeine.py"]
 
 # This runs in the X session, where XDG_RUNTIME_DIR is available.  It is a
 # conffile because it is an ordinary /etc Xsession hook.
@@ -597,6 +608,9 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         files[BACKDROP_TOOL] = (RESOURCES / "runtime" / "portlin-backdrop").read_text()
         files[LITE_SESSION_ENTRY] = (RESOURCES / "runtime" / "portlin-lite.desktop").read_text()
         files[LITE_DISPLAY_TOOL] = (RESOURCES / "runtime" / "portlin-lite-display").read_text()
+        files[LITE_IDLE_TOOL] = (RESOURCES / "runtime" / "portlin-lite-idle").read_text()
+        for module in DESKTOP_MODULES:
+            files[f"usr/lib/portlin/{module}"] = (RESOURCES / "runtime" / module).read_text()
         files[BACKDROP_UNIT] = (RESOURCES / "runtime" / "portlin-backdrop.service").read_text()
         for action, script in (("add", "preinst"), ("remove", "postrm")):
             files[f"DEBIAN/{script}"] = render_diversion_script(action)
@@ -649,7 +663,7 @@ def executable_paths(package: str) -> set[str]:
         return {f"usr/bin/{tool}" for tool in TOOLS}
     if package == "portlin-desktop":
         return {"DEBIAN/preinst", "DEBIAN/postinst", "DEBIAN/postrm", BACKDROP_TOOL,
-                LITE_DISPLAY_TOOL} | {
+                LITE_DISPLAY_TOOL, LITE_IDLE_TOOL} | {
             f"usr/bin/{tool}" for tool in DESKTOP_TOOLS
         }
     return set()

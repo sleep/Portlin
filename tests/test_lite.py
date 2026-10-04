@@ -51,21 +51,25 @@ class TestPackages:
     def test_a_minimal_stick_carries_none_of_it(self):
         assert not set(packages.LITE) & set(packages.resolve(packages.MINIMAL_GROUPS))
 
-    def test_every_program_the_autostart_starts_is_installed(self):
-        autostart = (THEME / "labwc-autostart").read_text()
-        providers = {
+    @pytest.mark.parametrize("script, providers", [
+        ("theme/labwc-autostart", {
             "swaybg": "swaybg",
             "waybar": "waybar",
             "mako": "mako-notifier",
-            "swayidle": "swayidle",
-            "swaylock": "swaylock",
             "nm-applet": "network-manager-gnome",
             "polkit-mate-authentication-agent-1": "mate-polkit",
-        }
+        }),
+        ("portlin-lite-idle", {"swayidle": "swayidle", "swaylock": "swaylock"}),
+        ("portlin-caffeine-lite", {"fuzzel": "fuzzel", "gdbus": "libglib2.0-bin",
+                                   "systemd-inhibit": "systemd", "pkill": "procps"}),
+    ])
+    def test_every_program_the_session_starts_is_installed(self, script, providers):
+        body = (RUNTIME / script).read_text()
         resolved = set(packages.resolve())
         for program, provider in providers.items():
-            assert program in autostart, program
-            assert provider in resolved, provider
+            assert program in body, program
+            if provider not in ("systemd", "procps"):  # in every Debian install
+                assert provider in resolved, provider
 
 
 class TestPackageLayout:

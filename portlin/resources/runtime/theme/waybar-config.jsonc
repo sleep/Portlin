@@ -6,7 +6,7 @@
   "height": 28,
   "spacing": 8,
   "modules-left": ["image#mark", "custom/apps", "wlr/taskbar"],
-  "modules-right": ["custom/stats", "tray", "clock"],
+  "modules-right": ["custom/stats", "image#caffeine", "tray", "clock"],
 
   // The mark from hicolor, where every icon lookup ends, and the menu it
   // opens: fuzzel searches the same .desktop entries whiskermenu does.
@@ -36,6 +36,17 @@
     "return-type": "json",
     "interval": 2,
     "on-click": "portlin-about"
+  },
+  // Caffeine. The holder, started by the session's autostart, signals
+  // SIGRTMIN+8 on every change so a click shows at once; the interval only
+  // keeps the tooltip's countdown fresh.
+  "image#caffeine": {
+    "exec": "portlin-caffeine-lite icon",
+    "size": 18,
+    "signal": 8,
+    "interval": 60,
+    "on-click": "portlin-caffeine-lite toggle",
+    "on-click-right": "portlin-caffeine-lite menu"
   },
   "tray": {
     "icon-size": 16,

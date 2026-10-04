@@ -56,9 +56,21 @@ def _stub_gi() -> None:
 
 
 @pytest.fixture(scope="module")
+def shared(caffeine):
+    """caffeine.py, the settings and lock logic both Caffeine applets import."""
+    import caffeine as module
+
+    return module
+
+
+@pytest.fixture(scope="module")
 def caffeine():
     """The applet, imported as a module, without running its main()."""
     _stub_gi()
+    # Where caffeine.py, the module both applets share, is found here; on a
+    # stick the applet finds it in /usr/lib/portlin.
+    if str(RUNTIME) not in sys.path:
+        sys.path.insert(0, str(RUNTIME))
     loader = importlib.machinery.SourceFileLoader("portlin_caffeine", str(CAFFEINE))
     spec = importlib.util.spec_from_file_location(loader.name, CAFFEINE, loader=loader)
     module = importlib.util.module_from_spec(spec)
@@ -119,7 +131,7 @@ class TestTheInhibitorItTakes:
         # An ordinary child outlives the parent that spawned it. A killed
         # applet would leave systemd-inhibit holding the machine awake with no
         # icon in the panel to explain it and nothing left to click.
-        assert "PR_SET_PDEATHSIG" in CAFFEINE.read_text()
+        assert "PR_SET_PDEATHSIG" in (RUNTIME / "caffeine.py").read_text()
         assert "preexec_fn=die_with_parent" in CAFFEINE.read_text()
 
     def test_failing_to_arrange_that_still_leaves_the_lock_takeable(self, caffeine):
@@ -133,7 +145,7 @@ class TestTheInhibitorItTakes:
         # A hand-rolled D-Bus fd is a second implementation of something
         # systemd-inhibit already does, and an invisible one: the lock this
         # takes shows up in `systemd-inhibit --list` where anyone can see it.
-        assert "systemd-inhibit" in CAFFEINE.read_text()
+        assert "systemd-inhibit" in (RUNTIME / "caffeine.py").read_text()
 
 
 class TestTheScreenSettingsItRestores:
@@ -203,8 +215,8 @@ class TestHowLongItSaysItHasLeft:
             (-10, "less than a minute"),
         ],
     )
-    def test_it_reads_as_a_person_would_say_it(self, caffeine, seconds, expected):
-        assert caffeine.format_remaining(seconds) == expected
+    def test_it_reads_as_a_person_would_say_it(self, caffeine, shared, seconds, expected):
+        assert shared.format_remaining(seconds) == expected
 
     def test_the_menu_header_says_it_is_off(self, caffeine):
         assert caffeine.status_text(False, None, now=1000.0) == "Caffeine is off"
@@ -218,62 +230,62 @@ class TestHowLongItSaysItHasLeft:
 
 
 class TestWhatASessionRestoresInto:
-    def test_it_remembers_that_it_was_left_on(self, caffeine):
+    def test_it_remembers_that_it_was_left_on(self, caffeine, shared):
         settings = caffeine.Settings(active=True, deadline=None)
-        restored = caffeine.parse_settings(caffeine.render_settings(settings), now=1000.0)
+        restored = shared.parse_settings(shared.render_settings(settings), now=1000.0)
         assert restored.active is True
         assert restored.deadline is None
 
-    def test_it_remembers_how_much_of_a_timed_session_was_left(self, caffeine):
+    def test_it_remembers_how_much_of_a_timed_session_was_left(self, caffeine, shared):
         settings = caffeine.Settings(active=True, deadline=2000.0)
-        restored = caffeine.parse_settings(caffeine.render_settings(settings), now=1000.0)
+        restored = shared.parse_settings(shared.render_settings(settings), now=1000.0)
         assert restored.active is True
         assert restored.deadline == 2000.0
 
-    def test_a_deadline_that_has_already_passed_restores_as_off(self, caffeine):
+    def test_a_deadline_that_has_already_passed_restores_as_off(self, caffeine, shared):
         # The stick was shut down caffeinated with ten minutes left, and comes
         # back a week later. Honouring the stored flag would keep a machine
         # awake on the strength of a countdown that ended before it booted.
         settings = caffeine.Settings(active=True, deadline=500.0)
-        restored = caffeine.parse_settings(caffeine.render_settings(settings), now=1000.0)
+        restored = shared.parse_settings(shared.render_settings(settings), now=1000.0)
         assert restored.active is False
         assert restored.deadline is None
 
-    def test_it_starts_off_when_asked_not_to_restore(self, caffeine):
+    def test_it_starts_off_when_asked_not_to_restore(self, caffeine, shared):
         settings = caffeine.Settings(active=True, deadline=None, restore_at_login=False)
-        restored = caffeine.parse_settings(caffeine.render_settings(settings), now=1000.0)
+        restored = shared.parse_settings(shared.render_settings(settings), now=1000.0)
         assert restored.active is False
         assert restored.restore_at_login is False
 
-    def test_it_starts_off_with_no_settings_at_all(self, caffeine):
+    def test_it_starts_off_with_no_settings_at_all(self, caffeine, shared):
         # First login on a fresh account. A stick that plugs into someone
         # else's hardware should never begin by disabling their power settings.
-        fresh = caffeine.parse_settings("", now=1000.0)
+        fresh = shared.parse_settings("", now=1000.0)
         assert fresh.active is False
         assert fresh.restore_at_login is True
         assert fresh.notify_on_expiry is True
         assert fresh.default_duration is None
 
-    def test_it_starts_off_when_the_file_is_unreadable(self, caffeine):
-        assert caffeine.parse_settings("}{ not an ini file", now=1000.0).active is False
+    def test_it_starts_off_when_the_file_is_unreadable(self, caffeine, shared):
+        assert shared.parse_settings("}{ not an ini file", now=1000.0).active is False
 
-    def test_it_remembers_the_preferences(self, caffeine):
+    def test_it_remembers_the_preferences(self, caffeine, shared):
         settings = caffeine.Settings(
             default_duration=3600, notify_on_expiry=False, restore_at_login=False
         )
-        restored = caffeine.parse_settings(caffeine.render_settings(settings), now=1000.0)
+        restored = shared.parse_settings(shared.render_settings(settings), now=1000.0)
         assert restored.default_duration == 3600
         assert restored.notify_on_expiry is False
         assert restored.restore_at_login is False
 
-    def test_it_writes_where_the_xdg_spec_says_to(self, caffeine, monkeypatch):
+    def test_it_writes_where_the_xdg_spec_says_to(self, caffeine, shared, monkeypatch):
         monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/somewhere")
-        assert caffeine.settings_path() == Path("/tmp/somewhere/portlin/caffeine.ini")
+        assert shared.settings_path() == Path("/tmp/somewhere/portlin/caffeine.ini")
 
-    def test_it_falls_back_to_dot_config(self, caffeine, monkeypatch):
+    def test_it_falls_back_to_dot_config(self, caffeine, shared, monkeypatch):
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
         monkeypatch.setenv("HOME", "/home/someone")
-        assert caffeine.settings_path() == Path(
+        assert shared.settings_path() == Path(
             "/home/someone/.config/portlin/caffeine.ini"
         )
 

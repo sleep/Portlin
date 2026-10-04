@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+#
+# The lite session's screen lock: swayidle, with the answer the first-boot
+# wizard wrote to /etc/portlin/screen-lock.conf, the same one the Xfce
+# session's screensaver reads from its own channel.
+#
+# Started and stopped by portlin-caffeine-lite rather than by the session's
+# autostart. Under labwc, swayidle is the only thing that blanks or locks the
+# screen, so stopping it is how Caffeine keeps the screen on, and starting it
+# from the same process is what stops the two racing at login.
+
+conf=/etc/portlin/screen-lock.conf
+minutes=$(sed -n 's/^minutes=//p' "$conf" 2>/dev/null)
+suspend=$(sed -n 's/^suspend=//p' "$conf" 2>/dev/null)
+lock="swaylock -f -c 12161C"
+
+set -- swayidle -w
+[ "${minutes:-10}" -gt 0 ] 2>/dev/null && set -- "$@" timeout "$(( ${minutes:-10} * 60 ))" "$lock"
+[ "${suspend:-1}" = 1 ] && set -- "$@" before-sleep "$lock"
+
+# Never lock and never lock on suspend: nothing for swayidle to do.
+[ $# -gt 2 ] || exit 0
+exec "$@"

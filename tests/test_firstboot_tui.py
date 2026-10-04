@@ -577,10 +577,10 @@ class TestScreenLock:
         self.written(fb, tmp_path, 15, False)
         assert (tmp_path / "screen-lock.conf").read_text() == "minutes=15\nsuspend=0\n"
 
-    def test_the_lite_autostart_reads_the_keys_the_wizard_writes(self):
-        autostart = (THEME / "labwc-autostart").read_text()
-        assert "/etc/portlin/screen-lock.conf" in autostart
-        assert "s/^minutes=//p" in autostart and "s/^suspend=//p" in autostart
+    def test_the_lite_screen_lock_reads_the_keys_the_wizard_writes(self):
+        idle = (REPO / "portlin" / "resources" / "runtime" / "portlin-lite-idle").read_text()
+        assert "/etc/portlin/screen-lock.conf" in idle
+        assert "s/^minutes=//p" in idle and "s/^suspend=//p" in idle
 
     def test_the_channels_written_are_not_ones_portlin_already_ships(self, fb):
         # xfconf takes a whole channel from the first directory that has it, so
