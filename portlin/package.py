@@ -34,7 +34,8 @@ KEYRING_PATH = "/usr/share/keyrings/portlin-archive-keyring.gpg"
 # in one apt transaction that has to resolve.
 PACKAGES = ["portlin-archive-keyring", "portlin-runtime", "portlin-desktop"]
 
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate", "portlin-wear"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate", "portlin-wear",
+         "portlin-remote-unlock"]
 
 # Python modules the tools import from /usr/lib/portlin rather than carrying
 # a copy of. catalog.py is here rather than inside portlin-install because

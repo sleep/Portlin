@@ -154,6 +154,23 @@ class TestCryptsetupHookConf:
         assert "KEYMAP=y" in templates.render_cryptsetup_hook_conf()
 
 
+class TestRemoteUnlockConf:
+    def test_it_starts_out_off(self):
+        # dropbear-initramfs's hook would otherwise put an SSH server in every
+        # initramfs on every stick, answering before anything is unlocked.
+        rendered = templates.render_remote_unlock_conf()
+        assert "\nenabled=0\n" in rendered
+        assert "enabled=1" not in rendered
+
+    def test_it_names_a_port_that_is_not_the_real_sshds(self):
+        assert f"\nport={templates.REMOTE_UNLOCK_PORT}\n" in templates.render_remote_unlock_conf()
+        assert templates.REMOTE_UNLOCK_PORT != 22
+
+    def test_it_can_be_rendered_on(self):
+        assert "\nenabled=1\n" in templates.render_remote_unlock_conf(enabled=True, port=2200)
+        assert "\nport=2200\n" in templates.render_remote_unlock_conf(enabled=True, port=2200)
+
+
 class TestSourcesList:
     def test_stable_suite_gets_updates_and_security(self):
         rendered = templates.render_sources_list(
