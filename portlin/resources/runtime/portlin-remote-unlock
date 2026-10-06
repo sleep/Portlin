@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Let an encrypted portlin stick be unlocked over the network.
+
+The stick's initramfs can run a small SSH server (dropbear) that answers
+before the root filesystem is unlocked: plug a cable in, boot, and from
+another machine `ssh -p 2222 root@<address>` asks for the passphrase and
+nothing else. First boot offers this on the Services step; this is the same
+switch for afterwards.
+
+    portlin-remote-unlock status
+    portlin-remote-unlock on [KEY|FILE|github:NAME ...]
+    portlin-remote-unlock add-key KEY|FILE|github:NAME ...
+    portlin-remote-unlock off
+
+The switch itself is /etc/portlin/remote-unlock.conf, which a hook written
+into the initramfs machinery at write time reads whenever the initramfs is
+rebuilt: on, and dropbear-initramfs's own hook has its way; off, and the
+server, its keys and the authorized keys are taken back out. That hook is
+frozen tier -- part of what makes a stick boot -- so a stick written before
+it existed cannot be given it by an update, and this tool says so rather
+than flipping a switch nothing reads.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/usr/lib/portlin")
+
+from devices import command_output, root_source  # noqa: E402
+
+CONF = Path("/etc/portlin/remote-unlock.conf")
+DEFAULT_PORT = 2222
+# Debian's locations: dropbear's hook reads the authorized keys from here and
+# copies whichever host keys it finds beside them.
+KEYS = Path("/etc/dropbear/initramfs/authorized_keys")
+HOST_KEY = Path("/etc/dropbear/initramfs/dropbear_ed25519_host_key")
+DROPBEARKEY = "/usr/bin/dropbearkey"
+DROPBEAR_HOOK = Path("/usr/share/initramfs-tools/hooks/dropbear")
+# The frozen prerequisite, written by portlin at write time.
+GATE_HOOK = Path("/etc/initramfs-tools/hooks/portlin-remote-unlock")
+
+# The key types dropbear's hook accepts, spelled as it spells them.
+PUBLIC_KEY_RE = re.compile(
+    r"^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)"
+    r"|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( [^\n]*)?$"
+)
+GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+GITHUB_PREFIX = "github:"
+
+USAGE = """usage: portlin-remote-unlock status
+       portlin-remote-unlock on [KEY|FILE|github:NAME ...]
+       portlin-remote-unlock add-key KEY|FILE|github:NAME ...
+       portlin-remote-unlock off
+
+KEY is a public key line, such as the contents of ~/.ssh/id_ed25519.pub on
+the machine that will do the unlocking; FILE is a file of them; github:NAME
+takes the keys that GitHub account has published."""
+
+
+class Refusal(Exception):
+    """Something the tool will not do, with the reason to print."""
+
+
+def read_conf() -> dict:
+    conf = {"enabled": False, "port": DEFAULT_PORT}
+    try:
+        for line in CONF.read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key == "enabled":
+                conf["enabled"] = value.strip() == "1"
+            elif key == "port" and value.strip().isdigit():
+                conf["port"] = int(value)
+    except OSError:
+        pass
+    return conf
+
+
+def write_conf(enabled: bool, port: int) -> None:
+    CONF.parent.mkdir(parents=True, exist_ok=True)
+    CONF.write_text("\n".join([
+        "# Written by portlin. Whether the initramfs answers SSH before the root",
+        "# filesystem is unlocked, and on which port. Change it with",
+        "# portlin-remote-unlock, which also rebuilds the initramfs.",
+        f"enabled={int(enabled)}",
+        f"port={port}",
+        "",
+    ]))
+    os.chmod(CONF, 0o644)
+
+
+def keys_on_file() -> list[str]:
+    try:
+        lines = KEYS.read_text().splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if PUBLIC_KEY_RE.match(line.strip())]
+
+
+def write_keys(keys: list[str]) -> None:
+    """Write the authorized keys, root-only from the first byte."""
+    KEYS.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(KEYS, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write("".join(f"{key}\n" for key in keys))
+    os.chmod(KEYS, 0o600)
+
+
+def github_keys(name: str) -> list[str]:
+    """The keys a GitHub account has published, from github.com/NAME.keys."""
+    if not GITHUB_NAME_RE.match(name):
+        raise Refusal(f"{name!r} is not a GitHub account name.")
+    proc = subprocess.run(
+        ["curl", "-fsS", "--max-time", "30", f"https://github.com/{name}.keys"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no answer"
+        raise Refusal(f"Could not fetch github.com/{name}.keys: {detail}")
+    keys = [line.strip() for line in proc.stdout.splitlines() if PUBLIC_KEY_RE.match(line.strip())]
+    if not keys:
+        raise Refusal(f"github.com/{name} has published no SSH keys.")
+    return keys
+
+
+def keys_from(argument: str) -> list[str]:
+    """Public keys named by one command-line argument.
+
+    Three shapes, told apart in the only order that cannot misread one as
+    another: github:NAME first, then a key line (which has a space in it and
+    is never a path), then a file.
+    """
+    argument = argument.strip()
+    if argument.startswith(GITHUB_PREFIX):
+        return github_keys(argument[len(GITHUB_PREFIX):].strip())
+    if PUBLIC_KEY_RE.match(argument):
+        return [argument]
+    path = Path(argument).expanduser()
+    if path.is_file():
+        keys = [line.strip() for line in path.read_text().splitlines()
+                if PUBLIC_KEY_RE.match(line.strip())]
+        if not keys:
+            raise Refusal(f"{path} holds no public key.")
+        return keys
+    raise Refusal(
+        f"{argument!r} is not a public key, a file of them, or github:NAME.\n"
+        "A public key starts with ssh-ed25519, ssh-rsa or ecdsa-sha2-nistp256."
+    )
+
+
+def key_label(key: str) -> str:
+    """One line describing a key: its fingerprint when ssh-keygen is here, else its type and comment."""
+    parts = key.split(None, 2)
+    comment = parts[2] if len(parts) > 2 else ""
+    try:
+        proc = subprocess.run(["ssh-keygen", "-lf", "-"], input=key + "\n",
+                              capture_output=True, text=True)
+    except FileNotFoundError:
+        proc = None
+    if proc is not None and proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
+    return f"{parts[0]} {comment}".strip()
+
+
+def host_fingerprint() -> str:
+    if not HOST_KEY.exists():
+        return ""
+    output = command_output([DROPBEARKEY, "-y", "-f", str(HOST_KEY)])
+    for line in output.splitlines():
+        if line.startswith("Fingerprint:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def ensure_host_key() -> None:
+    """write makes one per stick; a stick written before it did gets one here."""
+    if HOST_KEY.exists():
+        return
+    HOST_KEY.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run([DROPBEARKEY, "-t", "ed25519", "-f", str(HOST_KEY)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"dropbearkey could not make a host key:\n{proc.stderr.strip()}")
+
+
+def addresses() -> list[str]:
+    """This machine's IPv4 addresses, as a hint; at boot DHCP may give another."""
+    found = []
+    for line in command_output(["ip", "-4", "-o", "addr", "show", "scope", "global"]).splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[2] == "inet":
+            found.append(fields[3].split("/")[0])
+    return found
+
+
+def rebuild_initramfs() -> None:
+    proc = subprocess.run(["update-initramfs", "-u", "-k", "all"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(f"update-initramfs failed:\n{proc.stderr.strip()}")
+    # dropbear's hook and portlin's both warn on stderr about a server that
+    # cannot be logged in to; those are worth passing on.
+    for line in proc.stderr.splitlines():
+        if "WARNING" in line:
+            print(line, file=sys.stderr)
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise Refusal("portlin-remote-unlock must be run as root.")
+
+
+def require_stick() -> None:
+    """Everything changing the switch needs: an encrypted root, the package, the frozen hook."""
+    if not root_source().startswith("/dev/mapper/"):
+        raise Refusal(
+            "This stick is not encrypted, so there is nothing to unlock.\n"
+            "portlin-encrypt encrypts it on the next boot."
+        )
+    if not DROPBEAR_HOOK.exists():
+        raise Refusal(
+            "dropbear-initramfs, the SSH server for the initramfs, is not installed.\n"
+            "    sudo apt install dropbear-initramfs"
+        )
+    if not GATE_HOOK.exists():
+        # The frozen tier cannot be brought forward by an update. Without the
+        # hook, on means dropbear in every initramfs with no way back off,
+        # and off means nothing at all.
+        raise Refusal(
+            "This stick was written by a portlin too old to switch the initramfs\n"
+            "SSH server on and off. Write it again with a current portlin."
+        )
+
+
+def cmd_status() -> int:
+    conf = read_conf()
+    encrypted = root_source().startswith("/dev/mapper/")
+    ready = encrypted and DROPBEAR_HOOK.exists() and GATE_HOOK.exists()
+    print(f"remote unlock   {'on' if conf['enabled'] else 'off'}")
+    print(f"port            {conf['port']}")
+    if not encrypted:
+        print("                this stick is not encrypted, so there is nothing to unlock")
+    elif not DROPBEAR_HOOK.exists():
+        print("                dropbear-initramfs is not installed")
+    elif not GATE_HOOK.exists():
+        print("                this stick was written before portlin could switch it")
+    keys = keys_on_file()
+    if keys:
+        print(f"keys            {len(keys)}")
+        for key in keys:
+            print(f"                {key_label(key)}")
+    elif os.geteuid() != 0 and KEYS.exists():
+        print("keys            (run as root to list them)")
+    else:
+        print("keys            none")
+    fingerprint = host_fingerprint()
+    if fingerprint:
+        print(f"host key        {fingerprint}")
+    if conf["enabled"] and ready:
+        where = addresses()
+        target = f"root@{where[0]}" if where else "root@ADDRESS"
+        print()
+        print(f"With a cable plugged in, from another machine, at the passphrase prompt:")
+        print(f"    ssh -p {conf['port']} {target}")
+        if where:
+            print("The address at boot comes from DHCP and may differ from the one above.")
+    return 0
+
+
+def cmd_on(arguments: list[str]) -> int:
+    require_root()
+    require_stick()
+    keys = keys_on_file()
+    for argument in arguments:
+        for key in keys_from(argument):
+            if key not in keys:
+                keys.append(key)
+    if not keys:
+        raise Refusal(
+            "No key to answer to. Name one:\n"
+            "    portlin-remote-unlock on ~/.ssh/id_ed25519.pub\n"
+            "    portlin-remote-unlock on github:NAME"
+        )
+    write_keys(keys)
+    ensure_host_key()
+    write_conf(True, read_conf()["port"])
+    print("Rebuilding the initramfs.")
+    rebuild_initramfs()
+    conf = read_conf()
+    print(f"Remote unlock is on, for {len(keys)} key{'s' if len(keys) != 1 else ''}, on port {conf['port']}.")
+    fingerprint = host_fingerprint()
+    if fingerprint:
+        print(f"The stick's host key is {fingerprint}; that is what the first ssh should show.")
+    print(f"At the next boot, with a cable plugged in:  ssh -p {conf['port']} root@ADDRESS")
+    return 0
+
+
+def cmd_add_key(arguments: list[str]) -> int:
+    if not arguments:
+        print(USAGE, file=sys.stderr)
+        return 2
+    return cmd_on(arguments)
+
+
+def cmd_off() -> int:
+    require_root()
+    require_stick()
+    write_conf(False, read_conf()["port"])
+    print("Rebuilding the initramfs.")
+    rebuild_initramfs()
+    print("Remote unlock is off. The keys stay in place for turning it on again.")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    try:
+        if argv == ["status"]:
+            return cmd_status()
+        if argv and argv[0] == "on":
+            return cmd_on(argv[1:])
+        if argv and argv[0] == "add-key":
+            return cmd_add_key(argv[1:])
+        if argv == ["off"]:
+            return cmd_off()
+    except Refusal as refusal:
+        print(f"portlin-remote-unlock: {refusal}", file=sys.stderr)
+        return 1
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -59,6 +59,17 @@ DRY_UUIDS = {
     "esp": "CCCC-CCCC",
 }
 
+# Where the two frozen pieces of remote unlock land. The second has to carry
+# Debian's name: that is what makes it the script that boots instead of the one
+# dropbear-initramfs ships.
+REMOTE_UNLOCK_HOOK = "etc/initramfs-tools/hooks/portlin-remote-unlock"
+REMOTE_UNLOCK_PREMOUNT = "etc/initramfs-tools/scripts/init-premount/dropbear"
+
+# The initramfs SSH server's host key, which has to differ from the system
+# sshd's: the initramfs sits on the plaintext /boot. ed25519 alone; every
+# client of this decade speaks it, and dropbear's hook copies whatever is here.
+REMOTE_UNLOCK_HOST_KEY = "/etc/dropbear/initramfs/dropbear_ed25519_host_key"
+
 
 def write_stick(cfg: WriteConfig, runner: Runner) -> None:
     if not runner.dry_run and not cfg.rootfs.exists():
@@ -117,6 +128,7 @@ def write_stick(cfg: WriteConfig, runner: Runner) -> None:
             _remove_boot_splash(chroot)
             _remove_nvidia_firmware(chroot)
             _install_runtime(chroot)
+            _remote_unlock_host_key(chroot)
             chroot.run(["update-initramfs", "-u", "-k", "all"])
             _install_grub(chroot, target.device)
 
@@ -531,7 +543,50 @@ def _install_runtime(chroot: Chroot) -> None:
         mode=0o755,
     )
 
+    # The frozen half of remote unlock, on every stick for the same reason as
+    # the encryption offer. The hook is the switch: dropbear-initramfs's own
+    # hook puts its SSH server in every initramfs it builds, and this one
+    # takes it out again unless /etc/portlin/remote-unlock.conf says on. The
+    # boot script replaces Debian's of the same name (a script under /etc is
+    # copied into the initramfs after the one under /usr/share) so that the
+    # server is only started when a cable has a link; see the script itself.
+    chroot.write_file(
+        REMOTE_UNLOCK_HOOK,
+        (RESOURCES / "firstboot" / "portlin-remote-unlock.hook").read_text(),
+        mode=0o755,
+    )
+    chroot.write_file(
+        REMOTE_UNLOCK_PREMOUNT,
+        (RESOURCES / "firstboot" / "portlin-remote-unlock.init-premount").read_text(),
+        mode=0o755,
+    )
+
     _build_and_install_packages(chroot)
+
+
+def _remote_unlock_host_key(chroot: Chroot) -> None:
+    """Give this stick an initramfs SSH host key of its own.
+
+    dropbear-initramfs generates host keys when it is installed, which is at
+    build time, into a tarball that becomes many sticks; the build strips
+    them again for that reason. Made here, before the initramfs is built, so
+    that dropbear's hook finds a key and every stick identifies itself as
+    itself. The key is on the stick whether or not remote unlock is ever
+    switched on, which costs nothing: it only ever identifies the server,
+    and it never reaches an initramfs while the feature is off.
+
+    Skipped, rather than failed, on a rootfs built without dropbear.
+    """
+    if not chroot.runner.exists(["test", "-x", str(chroot.root / "usr/bin/dropbearkey")]):
+        return
+    chroot.run(
+        [
+            "sh", "-c",
+            f"test -e {REMOTE_UNLOCK_HOST_KEY} || "
+            f"{{ mkdir -p {Path(REMOTE_UNLOCK_HOST_KEY).parent} && "
+            f"dropbearkey -t ed25519 -f {REMOTE_UNLOCK_HOST_KEY}; }}",
+        ]
+    )
 
 
 def _has_desktop(chroot: Chroot) -> bool:

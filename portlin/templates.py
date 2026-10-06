@@ -172,6 +172,40 @@ def render_cryptsetup_hook_conf() -> str:
     )
 
 
+# Where remote unlock is switched on and off, and the port its SSH server
+# listens on. One file, read by three things: the initramfs gate hook decides
+# from it whether dropbear goes into the initramfs at all, the premount script
+# reads the port out of the copy the hook put in the initramfs, and the
+# first-boot wizard and portlin-remote-unlock write it.
+REMOTE_UNLOCK_CONF = "/etc/portlin/remote-unlock.conf"
+
+# Not 22. The initramfs server has its own host key, and a client that had
+# already talked to the stick's real sshd on the same address would otherwise
+# refuse with "REMOTE HOST IDENTIFICATION HAS CHANGED". A port of its own
+# gives it a known_hosts entry of its own.
+REMOTE_UNLOCK_PORT = 2222
+
+
+def render_remote_unlock_conf(*, enabled: bool = False, port: int = REMOTE_UNLOCK_PORT) -> str:
+    """Render /etc/portlin/remote-unlock.conf.
+
+    Off by default, whatever dropbear-initramfs's own hook would do: that
+    hook puts dropbear in every initramfs it is installed on, and a stick
+    that answers SSH before it has unlocked, on whatever network it was
+    plugged into, is not something anyone should get without asking.
+    """
+    return "\n".join(
+        [
+            "# Written by portlin. Whether the initramfs answers SSH before the root",
+            "# filesystem is unlocked, and on which port. Change it with",
+            "# portlin-remote-unlock, which also rebuilds the initramfs.",
+            f"enabled={int(enabled)}",
+            f"port={port}",
+            "",
+        ]
+    )
+
+
 def render_sources_list(*, suite: str, mirror: str, security_mirror: str, components: str) -> str:
     """Render /etc/apt/sources.list.
 
