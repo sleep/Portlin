@@ -3,5 +3,12 @@
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
     <property name="theme" type="string" value="Numix"/>
+    <!--
+      Xfce's own default is four workspaces, with a pager to switch between
+      them. Portlin's panel carries no pager, so a window sent to another
+      workspace by a stray shortcut would simply vanish. One workspace, and
+      the switcher keys have nowhere to send anything.
+    -->
+    <property name="workspace_count" type="int" value="1"/>
   </property>
 </channel>

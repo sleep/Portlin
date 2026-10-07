@@ -285,6 +285,15 @@ def test_desktop_ships_every_theme_file():
     ]
 
 
+def test_desktop_starts_with_a_single_workspace():
+    # xfwm4 falls back to its compiled-in four whenever xfconf has no
+    # workspace_count, and the panel ships no pager to show that the others
+    # exist, so the count has to be stated here rather than left to Xfce.
+    files = package.text_files("portlin-desktop")
+    body = files[f"{package.XDG_OVERLAY}/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"]
+    assert '<property name="workspace_count" type="int" value="1"/>' in body
+
+
 def test_desktop_ships_its_xdg_defaults_only_under_its_own_overlay():
     # dpkg refuses to let two installed packages own the same path, and a
     # conffiles declaration buys no exemption: xfce4-settings already ships
