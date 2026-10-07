@@ -343,6 +343,13 @@ class TestValidationRules:
         assert _only(catalog, dataclasses.replace(palemoon, opt_dir="/usr/local/palemoon"))
         assert _only(catalog, dataclasses.replace(palemoon, launcher=None))
 
+    def test_abtop_comes_from_its_fork_and_says_how_the_hud_uses_it(self, catalog):
+        entry = catalog.by_id("abtop")
+        assert entry.kind == "user-script" and entry.category == "AI tools"
+        assert entry.url.startswith("https://github.com/sleep/abtop/releases/latest/download/")
+        assert entry.check == catalog.path("~/.cargo/bin/abtop")
+        assert "abtop --setup" in entry.notes
+
     def test_user_script_entries_are_checked_under_home_and_warn(self, catalog):
         zed = catalog.by_id("zed")
         assert _only(catalog, dataclasses.replace(zed, check=catalog.dpkg("zed")))

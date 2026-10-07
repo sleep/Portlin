@@ -85,7 +85,7 @@ is decided on every boot, before the login screen, because a stick can be encryp
 after it was written.
 
 One panel, along the top, with a searchable applications menu under the portlin mark. portlin's own
-tools (Software, Drivers, Migrate, Caffeine and Portlin Settings) share a Portlin submenu beside Settings. At the right
+tools (Software, Drivers, Migrate, Caffeine, HUD and Portlin Settings) share a Portlin submenu beside Settings. At the right
 end sits a readout of what the machine is doing:
 
 ```
@@ -103,6 +103,31 @@ The readout would rather say nothing than guess. `cpu --%` is the first couple o
 session, before there are two samples to compare; a machine with no battery has no `bat` field
 rather than an empty one. Intel graphics expose a clock and no utilisation counter, so on those
 machines the field reads `gpu 350MHz` and the tooltip says in words that it is a frequency.
+
+**HUD**, in the Portlin menu, is the page behind that line, for a screen left showing it: the
+machine and the release, every core, the memory broken down into applications, file cache,
+buffers, shared and free with swap and zram beside it, the graphics card with its memory and
+temperature where the driver reports them, every filesystem and each drive's read and write rate,
+every network link with its kind (ethernet, wifi, mobile, vpn, bridge), its addresses, speed or
+SSID and signal, and its traffic now and since boot, the private address and the public one.
+The public address is the one thing on the page that leaves the machine: it is asked of
+`api.ipify.org` once every ten minutes, and `--no-public` stops it being asked at all.
+
+The last card is the AI agents. Anything the Software app's AI tools page installs shows up by
+its process, with the directory it is in, its memory and what it has running under it. Claude
+Code, Codex and OpenCode keep a transcript or a database on disk, and the HUD reads those the way
+`tail -f` would, so each conversation also gets its project, its model, what it is doing right
+now (`running Bash`, `thinking`, `waiting for input`), how much of the context window is spent,
+the tokens in and out, the number of turns, the branch and the account's rate-limit windows.
+Codex writes those into its transcript; Claude Code tells only its status line, so its row reads
+the file that abtop's status-line hook keeps, and says to run `abtop --setup` until there is one
+(abtop is on the Software app's AI tools page). Nothing is sent anywhere and no agent is asked
+anything.
+
+F11 or `--fullscreen` makes it a kiosk: no title bar, no pointer, Esc brings both back.
+`portlin-hud --json` prints the same snapshot for a script. It keeps the readout's rule: the
+first sample has no rates and no CPU figure and says `--`, and a card whose source is missing
+says so in words.
 
 A coffee cup sits in the panel: click it and the machine stops sleeping, blanking and dimming until
 you click it again, or for a span you pick from `Activate for`. It holds a logind lock over

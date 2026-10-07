@@ -144,6 +144,8 @@ Each module has one job and a testable surface.
 | `packages.py` | The package set, grouped and overridable |
 | `resources/runtime/catalog.py` | Pure: the software catalog both shipped programs read |
 | `resources/runtime/hostinfo.py` | Pure parsers plus thin readers: what machine the stick is plugged into, and what it is doing |
+| `resources/runtime/hud.py` | Pure parsers plus thin readers for the HUD: every filesystem, link, core and the memory breakdown, with a `Sampler` holding the counters a rate needs |
+| `resources/runtime/agents.py` | Pure parsers plus thin readers: which AI agents are running, and what their own transcripts say they are doing |
 | `package.py` | Pure: the three runtime packages as a path-to-content mapping |
 | `progress.py` | Pure: command output -> progress events, stage weights, bars and ETAs |
 | `cli.py` | Argument parsing, confirmation prompts, wiring |

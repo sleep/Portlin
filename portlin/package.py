@@ -86,6 +86,9 @@ DESKTOP_TOOLS = [
     # Caffeine for the lite session: the logind lock and swayidle, drawn by
     # waybar. The Xfce applet above is an X tray icon and cannot run there.
     "portlin-caffeine-lite",
+    # The HUD: the kiosk page behind the panel readout. GTK, and it draws
+    # from two desktop modules below.
+    "portlin-hud",
 ]
 
 # The panel id genmon is given, which is also the id in the filename genmon
@@ -99,6 +102,7 @@ MENU_ENTRIES = {
     "portlin-drivers.desktop": "usr/share/applications/portlin-drivers.desktop",
     "portlin-migration.desktop": "usr/share/applications/portlin-migration.desktop",
     "portlin-settings.desktop": "usr/share/applications/portlin-settings.desktop",
+    "portlin-hud.desktop": "usr/share/applications/portlin-hud.desktop",
 }
 
 # X-Xfce-Toplevel (see portlin-about.desktop) only keeps About Portlin out of
@@ -165,7 +169,8 @@ MIGRATE_LIVE_TOOL = "usr/lib/portlin/portlin-migrate-live"
 # What both Caffeine applets import: the lock, the durations and the settings
 # file. Beside portlin-runtime's shared modules in /usr/lib/portlin, but
 # shipped here, because both programs that read it are desktop programs.
-DESKTOP_MODULES = ["caffeine.py"]
+# hud.py and agents.py are the HUD's readers, beside it for the same reason.
+DESKTOP_MODULES = ["caffeine.py", "hud.py", "agents.py"]
 
 # This runs in the X session, where XDG_RUNTIME_DIR is available.  It is a
 # conffile because it is an ordinary /etc Xsession hook.

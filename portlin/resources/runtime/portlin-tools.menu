@@ -24,6 +24,7 @@ which owns the root Layout.
       <Filename>portlin-drivers.desktop</Filename>
       <Filename>portlin-migration.desktop</Filename>
       <Filename>portlin-caffeine.desktop</Filename>
+      <Filename>portlin-hud.desktop</Filename>
       <Separator/>
       <Filename>portlin-settings.desktop</Filename>
       <Merge type="all"/>

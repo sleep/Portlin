@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=HUD
+GenericName=System Monitor
+Comment=One screen of what this machine is and what it is doing, including any AI agents
+Exec=portlin-hud
+Icon=portlin
+Terminal=false
+StartupNotify=true
+# System and Monitor are the registered categories for a program that
+# watches the machine, so a menu that does not know X-Portlin still files
+# it beside the task manager.
+Categories=X-Portlin;System;Monitor;
+Keywords=hud;stats;monitor;cpu;memory;ram;disk;network;ip;gpu;agents;claude;codex;kiosk;

@@ -170,7 +170,7 @@ class TestMenuLayout:
 TOOLS_MENU = RUNTIME / "portlin-tools.menu"
 DIRECTORY = RUNTIME / "portlin.directory"
 CATEGORISED = ["portlin-software.desktop", "portlin-drivers.desktop", "portlin-migration.desktop", "portlin-caffeine.desktop",
-               "portlin-settings.desktop"]
+               "portlin-settings.desktop", "portlin-hud.desktop"]
 
 
 class TestPortlinSubmenu:

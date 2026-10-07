@@ -40,13 +40,14 @@ dryrun: venv
 	@$(PY) -m portlin --dry-run write --target /tmp/stick.img --image-size 32G \
 		--rootfs /tmp/portlin-rootfs.tar.zst --yes 2>&1 | tail -60
 
-# The nine that exercise what a unit test structurally cannot see: the
+# The ten that exercise what a unit test structurally cannot see: the
 # shipped scripts and commands against real block devices, portlin's own
-# packages against a real dpkg, the caffeine applet, the Software window and
-# the Migrate window against a real X server, and portlin-install against a
-# real archive, where what is being tested is partly somebody else's promise
+# packages against a real dpkg, the caffeine applet, the Software, Migrate
+# and HUD windows against a real X server, the readouts against a real
+# kernel, and portlin-install against a real archive, where what is being
+# tested is partly somebody else's promise
 # about a package name or a repository. Each one caught a bug the unit tests
-# could not. Thirteen runs: test-expand.py goes four times because the tier
+# could not. Fourteen runs: test-expand.py goes four times because the tier
 # rule keeps the wizard's apply_expand and the packaged portlin-expand as two
 # separate implementations that can drift, so both need real-device coverage,
 # encrypted and not; test-migrate.py goes twice because an encrypted source
@@ -61,9 +62,10 @@ harness:
 	    dmsetup cloud-guest-utils dpkg-dev \
 	    python3-gi gir1.2-gtk-3.0 librsvg2-common xvfb x11-xserver-utils \
 	    ca-certificates curl pciutils polkitd pkexec dbus xz-utils \
-	    rsync zstd openssl >/dev/null; \
+	    rsync zstd openssl iproute2 imagemagick >/dev/null; \
 	  python3 -u scripts/test-caffeine.py && \
 	  python3 -u scripts/test-stats.py && \
+	  python3 -u scripts/test-hud.py && \
 	  python3 -u scripts/test-package-conflicts.py && \
 	  python3 -u scripts/test-encrypt-hook.py && \
 	  python3 -u scripts/test-stash-passphrase.py && \
