@@ -429,6 +429,86 @@ class TestReleaseZips:
         assert (opt / "README.md").is_file()
 
 
+class TestReleaseBinaries:
+    """One executable from a forge's latest release, put on PATH."""
+
+    URL = "https://example.invalid/yt-dlp_linux"
+    DOWNLOAD = "/var/cache/portlin/downloads/yt-dlp.bin"
+
+    def test_it_downloads_checks_then_installs_executable(self, tool, catalog, ctx):
+        entry = catalog.by_id("yt-dlp")
+        steps = tool.plan_install(entry, ctx, asset_url=self.URL)
+        assert argvs(steps) == [
+            tool.curl_argv(self.URL, self.DOWNLOAD),
+            ("install", "-m", "0755", self.DOWNLOAD, "/usr/local/bin/yt-dlp"),
+        ]
+        rendered = flat(steps)
+        assert rendered.index("check " + self.DOWNLOAD) < rendered.index("run install")
+        assert any(self.DOWNLOAD in step.remove for step in steps)
+
+    def test_nothing_about_it_goes_through_apt(self, tool, catalog, ctx):
+        entry = catalog.by_id("yt-dlp")
+        assert not tool.uses_apt(entry)
+        assert not any(a[0] == "apt-get" for a in argvs(tool.plan_install(entry, ctx, asset_url=self.URL)))
+
+    def test_the_release_is_asked_for_before_planning(self, tool, catalog):
+        assert "release-bin" in tool.RELEASE_KINDS
+
+    def test_the_endpoint_is_the_entrys_own_or_githubs(self, tool, catalog):
+        gallery = catalog.by_id("gallery-dl")
+        assert tool.release_api_url(gallery) == gallery.release_api
+        assert tool.release_api_url(catalog.by_id("rustdesk")) == (
+            "https://api.github.com/repos/rustdesk/rustdesk/releases/latest"
+        )
+
+    def test_a_codeberg_release_picks_the_binary_not_its_signature(self, tool, catalog):
+        # Forgejo's answer has the same two keys GitHub's does.
+        payload = {
+            "tag_name": "v1.32.15",
+            "assets": [
+                {"name": "gallery-dl.bin", "browser_download_url": "https://c/gallery-dl.bin"},
+                {"name": "gallery-dl.bin.sig", "browser_download_url": "https://c/gallery-dl.bin.sig"},
+                {"name": "gallery-dl.exe", "browser_download_url": "https://c/gallery-dl.exe"},
+            ],
+        }
+        pattern = catalog.by_id("gallery-dl").asset_pattern
+        assert tool.pick_release_asset(payload, pattern) == "https://c/gallery-dl.bin"
+
+    def test_removal_takes_the_executable_away(self, tool, catalog, ctx):
+        entry = catalog.by_id("yt-dlp")
+        assert flat(tool.plan_remove(entry, ctx, None)) == "remove /usr/local/bin/yt-dlp"
+        recorded = tool.plan_remove(entry, ctx, {"paths": ["/usr/local/bin/yt-dlp-old"]})
+        assert flat(recorded) == "remove /usr/local/bin/yt-dlp-old"
+
+    def test_the_record_names_the_executable_and_no_packages(self, tool, catalog, ctx):
+        entry = catalog.by_id("yt-dlp")
+        record = tool.record_for(entry, ctx, tool.plan_install(entry, ctx, asset_url=self.URL))
+        assert record["paths"] == ["/usr/local/bin/yt-dlp"]
+        assert record["packages"] == []
+
+    @pytest.mark.skipif(
+        shutil.which("curl") is None or shutil.which("install") is None,
+        reason="needs curl and install",
+    )
+    def test_the_plan_runs_for_real_against_a_local_file(self, tool, catalog, ctx, tmp_path):
+        """The two argvs, run: a file served over file:// through the same
+        curl, landing executable at the path the entry names."""
+        import dataclasses
+
+        source = tmp_path / "yt-dlp_linux"
+        source.write_text("#!/bin/sh\necho downloaded\n")
+        bin_path = tmp_path / "usr-local-bin" / "yt-dlp"
+        entry = dataclasses.replace(catalog.by_id("yt-dlp"), bin_path=str(bin_path))
+        sandbox = dataclasses.replace(ctx, download_dir=str(tmp_path / "downloads"))
+        result = tool.run_plan(tool.plan_install(entry, sandbox, asset_url=source.as_uri()))
+        assert result.ok, result.failure
+        assert bin_path.stat().st_mode & 0o777 == 0o755
+        assert subprocess.run([str(bin_path)], capture_output=True, text=True).stdout == "downloaded\n"
+        assert not (tmp_path / "downloads" / "yt-dlp.bin").exists()
+        tool.run_plan(tool.plan_remove(entry, sandbox, None))
+        assert not bin_path.exists()
+
+
 class TestVendorScripts:
     def test_the_script_is_downloaded_to_a_file_and_never_piped(self, tool, catalog, ctx):
         import dataclasses
@@ -600,11 +680,13 @@ class TestRefreshingBeforeAnInstall:
     ):
         import dataclasses
 
-        entry = next(e for e in catalog.ENTRIES if e.kind == "tarball-opt")
-        user = dataclasses.replace(ctx, root=entry.kind not in catalog.USER_KINDS)
-        code, plans, _ = self.recorded(tool, user, monkeypatch, [entry.id])
-        assert code == tool.EXIT_OK
-        assert plans and [tool.apt_argv("update")] not in plans
+        monkeypatch.setattr(tool, "latest_release_asset", lambda entry: "https://x/asset")
+        for kind in ("tarball-opt", "release-bin"):
+            entry = next(e for e in catalog.ENTRIES if e.kind == kind)
+            user = dataclasses.replace(ctx, root=entry.kind not in catalog.USER_KINDS)
+            code, plans, _ = self.recorded(tool, user, monkeypatch, [entry.id])
+            assert code == tool.EXIT_OK, kind
+            assert plans and [tool.apt_argv("update")] not in plans, kind
 
 
 class TestRunningAPlan:
@@ -933,6 +1015,13 @@ class TestWhatShowPrints:
         args = tool.build_parser().parse_args(["show", "nvidia-driver"])
         args.func(args, ctx)
         assert "chosen by nvidia-detect" in capsys.readouterr().out
+
+    def test_a_release_binary_says_where_it_asks_and_where_it_lands(self, tool, ctx, capsys):
+        args = tool.build_parser().parse_args(["show", "gallery-dl"])
+        args.func(args, ctx)
+        printed = capsys.readouterr().out
+        assert "codeberg.org/api/v1/repos/mikf/gallery-dl/releases/latest" in printed
+        assert "/usr/local/bin/gallery-dl" in printed
 
     def test_an_entry_that_needs_no_root_says_so(self, tool, ctx, capsys):
         args = tool.build_parser().parse_args(["show", "zed"])

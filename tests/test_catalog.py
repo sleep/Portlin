@@ -28,7 +28,7 @@ REQUESTED = [
     "vscode", "docker", "tailscale", "syncthing", "wireshark",
     "vlc", "libreoffice", "gimp", "obs-studio", "thunderbird", "keepassxc",
     "signal", "telegram", "discord",
-    "yt-dlp", "gallery-dl", "handbrake", "kleopatra", "veracrypt", "php", "jd-gui", "ghidra",
+    "ffmpeg", "yt-dlp", "gallery-dl", "handbrake", "kleopatra", "veracrypt", "php", "jd-gui", "ghidra",
     "nmap", "metasploit", "sqlmap", "web-scanners", "password-crackers", "impacket",
     "recon-tools", "packet-tools", "mitm-tools", "wifi-tools", "radare2", "apktool",
     "debuggers", "binary-tools", "pwntools", "binwalk", "hex-editors", "forensics-tools",
@@ -178,6 +178,79 @@ class TestTheSecurityResearchPage:
             assert wanted in {entry.id for entry in catalog.search(query)}, query
 
 
+class TestTheMediaDownloaders:
+    """yt-dlp and gallery-dl come from their own releases, not Debian's.
+
+    Both break whenever a site changes and are fixed in a release within
+    days; Debian's packages freeze at a release. The rules here are the ones
+    validate() cannot know: that the entries left apt, that the pattern each
+    carries picks the one Linux executable out of a real release's asset
+    list, and that yt-dlp still gets the ffmpeg it merges streams with.
+    """
+
+    # The asset names a release of each really carries, from the forge.
+    YT_DLP_ASSETS = (
+        "SHA2-256SUMS", "SHA2-256SUMS.sig", "yt-dlp", "yt-dlp.exe", "yt-dlp.tar.gz",
+        "yt-dlp_linux", "yt-dlp_linux.zip", "yt-dlp_linux_aarch64", "yt-dlp_linux_aarch64.zip",
+        "yt-dlp_linux_armv7l.zip", "yt-dlp_macos", "yt-dlp_musllinux", "yt-dlp_win.zip",
+        "_update_spec",
+    )
+    GALLERY_DL_ASSETS = (
+        "gallery_dl-1.32.15-py3-none-any.whl", "gallery_dl-1.32.15.tar.gz", "gallery-dl_x86.exe",
+        "gallery-dl.bin", "gallery-dl.bin.sig", "gallery-dl.exe", "gallery-dl.exe.sig",
+        "SHA256SUMS", "SHA256SUMS.sig",
+    )
+
+    def test_neither_comes_from_debian_any_more(self, catalog):
+        for entry_id in ("yt-dlp", "gallery-dl"):
+            entry = catalog.by_id(entry_id)
+            assert entry.kind == "release-bin", entry_id
+            assert entry.packages == (), entry_id
+
+    def test_each_pattern_picks_exactly_the_linux_executable(self, catalog):
+        import re
+
+        for entry_id, assets, wanted in (
+            ("yt-dlp", self.YT_DLP_ASSETS, "yt-dlp_linux"),
+            ("gallery-dl", self.GALLERY_DL_ASSETS, "gallery-dl.bin"),
+        ):
+            pattern = re.compile(catalog.by_id(entry_id).asset_pattern)
+            assert [name for name in assets if pattern.search(name)] == [wanted], entry_id
+
+    def test_yt_dlp_asks_the_project_not_debian(self, catalog):
+        # The nightly channel is the one the project recommends for people
+        # who use it rather than develop it.
+        assert catalog.by_id("yt-dlp").release_api == catalog.github_releases(
+            "yt-dlp/yt-dlp-nightly-builds"
+        )
+
+    def test_gallery_dl_asks_codeberg_where_its_releases_live(self, catalog):
+        # The GitHub mirror's releases carry only the source archives.
+        assert catalog.by_id("gallery-dl").release_api == catalog.codeberg_releases(
+            "mikf/gallery-dl"
+        )
+
+    def test_yt_dlp_still_brings_ffmpeg(self, catalog):
+        # The apt entry used to install ffmpeg alongside; a release binary
+        # cannot, so it is a requirement the Software app installs first.
+        assert catalog.by_id("yt-dlp").requires == ("ffmpeg",)
+        ffmpeg = catalog.by_id("ffmpeg")
+        assert ffmpeg.kind == "apt" and ffmpeg.packages == ("ffmpeg",)
+
+    def test_both_land_ahead_of_any_debian_package_on_path(self, catalog):
+        for entry_id in ("yt-dlp", "gallery-dl"):
+            entry = catalog.by_id(entry_id)
+            assert entry.bin_path.startswith("/usr/local/bin/"), entry_id
+            assert entry.check == catalog.path(entry.bin_path), entry_id
+
+    def test_both_say_how_to_update(self, catalog):
+        # Nothing on the stick upgrades them: apt does not know they exist.
+        # The binary itself does, and the entry is where a person reads that.
+        for entry_id in ("yt-dlp", "gallery-dl"):
+            notes = catalog.by_id(entry_id).notes
+            assert notes and f"sudo {entry_id} -U" in notes, entry_id
+
+
 class TestValidationRules:
     def test_ids_are_lowercase_hyphenated(self, catalog, good):
         assert _only(catalog, dataclasses.replace(good, id="Mullvad_VPN"))
@@ -244,6 +317,26 @@ class TestValidationRules:
         rustdesk = catalog.by_id("rustdesk")
         assert _only(catalog, dataclasses.replace(rustdesk, github_repo="rustdesk"))
         assert _only(catalog, dataclasses.replace(rustdesk, asset_pattern="("))
+
+    def test_release_bin_entries_name_a_release_a_pattern_and_a_binary(self, catalog):
+        gallery = catalog.by_id("gallery-dl")
+        assert _only(catalog, gallery) == []
+        assert _only(catalog, dataclasses.replace(gallery, release_api=None))
+        assert _only(catalog, dataclasses.replace(gallery, asset_pattern="("))
+        assert _only(catalog, dataclasses.replace(gallery, bin_path="/usr/bin/gallery-dl"))
+        assert _only(catalog, dataclasses.replace(gallery, packages=("gallery-dl",)))
+
+    def test_release_bin_entries_are_checked_by_the_binary_they_install(self, catalog):
+        # A check on some other path is an entry that says "not installed"
+        # forever, or "installed" after a removal.
+        ytdlp = catalog.by_id("yt-dlp")
+        assert _only(catalog, dataclasses.replace(ytdlp, check=catalog.path("/usr/local/bin/x")))
+        assert _only(catalog, dataclasses.replace(ytdlp, check=catalog.dpkg("yt-dlp")))
+
+    def test_a_release_api_over_plain_http_is_refused(self, catalog):
+        ytdlp = catalog.by_id("yt-dlp")
+        http = ytdlp.release_api.replace("https://", "http://")
+        assert any("https" in p for p in _only(catalog, dataclasses.replace(ytdlp, release_api=http)))
 
     def test_tarball_entries_unpack_under_opt(self, catalog):
         palemoon = catalog.by_id("palemoon")

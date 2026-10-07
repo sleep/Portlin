@@ -523,6 +523,29 @@ def plan_github_zip(entry: Entry, ctx: Context, url: str) -> list[Step]:
     ] + _plan_after(entry, ctx)
 
 
+def plan_release_bin(entry: Entry, ctx: Context, url: str) -> list[Step]:
+    """Install one executable from a release, straight onto PATH.
+
+    install(1) rather than mv and chmod: it copies into place with the mode
+    set in one step, so there is never a moment when the file is on PATH but
+    not executable, or executable but half written.
+    """
+    download = f"{ctx.download_dir}/{entry.id}.bin"
+    return [
+        Step(f"Downloading {entry.name}", mkdir=ctx.download_dir,
+             argv=curl_argv(url, download), check_file=download),
+        Step(f"Installing {entry.name} as {entry.bin_path}",
+             mkdir=str(Path(entry.bin_path).parent),
+             argv=("install", "-m", "0755", download, entry.bin_path),
+             remove=(download,)),
+    ] + _plan_after(entry, ctx)
+
+
+# The kinds whose download is whatever the forge says the latest release is,
+# looked up before the plan is made.
+RELEASE_KINDS = ("github-deb", "github-zip-opt", "release-bin")
+
+
 def plan_install(
     entry: Entry, ctx: Context, *, resolved_packages=None, asset_url: str | None = None
 ) -> list[Step]:
@@ -536,6 +559,8 @@ def plan_install(
         return plan_deb(entry, ctx, asset_url or "<latest release asset>")
     if entry.kind == "github-zip-opt":
         return plan_github_zip(entry, ctx, asset_url or "<latest release asset>")
+    if entry.kind == "release-bin":
+        return plan_release_bin(entry, ctx, asset_url or "<latest release asset>")
     if entry.kind == "tarball-opt":
         return plan_tarball(entry, ctx)
     if entry.kind == "user-script":
@@ -601,6 +626,9 @@ def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
             Step(f"Removing {entry.name}",
                  remove=tuple(paths or (entry.opt_dir, tarball_desktop_path(entry)))),
         ]
+    if entry.kind == "release-bin":
+        paths = record.get("paths") if record else None
+        return [Step(f"Removing {entry.name}", remove=tuple(paths or (entry.bin_path,)))]
     if entry.kind == "user-script":
         paths = tuple(str(expand_home(p, Path(ctx.home))) for p in entry.remove_paths)
         if not paths:
@@ -676,6 +704,8 @@ def record_for(entry: Entry, ctx: Context, steps, resolved_packages=None) -> dic
         paths += [entry.repo.sources_path, entry.repo.keyring_path]
     if entry.kind in ("tarball-opt", "github-zip-opt"):
         paths += [entry.opt_dir, tarball_desktop_path(entry)]
+    if entry.kind == "release-bin":
+        paths.append(entry.bin_path)
     if entry.kind == "user-script":
         paths += [str(expand_home(p, Path(ctx.home))) for p in entry.remove_paths]
     return {"id": entry.id, "kind": entry.kind, "packages": packages, "paths": paths}
@@ -1062,9 +1092,22 @@ def dpkg_installed() -> set[str]:
     return parse_dpkg_status(proc.stdout)
 
 
+def release_api_url(entry: Entry) -> str:
+    """Where to ask what the latest release is.
+
+    The github kinds name a repository and the endpoint is GitHub's; a
+    release-bin entry names the endpoint itself, because its release may
+    live on Codeberg, whose API answers in the same shape.
+    """
+    if entry.release_api:
+        return entry.release_api
+    return GITHUB_API.format(repo=entry.github_repo)
+
+
 def latest_release_asset(entry: Entry) -> str:
     request = Request(
-        GITHUB_API.format(repo=entry.github_repo),
+        release_api_url(entry),
+        # GitHub's media type; Codeberg answers it with plain JSON just the same.
         headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
     )
     with urlopen(request, timeout=30) as response:
@@ -1169,6 +1212,10 @@ def cmd_show(args, ctx: Context) -> int:
         field("repo", entry.repo.sources_line or entry.repo.sources_url)
     if entry.url:
         field("url", entry.url)
+    if entry.release_api:
+        field("release", entry.release_api)
+    if entry.bin_path:
+        field("installs", entry.bin_path)
     if entry.needs_components:
         field("needs", f"{' '.join(entry.needs_components)} component")
     if entry.warning:
@@ -1226,7 +1273,7 @@ def install_one(entry: Entry, ctx: Context, *, dry_run: bool) -> int:
             return EXIT_FAILED
     resolved = None
     asset_url = None
-    if entry.kind in ("github-deb", "github-zip-opt") and not dry_run:
+    if entry.kind in RELEASE_KINDS and not dry_run:
         try:
             asset_url = latest_release_asset(entry)
         except (OSError, ValueError, KeyError) as exc:

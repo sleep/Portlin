@@ -17,16 +17,19 @@ apt-repo     a vendor apt repository: a signing key, a sources entry, then apt
 deb-url      a .deb the vendor publishes at a fixed URL
 github-deb   a .deb attached to the latest release of a GitHub repository
 github-zip-opt a ZIP attached to the latest GitHub release, unpacked under /opt
+release-bin  one executable attached to the latest release on GitHub or
+             Codeberg, installed into /usr/local/bin
 tarball-opt  a tarball unpacked under /opt, with a generated menu entry
 user-script  the vendor's installer script, run as the user, into their home
 
-The first five need root and go through pkexec. user-script must never run as
-root, because it writes under a home directory. A user-script entry can pass
-its script arguments and environment variables, which is how an installer
-that would otherwise stop to ask a question is told not to. Any entry can name
-other entries it ``requires``: the Software app installs those first, and
-portlin-install refuses the entry until they are there, since a vendor script
-run as the user cannot install what it finds missing.
+Every kind but user-script needs root and goes through pkexec. user-script
+must never run as root, because it writes under a home directory. A
+user-script entry can pass its script arguments and environment variables,
+which is how an installer that would otherwise stop to ask a question is told
+not to. Any entry can name other entries it ``requires``: the Software app
+installs those first, and portlin-install refuses the entry until they are
+there, since a vendor script run as the user cannot install what it finds
+missing.
 """
 
 from __future__ import annotations
@@ -36,8 +39,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-KINDS = ("apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "tarball-opt", "user-script")
-PRIVILEGED_KINDS = frozenset({"apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "tarball-opt"})
+KINDS = (
+    "apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "release-bin", "tarball-opt",
+    "user-script",
+)
+PRIVILEGED_KINDS = frozenset(
+    {"apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "release-bin", "tarball-opt"}
+)
 USER_KINDS = frozenset({"user-script"})
 
 # Display order. Drivers last: it is the page that talks about this machine
@@ -66,6 +74,9 @@ PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.-]+$")
 ENTRY_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 KEYRING_DIRS = ("/usr/share/keyrings/", "/etc/apt/keyrings/")
 SOURCES_DIR = "/etc/apt/sources.list.d/"
+# Where a release-bin entry's executable goes: on PATH for everyone, and
+# ahead of /usr/bin, so it wins over any older Debian package of the same tool.
+BIN_DIR = "/usr/local/bin/"
 DASHES = "–—"
 ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
@@ -115,6 +126,11 @@ class Entry:
     url: str | None = None
     github_repo: str | None = None
     asset_pattern: str | None = None
+    # release-bin: the forge's "latest release" API endpoint, and where the
+    # one asset asset_pattern picks out is installed. GitHub and Codeberg
+    # (Forgejo) answer that endpoint in the same shape.
+    release_api: str | None = None
+    bin_path: str | None = None
     opt_dir: str | None = None
     launcher: str | None = None
     icon: str | None = None
@@ -137,6 +153,14 @@ def dpkg(*names: str) -> Check:
 
 def path(*paths: str) -> Check:
     return Check("path", paths)
+
+
+def github_releases(repo: str) -> str:
+    return f"https://api.github.com/repos/{repo}/releases/latest"
+
+
+def codeberg_releases(repo: str) -> str:
+    return f"https://codeberg.org/api/v1/repos/{repo}/releases/latest"
 
 
 DKMS_WARNING = (
@@ -325,24 +349,64 @@ ENTRIES: tuple[Entry, ...] = (
         homepage="https://www.audacityteam.org/",
     ),
     Entry(
+        id="ffmpeg",
+        name="FFmpeg",
+        summary="Convert, cut and merge audio and video from the command line",
+        category="Media",
+        kind="apt",
+        packages=("ffmpeg",),
+        check=dpkg("ffmpeg"),
+        homepage="https://ffmpeg.org/",
+        notes="yt-dlp uses it to merge the video and audio it downloads.",
+    ),
+    # The two downloaders below break whenever a site changes, and the fix is
+    # always a new release within days. Debian's packages freeze at a release
+    # and stay there, so these take the project's own build instead, which
+    # also knows how to update itself.
+    Entry(
         id="yt-dlp",
         name="yt-dlp",
         summary="Download video and audio from supported websites",
         category="Media",
-        kind="apt",
-        packages=("yt-dlp", "ffmpeg"),
-        check=dpkg("yt-dlp"),
+        kind="release-bin",
+        # The nightly channel: a build on any day with changes, and the one
+        # the project recommends for regular users. The stable channel is
+        # released monthly and is the one Debian's package falls behind.
+        release_api=github_releases("yt-dlp/yt-dlp-nightly-builds"),
+        # The standalone x86_64 build, with its Python and every optional
+        # dependency inside. Anchored at both ends: the same release also
+        # ships yt-dlp_linux.zip and yt-dlp_linux_aarch64.
+        asset_pattern=r"^yt-dlp_linux$",
+        bin_path="/usr/local/bin/yt-dlp",
+        requires=("ffmpeg",),
+        check=path("/usr/local/bin/yt-dlp"),
         homepage="https://github.com/yt-dlp/yt-dlp",
+        notes=(
+            "The project's own nightly build rather than Debian's package, which stops "
+            "working as sites change. FFmpeg is installed first if it is missing. To update, "
+            "run: sudo yt-dlp -U. To switch to the monthly stable channel, run: sudo yt-dlp "
+            "--update-to stable."
+        ),
     ),
     Entry(
         id="gallery-dl",
         name="gallery-dl",
         summary="Download image galleries and media collections",
         category="Media",
-        kind="apt",
-        packages=("gallery-dl",),
-        check=dpkg("gallery-dl"),
+        kind="release-bin",
+        # gallery-dl's development and releases moved to Codeberg; the GitHub
+        # mirror's releases carry only the source archives.
+        release_api=codeberg_releases("mikf/gallery-dl"),
+        # The release also carries gallery-dl.bin.sig, so the dot and the end
+        # anchor both matter.
+        asset_pattern=r"^gallery-dl\.bin$",
+        bin_path="/usr/local/bin/gallery-dl",
+        check=path("/usr/local/bin/gallery-dl"),
         homepage="https://gdl-org.github.io/",
+        notes=(
+            "The project's own release from Codeberg rather than Debian's package, which "
+            "stops working as sites change. To update, run: sudo gallery-dl -U."
+        ),
     ),
     Entry(
         id="handbrake",
@@ -1515,6 +1579,8 @@ def _urls(entry: Entry) -> list[str]:
     urls = [entry.homepage]
     if entry.url:
         urls.append(entry.url)
+    if entry.release_api:
+        urls.append(entry.release_api)
     if entry.repo:
         urls.append(entry.repo.key_url)
         if entry.repo.sources_url:
@@ -1633,6 +1699,22 @@ def validate(entries: tuple[Entry, ...] = ENTRIES) -> list[str]:
                 problem(entry, "github-zip-opt entries unpack under /opt")
             if not entry.launcher:
                 problem(entry, "github-zip-opt entries name their launcher")
+        elif entry.kind == "release-bin":
+            if not entry.release_api:
+                problem(entry, "release-bin entries name the release API to ask")
+            if not entry.asset_pattern:
+                problem(entry, "release-bin entries carry an asset_pattern")
+            else:
+                try:
+                    re.compile(entry.asset_pattern)
+                except re.error as exc:
+                    problem(entry, f"asset_pattern does not compile: {exc}")
+            if not entry.bin_path or not entry.bin_path.startswith(BIN_DIR):
+                problem(entry, f"release-bin entries install under {BIN_DIR}")
+            elif entry.check.kind != "path" or entry.bin_path not in entry.check.values:
+                problem(entry, "release-bin entries are checked by the executable they install")
+            if entry.packages:
+                problem(entry, "release-bin entries install one file, not packages")
         elif entry.kind == "tarball-opt":
             if not entry.url:
                 problem(entry, "tarball-opt entries carry a url")

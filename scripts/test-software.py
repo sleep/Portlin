@@ -296,6 +296,38 @@ def check_the_other_install_kinds() -> None:
     else:
         ok("a tarball removes its directory and its menu entry")
 
+    # One executable from a release, the way yt-dlp and gallery-dl arrive.
+    # The asset is handed in as the forge would have named it, so this is
+    # the download and install path without the network.
+    probe = Path("/tmp/harness-bin/probe_linux")
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("#!/bin/sh\necho harness\n")
+    bin_entry = catalog.Entry(
+        id="harness-bin",
+        name="Harness binary",
+        summary="A stand-in for a release executable",
+        category="System tools",
+        kind="release-bin",
+        release_api="https://example.invalid/releases/latest",
+        asset_pattern=r"^probe_linux$",
+        bin_path="/usr/local/bin/portlin-harness-probe",
+        check=catalog.path("/usr/local/bin/portlin-harness-probe"),
+        homepage="https://example.invalid/",
+    )
+    result = installer.run_plan(installer.plan_install(bin_entry, ctx, asset_url=probe.as_uri()))
+    installed = Path(bin_entry.bin_path)
+    if result.ok and run([str(installed)]).stdout == "harness\n":
+        ok("a release executable lands on PATH and runs")
+    else:
+        bad(f"the release binary path failed: {result.failure}")
+    if Path(f"{ctx.download_dir}/harness-bin.bin").exists():
+        bad("the release binary path left its download behind")
+    installer.run_plan(installer.plan_remove(bin_entry, ctx, None))
+    if installed.exists():
+        bad("the release binary path did not remove what it installed")
+    else:
+        ok("a release executable removes cleanly")
+
 
 def check_the_user_script_path() -> None:
     """Run a vendor-style installer as an ordinary user, end to end.
