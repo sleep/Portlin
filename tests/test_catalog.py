@@ -361,15 +361,21 @@ class TestValidationRules:
 
     def test_an_entry_requires_only_other_entries_in_the_catalog(self, catalog):
         hermes = catalog.by_id("hermes")
-        build_tools = catalog.by_id("build-tools")
-        assert catalog.validate((hermes, build_tools)) == []
+        git = catalog.by_id("git")
+        assert catalog.validate((hermes, git)) == []
         assert catalog.validate((hermes,))
-        assert _only(catalog, dataclasses.replace(build_tools, requires=("build-tools",)))
+        assert _only(catalog, dataclasses.replace(git, requires=("git",)))
 
     def test_missing_requirements_are_the_ones_not_installed(self, catalog, tmp_path):
         hermes = catalog.by_id("hermes")
-        assert [e.id for e in catalog.missing_requirements(hermes, set(), tmp_path)] == ["build-tools"]
-        assert catalog.missing_requirements(hermes, {"build-essential"}, tmp_path) == []
+        assert [e.id for e in catalog.missing_requirements(hermes, set(), tmp_path)] == ["git"]
+        assert catalog.missing_requirements(hermes, {"git"}, tmp_path) == []
+
+    def test_the_agents_that_clone_with_git_ask_for_git_alone(self, catalog):
+        # Build tools would bring a compiler too. git is in every image but
+        # a --minimal one, so on most sticks this asks for nothing at all.
+        for entry_id in ("hermes", "openclaw"):
+            assert catalog.by_id(entry_id).requires == ("git",), entry_id
 
     def test_script_environment_names_are_variable_names(self, catalog):
         zed = catalog.by_id("zed")

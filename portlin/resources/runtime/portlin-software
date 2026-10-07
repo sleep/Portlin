@@ -95,8 +95,8 @@ def install_queue(
     """The jobs that install ``entry``: what it requires first, then it.
 
     Each one elevates, or does not, on its own terms, so installing Hermes
-    asks for a password once, for Build tools, and then runs Hermes's own
-    script as the user.
+    on a stick without git asks for a password once, for git, and then runs
+    Hermes's own script as the user.
     """
     return [
         (launch_argv(job, "install", passwordless_sudo=passwordless_sudo), job)

@@ -162,7 +162,7 @@ class TestInstallingWhatAnEntryNeedsFirst:
             catalog.by_id("hermes"), set(), tmp_path, passwordless_sudo=False
         )
         assert [argv for argv, _entry in jobs] == [
-            ["pkexec", "/usr/bin/portlin-install", "install", "build-tools"],
+            ["pkexec", "/usr/bin/portlin-install", "install", "git"],
             ["/usr/bin/portlin-install", "install", "hermes"],
         ]
 
@@ -170,14 +170,14 @@ class TestInstallingWhatAnEntryNeedsFirst:
         self, software, catalog, tmp_path
     ):
         jobs = software.install_queue(
-            catalog.by_id("hermes"), {"build-essential"}, tmp_path, passwordless_sudo=False
+            catalog.by_id("hermes"), {"git"}, tmp_path, passwordless_sudo=False
         )
         assert [entry.id for _argv, entry in jobs] == ["hermes"]
 
     def test_the_dialog_says_what_goes_in_first(self, software, catalog):
         hermes = catalog.by_id("hermes")
-        text = software.confirm_text(hermes, [catalog.by_id("build-tools")])
-        assert text.startswith("Hermes Agent needs Build tools, which will be installed first.")
+        text = software.confirm_text(hermes, [catalog.by_id("git")])
+        assert text.startswith("Hermes Agent needs Git, which will be installed first.")
         assert hermes.warning in text
 
     def test_an_entry_with_nothing_to_say_needs_no_dialog(self, software, catalog):

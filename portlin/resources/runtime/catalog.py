@@ -1014,6 +1014,16 @@ ENTRIES: tuple[Entry, ...] = (
         homepage="https://www.debian.org/",
     ),
     Entry(
+        id="git",
+        name="Git",
+        summary="Version control, which the AI agents' installers clone with",
+        category="Development",
+        kind="apt",
+        packages=("git",),
+        check=dpkg("git"),
+        homepage="https://git-scm.com/",
+    ),
+    Entry(
         id="java",
         name="Java",
         summary="Debian's default JDK, which Ghidra and jadx run on",
@@ -1113,7 +1123,7 @@ ENTRIES: tuple[Entry, ...] = (
         # terminal.
         script_args=("--non-interactive",),
         # It clones itself with git, which a --minimal stick leaves out.
-        requires=("build-tools",),
+        requires=("git",),
         check=path("~/.local/bin/hermes"),
         remove_paths=(
             "~/.hermes/hermes-agent",
@@ -1127,7 +1137,7 @@ ENTRIES: tuple[Entry, ...] = (
         warning=VENDOR_SCRIPT_WARNING,
         homepage="https://hermes-agent.nousresearch.com/",
         notes=(
-            "Build tools, for git, is installed first if it is not already. A large download, "
+            "Git is installed first if it is not already. A large download, "
             "about 3 GB once installed. Afterwards, run hermes setup "
             "in a terminal to pick a model provider. Removing it keeps your settings, "
             "skills and memories in ~/.hermes."
@@ -1145,13 +1155,13 @@ ENTRIES: tuple[Entry, ...] = (
         url="https://openclaw.ai/install-cli.sh",
         # It wants git, which a --minimal stick leaves out, and without it
         # tries sudo apt-get, which cannot prompt for a password here.
-        requires=("build-tools",),
+        requires=("git",),
         check=path("~/.openclaw/bin/openclaw"),
         remove_paths=("~/.openclaw/bin", "~/.openclaw/tools"),
         warning=VENDOR_SCRIPT_WARNING,
         homepage="https://openclaw.ai/",
         notes=(
-            "Build tools, for git, is installed first if it is not already. To set it up, run "
+            "Git is installed first if it is not already. To set it up, run "
             "~/.openclaw/bin/openclaw onboard in a terminal. Removing it "
             "keeps your settings in ~/.openclaw."
         ),

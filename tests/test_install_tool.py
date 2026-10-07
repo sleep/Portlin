@@ -713,7 +713,7 @@ class TestRunningAPlan:
         monkeypatch.setattr(tool.subprocess, "Popen", forbidden)
         code = tool.install_one(catalog.by_id("hermes"), ctx, dry_run=False)
         assert code == tool.EXIT_FAILED
-        assert "needs Build tools installed first" in capsys.readouterr().out
+        assert "needs Git installed first" in capsys.readouterr().out
 
     def test_a_dry_run_writes_nothing(self, tool, catalog, ctx, tmp_path):
         import dataclasses
