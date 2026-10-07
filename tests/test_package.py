@@ -481,6 +481,7 @@ def test_desktop_declares_every_etc_path_it_ships_as_a_conffile():
             *package.DRIVER_SETTINGS.values(),
             package.CACHE_SESSION_HOOK,
             package.SKEL_BASHRC,
+            package.SKEL_ZSHRC,
         )
     }
     assert set(conffiles) == expected
@@ -614,6 +615,20 @@ def test_desktop_ships_the_themed_shell_files():
     assert f"/{package.ROOT_BASHRC}" not in files["DEBIAN/conffiles"]
     # The skel copy is the one a user may have re-themed: it is a conffile.
     assert f"/{package.SKEL_BASHRC}" in files["DEBIAN/conffiles"].splitlines()
+
+
+def test_desktop_ships_the_themed_zshrc_to_skel_and_root():
+    files = package.text_files("portlin-desktop")
+    assert files[package.SKEL_ZSHRC] == files[package.ROOT_ZSHRC] == templates.render_zshrc()
+    assert f"/{package.SKEL_ZSHRC}" in files["DEBIAN/conffiles"].splitlines()
+    # No package owns either path, so there is nothing to divert.
+    assert not any(package.SKEL_ZSHRC in original for original, _ in package.DIVERSIONS)
+
+
+def test_desktop_ships_the_shell_switcher():
+    files = package.text_files("portlin-desktop")
+    assert files["usr/bin/portlin-shell"].startswith("#!/usr/bin/env python3")
+    assert "usr/bin/portlin-shell" in package.executable_paths("portlin-desktop")
 
 
 def test_the_skel_and_root_bashrc_differ_only_where_root_must():

@@ -142,6 +142,12 @@ class TestSoftwareApp:
         assert "pkexec" not in minimal
         assert "mate-polkit" not in minimal
 
+def test_the_image_carries_zsh_and_the_plugins_its_rc_loads():
+    # First boot offers zsh with no network to fetch it.
+    for name in ("zsh", "zsh-autosuggestions", "zsh-syntax-highlighting"):
+        assert name in packages.resolve()
+
+
 def test_every_stick_carries_the_migration_tools():
     # portlin-migrate copies with rsync and archives with zstd, and it ships
     # in portlin-runtime, which a --minimal stick installs. So both live in

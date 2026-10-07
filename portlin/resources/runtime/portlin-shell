@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+"""Choose the shell your terminals open: bash, the default, or zsh.
+
+    portlin-shell              which one is yours, and which are installed
+    portlin-shell zsh          switch to zsh
+    portlin-shell bash         switch back
+
+Run it as yourself. The new shell's themed rc is copied from /etc/skel into a
+home that has none, so the first terminal after the switch is themed rather
+than zsh's new-user questionnaire; a home that has one keeps it. The login
+shell itself is changed by chsh, which asks for your password. Portlin
+Settings passes --pkexec, so that the password is asked for in a dialog.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SHELLS = {"bash": "/bin/bash", "zsh": "/usr/bin/zsh"}
+RC_FILES = {"bash": ".bashrc", "zsh": ".zshrc"}
+SKEL = Path("/etc/skel")
+ETC_SHELLS = Path("/etc/shells")
+CHSH = "/usr/bin/chsh"
+INSTALL_HINT = "sudo apt install zsh zsh-autosuggestions zsh-syntax-highlighting"
+
+USAGE = """usage: portlin-shell [status] [--json]
+       portlin-shell bash|zsh [--pkexec]"""
+
+
+class Refusal(Exception):
+    pass
+
+
+def listed_shells(path: Path = ETC_SHELLS) -> set[str]:
+    """The login shells chsh accepts, from /etc/shells."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return set()
+    return {line.strip() for line in lines if line.strip().startswith("/")}
+
+
+def available(listed: set[str] | None = None) -> list[str]:
+    """The shells on offer: installed, and listed where chsh will look."""
+    listed = listed_shells() if listed is None else listed
+    return [name for name, path in SHELLS.items() if path in listed and Path(path).exists()]
+
+
+def name_of(path: str) -> str:
+    """bash for /bin/bash and /usr/bin/bash alike: merged /usr has both spellings."""
+    return os.path.basename(path) or path
+
+
+def install_rc(name: str, home: Path, skel: Path = SKEL) -> bool:
+    """Copy the themed rc for ``name`` into ``home`` unless one is there already."""
+    target, source = home / RC_FILES[name], skel / RC_FILES[name]
+    if os.path.lexists(target) or not source.is_file():
+        return False
+    shutil.copyfile(source, target)
+    return True
+
+
+def chsh_argv(path: str, user: str, *, pkexec: bool) -> list[str]:
+    # Under pkexec chsh runs as root, which changes the shell without asking
+    # again but only for the account it is named.
+    if pkexec:
+        return ["pkexec", CHSH, "-s", path, user]
+    return [CHSH, "-s", path]
+
+
+def cmd_status(as_json: bool) -> int:
+    account = pwd.getpwuid(os.getuid())
+    current, offered = name_of(account.pw_shell), available()
+    if as_json:
+        print(json.dumps({"user": account.pw_name, "current": current,
+                          "path": account.pw_shell, "available": offered}))
+        return 0
+    print(f"Your login shell is {current} ({account.pw_shell}).")
+    others = [name for name in offered if name != current]
+    if others:
+        print(f"Switch with: portlin-shell {others[0]}")
+    elif "zsh" not in offered:
+        print(f"zsh is not installed. Install it with: {INSTALL_HINT}")
+    return 0
+
+
+def cmd_switch(name: str, *, pkexec: bool) -> int:
+    if name not in available():
+        hint = f" Install it with: {INSTALL_HINT}" if name == "zsh" else ""
+        raise Refusal(f"{name} is not installed, or not listed in {ETC_SHELLS}.{hint}")
+    account = pwd.getpwuid(os.getuid())
+    if install_rc(name, Path(account.pw_dir)):
+        print(f"Copied portlin's {RC_FILES[name]} into {account.pw_dir}.", flush=True)
+    if name_of(account.pw_shell) == name:
+        print(f"Your login shell is already {name}.")
+        return 0
+    result = subprocess.run(chsh_argv(SHELLS[name], account.pw_name, pkexec=pkexec))
+    if result.returncode != 0:
+        raise Refusal(f"chsh did not change it, so your login shell is still {name_of(account.pw_shell)}.")
+    print(f"Your login shell is now {name}. New terminals open in it; log out and in "
+          "again for the rest of the session to follow.")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    flags = {arg for arg in argv if arg.startswith("--")}
+    words = [arg for arg in argv if not arg.startswith("--")]
+    try:
+        if words in ([], ["status"]) and flags <= {"--json"}:
+            return cmd_status("--json" in flags)
+        if len(words) == 1 and words[0] in SHELLS and flags <= {"--pkexec"}:
+            return cmd_switch(words[0], pkexec="--pkexec" in flags)
+    except Refusal as refusal:
+        print(f"portlin-shell: {refusal}", file=sys.stderr)
+        return 1
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

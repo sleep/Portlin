@@ -245,6 +245,29 @@ class TestForm:
         fb.ui.form("T", "", [fb.Field("pw", "Password", secret=True)])
         assert not any("hunter22" in frame for frame in window.frames)
 
+    def test_the_account_gets_the_shell_it_is_given(self, fb, tmp_path):
+        fb.SENTINEL = tmp_path / "pending"
+        fb._user_exists = lambda name: False
+        calls = []
+        fb.run = lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", "")
+        fb.grp = type("G", (), {"getgrall": staticmethod(lambda: [])})
+        fb.apply_account("sam", "Sam", "abcd")
+        assert calls[0][calls[0].index("--shell") + 1] == "/bin/bash"
+        calls.clear()
+        fb.apply_account("sam", "Sam", "abcd", "/usr/bin/zsh")
+        assert calls[0][calls[0].index("--shell") + 1] == "/usr/bin/zsh"
+
+    def test_an_account_taken_up_again_gets_the_shell_too(self, fb, tmp_path):
+        fb.SENTINEL = tmp_path / "pending"
+        fb.SENTINEL.write_text("pending\naccount=sam\n")
+        fb._user_exists = lambda name: True
+        calls = []
+        fb.run = lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", "")
+        fb.grp = type("G", (), {"getgrall": staticmethod(lambda: [])})
+        fb.apply_account("sam", "Sam", "abcd", "/usr/bin/zsh")
+        assert calls[0][0] == "usermod"
+        assert calls[0][calls[0].index("--shell") + 1] == "/usr/bin/zsh"
+
     def test_a_typed_username_is_not_overwritten_by_the_name(self, fb):
         fb._user_exists = lambda name: False
         screen(fb, [key(fb, "DOWN"), *typed("x"), key(fb, "UP"), *typed("Sam"), key(fb, "DOWN"),
@@ -738,6 +761,50 @@ class TestScale:
         assert (tmp_path / "set").read_text().split()[-1] == expected
 
 
+class TestShellChoice:
+    def appearance(self, fb, **answers):
+        seen = {}
+
+        def settings(title, text, rows, **_):
+            seen["rows"] = {row.key: row for row in rows}
+            return {row.key: answers.get(row.key, row.value) for row in rows}
+
+        fb.ui.settings = settings
+        return seen
+
+    def test_it_is_offered_only_where_zsh_and_its_theme_are(self, fb):
+        for choose_shell in (True, False):
+            seen = self.appearance(fb)
+            fb.step_appearance(summary_state(fb, choose_shell=choose_shell))
+            assert ("shell" in seen["rows"]) is choose_shell
+
+    def test_bash_is_the_default(self, fb):
+        seen = self.appearance(fb)
+        fb.step_appearance(summary_state(fb, choose_shell=True))
+        assert seen["rows"]["shell"].value == "bash"
+
+    def test_a_restored_account_keeps_the_shell_it_had(self, fb):
+        seen = self.appearance(fb)
+        fb.step_appearance(summary_state(fb, choose_shell=True, account_plan={"name": "sam"}))
+        assert "shell" not in seen["rows"]
+
+    def test_the_choice_is_kept_and_summarised(self, fb):
+        self.appearance(fb, shell="zsh")
+        state = summary_state(fb, choose_shell=True)
+        fb.step_appearance(state)
+        assert state.shell == "zsh"
+        assert "zsh shell" in dict((k, v) for k, _, v in fb.summary_groups(state))["appearance"]
+
+    def test_the_account_is_created_with_it(self, fb):
+        state = summary_state(fb, choose_shell=True, shell="zsh")
+        stub_applies(fb)
+        made = []
+        fb.apply_account = lambda *args: made.append(args)
+        fb.ui.screen = FakeScreen([])
+        fb.apply_all(state)
+        assert made == [("sam", "", "pw", "/usr/bin/zsh")]
+
+
 # --------------------------------------------------------------------------
 # Hardware, services, storage
 # --------------------------------------------------------------------------
@@ -1039,10 +1106,10 @@ class TestApplying:
         assert fb.ui.screen.cleared is True
 
 
-def summary_state(fb):
+def summary_state(fb, **answers):
     from test_firstboot import summary_state as finished
 
-    return finished(fb)
+    return finished(fb, **answers)
 
 
 def stub_applies(fb):

@@ -251,6 +251,19 @@ DESKTOP_HELP = {
             "Xfce is removed, which frees disk space too.",
 }
 
+# The login shell the account is created with. Both are in the image, and
+# portlin-desktop ships a themed rc for each, so the choice is offered only
+# where that package is. zsh stays installed whichever is picked, so
+# portlin-shell can switch later without a network.
+SHELLS = {"bash": "/bin/bash", "zsh": "/usr/bin/zsh"}
+SHELL_HELP = {
+    "bash": "Debian's standard shell, in portlin's theme. Switch later with "
+            "portlin-shell, or in Portlin Settings.",
+    "zsh": "The same theme, plus git status in the prompt, suggestions from history as "
+           "you type, syntax highlighting and menu completion. Switch back later with "
+           "portlin-shell bash.",
+}
+
 # What belongs to one desktop alone, purged when the other is picked; apt's
 # autoremove then takes whatever only these pulled in. Thunar, the terminal,
 # Mousepad, Ristretto, the polkit agent and the network applet are absent on
@@ -1572,6 +1585,8 @@ class State:
         self.has_desktop = False
         self.choose_desktop = False
         self.desktop = "xfce"
+        self.choose_shell = False
+        self.shell = "bash"
         self.autologin: bool | None = None
         self.sudo_password: bool | None = None
         self.lock_minutes = 10
@@ -2449,8 +2464,13 @@ def step_appearance(state: State):
             "2": "Always 200%. Everything is very large on ordinary screens.",
         }[v["scale"]],
     ))
-    values = ui.settings("Appearance", "Which desktop, and how it looks.", rows)
+    # An account restored from an old drive keeps the shell it had there.
+    if state.choose_shell and not state.account_plan:
+        rows.append(Row("shell", "Shell", [(name, name) for name in SHELLS], state.shell,
+                        help=lambda v: SHELL_HELP[v["shell"]]))
+    values = ui.settings("Appearance", "Which desktop, how it looks, and the terminal's shell.", rows)
     state.desktop = values.get("desktop", "xfce")
+    state.shell = values.get("shell", state.shell)
     state.theme = values.get("theme", "")
     state.icon_theme = values.get("icon_theme", "")
     state.scale = values["scale"]
@@ -2798,6 +2818,8 @@ def summary_groups(state: State) -> list[tuple[str, str, str]]:
         appearance = [dict(DESKTOPS)[state.desktop]] if state.choose_desktop else []
         appearance += [part for part in (state.theme, state.icon_theme) if part]
         appearance.append({"auto": "automatic scale", "1": "100% scale", "2": "200% scale"}[state.scale])
+        if state.choose_shell and not state.account_plan:
+            appearance.append(f"{state.shell} shell")
         groups.append(("appearance", "Appearance", ", ".join(appearance)))
     drivers = ", ".join(DRIVER_LABELS.get(entry, entry) for entry in state.drivers) or "no drivers to install"
     swap = [f"compressed swap {state.swap}% of RAM" if state.swap else "no compressed swap"]
@@ -3377,17 +3399,18 @@ def _account_from_earlier_run() -> str | None:
     return found.group(1) if found and USERNAME_RE.match(found.group(1)) else None
 
 
-def apply_account(username: str, full_name: str, password: str) -> None:
+def apply_account(username: str, full_name: str, password: str, shell: str = SHELLS["bash"]) -> None:
     existing = {g.gr_name for g in grp.getgrall()}
     groups = [g for g in DESIRED_GROUPS if g in existing]
     if username == _account_from_earlier_run() and _user_exists(username):
-        run(["usermod", "--comment", full_name, "--append", "--groups", ",".join(groups), username])
+        run(["usermod", "--comment", full_name, "--shell", shell,
+             "--append", "--groups", ",".join(groups), username])
     else:
         run(
             [
                 "useradd",
                 "--create-home",
-                "--shell", "/bin/bash",
+                "--shell", shell,
                 "--comment", full_name,
                 "--groups", ",".join(groups),
                 username,
@@ -3835,7 +3858,7 @@ def apply_all(state: State) -> None:
     task("Computer name", lambda: apply_hostname(state.hostname))
     if state.password is not None:
         task(f"Creating the account {state.username}",
-             lambda: apply_account(state.username, state.full_name, state.password))
+             lambda: apply_account(state.username, state.full_name, state.password, SHELLS[state.shell]))
     if state.migration:
         # Right after the account exists, so files land under the right uid,
         # and before anything that reads the home directory.
@@ -3976,6 +3999,7 @@ def wizard() -> State:
     # Only while both are here to choose between. A setup that runs again
     # after one was removed keeps the one that is left.
     state.choose_desktop = state.has_desktop and _lite_installed() and _xfce_installed()
+    state.choose_shell = state.has_desktop and Path(SHELLS["zsh"]).exists()
     steps = [step for step in STEPS if step[0] != "restore" or state.candidates]
     ui.sections = [(key, label) for key, label, _ in steps]
     keys = [key for key, _, _ in steps]

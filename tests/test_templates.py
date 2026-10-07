@@ -256,6 +256,49 @@ class TestBashrc:
         assert "\\[\\e]0;\\u@\\h: \\w\\a\\]" in templates.render_bashrc()
 
 
+class TestZshrc:
+    """The zsh counterpart: the bash theme's prompt, plus what zsh adds.
+
+    Behaviour under a real zsh is in test_shell.py; these hold the brand
+    rules, which are visible in the text.
+    """
+
+    def test_the_non_interactive_early_return_is_first(self):
+        rc = templates.render_zshrc()
+        assert rc.index("[[ -o interactive ]] || return") < rc.index("PROMPT=")
+
+    def test_the_prompt_is_the_bash_themes_shape_and_palette(self):
+        prompt = next(line for line in templates.render_zshrc().splitlines() if line.startswith("PROMPT="))
+        # Cyan user, muted @, paper host, blue :path, as render_bashrc draws them.
+        assert prompt.index("%F{6}%n") < prompt.index("%F{7}@") < prompt.index("%F{15}%m") < prompt.index("%F{4}:%~")
+        assert prompt.index("%F{4}:%~") < prompt.index("${_portlin_git}") < prompt.index("%(!.#.$)")
+
+    def test_the_accent_is_drawn_for_root_alone(self):
+        rc = templates.render_zshrc()
+        assert rc.count("%F{1}") == 1
+        assert "%(!.%F{1}.%F{15})" in rc
+        # zsh-syntax-highlighting's stock unknown-command style is red, the accent.
+        assert "ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=3,bold'" in rc
+        assert "fg=red" not in rc and "fg=1," not in rc
+
+    def test_the_plugins_are_optional_and_highlighting_loads_last(self):
+        rc = templates.render_zshrc()
+        for plugin in ("/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+                       "/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"):
+            assert f"[[ -r {plugin} ]]" in rc
+        assert rc.index("zsh-autosuggestions.zsh") < rc.index("zsh-syntax-highlighting.zsh")
+        assert rc.rindex("bindkey") < rc.index("source /usr/share/zsh-syntax-highlighting")
+
+    def test_the_welcome_banner_runs_once_per_terminal(self):
+        rc = templates.render_zshrc()
+        assert "${SHLVL:-1} == 1" in rc
+        assert "/usr/bin/portlin-welcome" in rc
+
+    def test_the_bash_aliases_come_along(self):
+        bash = {line for line in templates.render_bashrc().splitlines() if line.startswith("alias ")}
+        assert bash <= set(templates.render_zshrc().splitlines())
+
+
 class TestRootProfile:
     def test_login_shells_are_pointed_at_the_themed_rc(self):
         profile = templates.render_root_profile()

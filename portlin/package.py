@@ -76,6 +76,9 @@ DESKTOP_TOOLS = [
     # program either; it is here because the prompt and banner only exist
     # where the desktop theme this package ships does.
     "portlin-welcome",
+    # Switches the login shell between bash and zsh. Here for the same
+    # reason: the themed rc files it hands a home are this package's.
+    "portlin-shell",
     # The intro film each account sees at its first login. GTK and cairo,
     # started by the autostart entry below.
     "portlin-intro",
@@ -306,6 +309,11 @@ DIVERTED_SKEL_BASHRC = f"/{SKEL_BASHRC}.distrib"
 # other package owns these paths. Not conffiles -- only /etc paths can be.
 ROOT_BASHRC = "root/.bashrc"
 ROOT_PROFILE = "root/.profile"
+
+# zsh's counterparts. No package ships either path, so neither is diverted;
+# zsh reads ~/.zshrc in login shells too, so there is no profile to add.
+SKEL_ZSHRC = "etc/skel/.zshrc"
+ROOT_ZSHRC = "root/.zshrc"
 
 # The render that becomes that default. xfdesktop scales whatever it finds
 # there to each monitor, so one size has to stand in for all of them until
@@ -611,12 +619,13 @@ def text_files(package: str, *, version: str | None = None) -> dict[str, str]:
         }
         for destination, source in THEME_FILES.items():
             files[destination] = (RESOURCES / "runtime" / "theme" / source).read_text()
-        # The themed shell: skel for every account the wizard creates, root's
-        # own copies for root. The skel path is diverted above; root's home
-        # exists at install time and no package owns these paths.
+        # The themed shells: skel for every account the wizard creates, root's
+        # own copies for root. The skel bashrc is diverted above; root's home
+        # exists at install time and no package owns the other paths.
         files[SKEL_BASHRC] = templates.render_bashrc()
         files[ROOT_BASHRC] = templates.render_bashrc(root=True)
         files[ROOT_PROFILE] = templates.render_root_profile()
+        files[SKEL_ZSHRC] = files[ROOT_ZSHRC] = templates.render_zshrc()
         for tool in DESKTOP_TOOLS:
             files[f"usr/bin/{tool}"] = (RESOURCES / "runtime" / tool).read_text()
         files[CACHE_SESSION_HOOK] = (RESOURCES / "runtime" / "portlin-cache").read_text()

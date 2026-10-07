@@ -8,4 +8,4 @@ Icon=portlin
 Terminal=false
 StartupNotify=true
 Categories=Settings;X-XFCE-SettingsDialog;X-Portlin;
-Keywords=portlin;settings;storage;wear;logs;cache;downloads;
+Keywords=portlin;settings;storage;wear;logs;cache;downloads;shell;zsh;bash;terminal;

@@ -18,9 +18,9 @@ ROWS = (
 )
 
 
-def status():
+def status(argv=("portlin-wear", "status")):
     try:
-        return json.loads(subprocess.check_output(["portlin-wear", "status"], text=True))
+        return json.loads(subprocess.check_output(list(argv), text=True))
     except (OSError, subprocess.SubprocessError, ValueError):
         return {}
 
@@ -45,13 +45,47 @@ class Window(Gtk.Window):
             toggle.connect("state-set", self.changed, key)
             row.pack_start(labels, True, True, 0); row.pack_end(toggle, False, False, 0)
             box.pack_start(row, False, False, 0)
+        shell = status(("portlin-shell", "status", "--json"))
+        if len(shell.get("available", [])) > 1:
+            self.add_shell_row(box, shell)
         self.connect("destroy", Gtk.main_quit)
+
+    def add_shell_row(self, box, shell):
+        heading = Gtk.Label(label="Terminal", xalign=0)
+        heading.get_style_context().add_class("title-2")
+        box.pack_start(heading, False, False, 0)
+        row = Gtk.Box(spacing=12)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        labels.pack_start(Gtk.Label(label="Shell", xalign=0), False, False, 0)
+        labels.pack_start(Gtk.Label(
+            label="zsh adds git status to the prompt, suggestions from history and syntax "
+                  "highlighting. New terminals open in the shell picked here.",
+            xalign=0, wrap=True, max_width_chars=50), False, False, 0)
+        self.shell = shell["current"]
+        choice = Gtk.ComboBoxText()
+        for name in shell["available"]:
+            choice.append(name, name)
+        choice.set_active_id(self.shell)
+        choice.connect("changed", self.shell_changed)
+        row.pack_start(labels, True, True, 0); row.pack_end(choice, False, False, 0)
+        box.pack_start(row, False, False, 0)
 
     def changed(self, toggle, active, key):
         result = subprocess.run(["pkexec", "portlin-wear", "set", key, "1" if active else "0"])
         # Returning True cancels Gtk's state change, so a cancelled password
         # prompt leaves the switch showing the setting that is still in force.
         return result.returncode != 0
+
+    def shell_changed(self, choice):
+        name = choice.get_active_id()
+        if name == self.shell:
+            return
+        if subprocess.run(["portlin-shell", name, "--pkexec"]).returncode == 0:
+            self.shell = name
+        else:
+            # A cancelled password prompt leaves the shell as it was, so the
+            # choice goes back to saying so.
+            choice.set_active_id(self.shell)
 
 
 window = Window(); window.show_all(); Gtk.main()

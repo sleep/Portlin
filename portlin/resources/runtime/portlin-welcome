@@ -139,16 +139,37 @@ def format_uptime(seconds: float) -> str:
     return ", ".join(parts[:2])
 
 
+def running_shell(ppid: int | None = None, shells: Path = Path("/etc/shells")) -> str:
+    """The shell that ran the banner, falling back to $SHELL.
+
+    The parent rather than $SHELL first, because $SHELL keeps naming the old
+    shell for the rest of the session after portlin-shell switches. Only a
+    parent listed in /etc/shells counts, so a banner run from anything else
+    still describes the login shell.
+    """
+    try:
+        parent = os.readlink(f"/proc/{os.getppid() if ppid is None else ppid}/exe")
+        listed = shells.read_text().split()
+    except OSError:
+        parent, listed = "", []
+    if parent in listed or any(os.path.realpath(path) == parent for path in listed):
+        return parent
+    return os.environ.get("SHELL", "/bin/bash")
+
+
 def shell_description() -> str:
-    """The user's shell and, when it answers --version like GNU tools, its version."""
-    shell = os.environ.get("SHELL", "/bin/bash")
+    """The shell and, when its --version names one, its version.
+
+    bash says "GNU bash, version 5.2.37(1)"; zsh says "zsh 5.9 (x86_64-...)".
+    """
+    shell = running_shell()
     name = os.path.basename(shell) or shell
     try:
         result = subprocess.run(
             [shell, "--version"], capture_output=True, text=True,
             check=False, timeout=2,
         )
-        match = re.search(r"version ([0-9][0-9.]*)", result.stdout)
+        match = re.search(r"(?:version |^\S+ )([0-9][0-9.]*)", result.stdout)
         if match:
             return f"{name} {match.group(1)}"
     except (OSError, subprocess.SubprocessError):

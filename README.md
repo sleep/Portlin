@@ -134,6 +134,28 @@ you click it again, or for a span you pick from `Activate for`. It holds a login
 `idle:sleep:handle-lid-switch`, so a closed lid does not suspend either. Right-click for
 preferences; untick it in Settings > Session and Startup to stop it appearing at all.
 
+### Terminal
+
+Every terminal opens on the portlin mark beside what the stick is plugged into, and a prompt in
+the classic `user@host:path$` shape in the same palette, with the crimson kept for root's `#`.
+
+The shell is bash. zsh is in the image too, with the same prompt and banner and more on top: the
+git branch after the path, with commits ahead of and behind its upstream and counts of staged,
+changed, conflicted and untracked files; the exit status and running time of the last command on
+the right; history shared between open terminals; an arrow-key completion menu; and Debian's
+zsh-autosuggestions and zsh-syntax-highlighting. Pick it in first boot's Appearance step, or
+afterwards under Terminal in Portlin Settings, or from a terminal:
+
+```
+portlin-shell              # which shell is yours
+portlin-shell zsh          # switch to zsh
+portlin-shell bash         # and back
+```
+
+Switching copies the themed `~/.zshrc` into a home that has none, and leaves one that exists
+alone. The git part needs git, which the Software app's Build tools entry installs;
+`PORTLIN_PROMPT_GIT=0` leaves it out in a repository big enough to make it slow.
+
 ### Lite session
 
 For older machines, first boot's Appearance step offers **Lite (labwc)** in place of Xfce. It is
@@ -431,7 +453,7 @@ an answer already chosen, so Enter alone gets through it. It asks for:
 | Network | Computer name; the hardware address networks see (random per network, random every time, or the real one); Wi-Fi, joined there and then with a profile kept in `/run` until the summary is accepted |
 | Account | Full name, username and password on one form |
 | Security | Automatic login, whether sudo asks for a password, screen lock delay and lock on suspend, a new LUKS passphrase (only when someone else chose the current one), and an "if found" message shown on the boot menu and above the passphrase prompt |
-| Appearance | Theme, icons, and display scale: automatic picks 100% or 200% at every login for whatever screen the stick is plugged into |
+| Appearance | Theme, icons, display scale (automatic picks 100% or 200% at every login for whatever screen the stick is plugged into), and the shell: bash, or zsh (see [Terminal](#terminal)) |
 | Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network (or later from Drivers in the Portlin menu); compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
 | Services | SSH server (off by default, host keys generated on first enable), the ufw firewall (on by default, letting SSH through rate-limited when it is on), and on an encrypted stick remote unlock (off by default; takes a public key, or `github:NAME`) |
 | Storage | Growing the system to fill the drive, and the storage-wear switches `portlin-wear` owns |

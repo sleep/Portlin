@@ -311,6 +311,12 @@ TOOLS = [
     "lshw",
     "file",
     "tree",
+    # The alternative to bash that first boot and portlin-shell offer, with
+    # the two plugins its themed ~/.zshrc loads. In the image because first
+    # boot has no network to fetch them with.
+    "zsh",
+    "zsh-autosuggestions",
+    "zsh-syntax-highlighting",
     # The system-info display the portlin-branded ~/.config/fastfetch face
     # (shipped by portlin-desktop) runs on. Not a dependency of that package
     # because a --minimal rootfs can be written without it and the bashrc
