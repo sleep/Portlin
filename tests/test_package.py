@@ -95,6 +95,7 @@ def test_runtime_ships_every_tool_as_an_executable():
         "usr/bin/portlin-install",
         "usr/bin/portlin-migrate",
         "usr/bin/portlin-wear",
+        "usr/bin/portlin-remote-unlock",
     }
 
 
@@ -218,6 +219,16 @@ def test_encrypt_tool_refuses_without_the_frozen_finaliser():
     # encryption nothing on that stick can complete.
     source = package.text_files("portlin-runtime")["usr/bin/portlin-encrypt"]
     assert "/usr/local/sbin/portlin-finalise-encryption" in source
+
+
+def test_remote_unlock_tool_refuses_without_the_frozen_gate_hook():
+    # Same rule as portlin-encrypt. Without the hook write installs, "on"
+    # would be dropbear in every initramfs with no way back, and "off" would
+    # be a file nothing reads, so the tool has to find the hook first.
+    from portlin import install
+
+    source = package.text_files("portlin-runtime")["usr/bin/portlin-remote-unlock"]
+    assert f'GATE_HOOK = Path("/{install.REMOTE_UNLOCK_HOOK}")' in source
 
 
 def test_encrypt_tool_does_not_encrypt_anything_itself():

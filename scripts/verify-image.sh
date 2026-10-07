@@ -295,6 +295,53 @@ else
 fi
 
 echo
+echo "Remote unlock"
+# dropbear-initramfs puts an SSH server in every initramfs it is installed on,
+# and portlin's gate hook takes it out again unless the switch says on. Every
+# check here is about a fresh stick being off, and about the frozen pieces
+# that let it be switched later being in place. Probed on the binary, so an
+# image built from a rootfs that predates the feature is skipped, not failed.
+if test -x "$MNT/usr/sbin/dropbear"; then
+    test -s "$MNT/etc/dropbear/initramfs/dropbear_ed25519_host_key" \
+        && pass "the initramfs SSH server has a host key of this stick's own" \
+        || fail "no dropbear host key (write did not make one; the server could never start)"
+
+    grep -qx 'enabled=0' "$MNT/etc/portlin/remote-unlock.conf" 2>/dev/null \
+        && pass "remote unlock starts out off" \
+        || fail "remote-unlock.conf does not say enabled=0 (a fresh stick would answer SSH before unlocking)"
+
+    test -x "$MNT/etc/initramfs-tools/hooks/portlin-remote-unlock" \
+        && pass "the gate hook that keeps dropbear out of the initramfs is installed" \
+        || fail "no hooks/portlin-remote-unlock (dropbear lands in every initramfs)"
+
+    test -x "$MNT/etc/initramfs-tools/scripts/init-premount/dropbear" \
+        && pass "portlin's boot script stands in for dropbear's" \
+        || fail "no init-premount/dropbear under /etc (Debian's script starts DHCP with no cable in)"
+
+    test -x "$MNT/usr/bin/portlin-remote-unlock" \
+        && pass "portlin-remote-unlock is executable" \
+        || fail "portlin-remote-unlock is missing or not executable"
+
+    # The only evidence the hook actually ran: what the built initramfs holds.
+    # Read into a variable first, because grep -q closing the pipe early would
+    # hand lsinitramfs a SIGPIPE and pipefail would read that as the verdict.
+    if command -v lsinitramfs >/dev/null; then
+        for INITRD in "$MNT"/boot/initrd.img-*; do
+            LISTING="$(lsinitramfs "$INITRD" 2>/dev/null || true)"
+            if grep -q 'sbin/dropbear$' <<<"$LISTING"; then
+                fail "$(basename "$INITRD") carries dropbear although remote unlock is off"
+            else
+                pass "$(basename "$INITRD") carries no dropbear while remote unlock is off"
+            fi
+        done
+    else
+        echo "  (skip) initramfs contents: lsinitramfs is not installed here"
+    fi
+else
+    echo "  (skip) remote unlock: this image has no dropbear"
+fi
+
+echo
 echo "Runtime packages"
 test -f "$MNT/var/lib/dpkg/info/portlin-runtime.list" \
     && pass "portlin-runtime is installed" \

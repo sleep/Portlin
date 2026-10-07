@@ -31,6 +31,14 @@ BOOT = [
     "efibootmgr",
     "cryptsetup",
     "cryptsetup-initramfs",
+    # The SSH server for remote unlock: a small sshd that runs inside the
+    # initramfs so an encrypted stick in a machine with no screen can be
+    # given its passphrase over the network. Only -initramfs, which carries
+    # dropbear-bin with it: the plain "dropbear" package would start a second
+    # SSH server on the running system beside openssh. Its own hook puts it
+    # in every initramfs it is installed on, so portlin's gate hook takes it
+    # back out unless first boot, or portlin-remote-unlock, switched it on.
+    "dropbear-initramfs",
 ]
 
 # Both microcode packages, because the stick does not know whose CPU it will

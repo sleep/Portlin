@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# Part of portlin. Copyright (C) 2026 the portlin authors.
+# Licensed under the GNU General Public License, version 3 or later.
+# See <https://www.gnu.org/licenses/gpl-3.0.html>.
+#
+# initramfs-tools hook: the switch for remote unlock.
+#
+# dropbear-initramfs's own hook has no switch. Once the package is installed
+# it puts dropbear, its host keys and the authorized keys into every initramfs
+# it builds, and the boot script then starts an SSH server and asks for a DHCP
+# lease on whatever network the stick happens to be plugged into, before
+# anyone has unlocked anything. portlin installs the package on every stick,
+# because first boot has no network to fetch it with and has to be able to
+# offer the feature -- so this hook takes it all back out again unless
+# /etc/portlin/remote-unlock.conf says enabled=1.
+#
+# It lives under /etc rather than /usr/share so that it runs after dropbear's.
+# mkinitramfs runs every hook in /usr/share/initramfs-tools/hooks before any
+# in /etc/initramfs-tools/hooks, and that is the only ordering that holds
+# across the two directories: a PREREQ can only name a hook in its own.
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+CONF=/etc/portlin/remote-unlock.conf
+AUTHORIZED_KEYS=/etc/dropbear/initramfs/authorized_keys
+
+if grep -qsx 'enabled=1' "$CONF"; then
+    # On. dropbear's hook has done the work; this carries the switch and the
+    # port in with it, for the boot script to read.
+    copy_file config "$CONF"
+    if [ ! -x "$DESTDIR/usr/sbin/dropbear" ] && [ ! -x "$DESTDIR/sbin/dropbear" ]; then
+        echo "portlin: WARNING: remote unlock is on but dropbear is not in the initramfs." \
+             "Is dropbear-initramfs installed?" >&2
+    fi
+    if ! grep -qsE '^(ssh-|ecdsa-|sk-)' "$AUTHORIZED_KEYS"; then
+        echo "portlin: WARNING: remote unlock is on but $AUTHORIZED_KEYS names no key," \
+             "so nobody can log in. Add one with portlin-remote-unlock." >&2
+    fi
+    exit 0
+fi
+
+# Off. The server, its configuration and host keys, and the authorized keys
+# dropbear's hook copied into root's home all come out, so an initramfs on a
+# stick that never asked for this carries none of it. The boot scripts stay:
+# both of Debian's begin by checking for the binary and do nothing without it.
+rm -f "$DESTDIR/usr/sbin/dropbear" "$DESTDIR/sbin/dropbear"
+rm -rf "$DESTDIR/etc/dropbear"
+for home in "$DESTDIR"/root-*; do
+    [ -d "$home/.ssh" ] && rm -rf "$home/.ssh"
+done
+exit 0

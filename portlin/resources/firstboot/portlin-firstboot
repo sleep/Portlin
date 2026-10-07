@@ -97,6 +97,31 @@ exit 0
 SSHD = "/usr/sbin/sshd"
 UFW = "/usr/sbin/ufw"
 
+# Remote unlock: an SSH server inside the initramfs, answering before the root
+# filesystem is unlocked, so the passphrase can be typed from another machine.
+# dropbear-initramfs is probed for like the other packages setup hands work
+# to. The conf file is the switch the frozen gate hook reads when the
+# initramfs is rebuilt, and the port is the one it tells the boot script to
+# listen on; portlin-remote-unlock writes the same file after setup.
+DROPBEAR_HOOK = "/usr/share/initramfs-tools/hooks/dropbear"
+DROPBEARKEY = "/usr/bin/dropbearkey"
+REMOTE_UNLOCK_CONF = Path("/etc/portlin/remote-unlock.conf")
+REMOTE_UNLOCK_PORT = 2222
+# Where dropbear's hook reads the keys that may log in, and the host key the
+# write stage made for this stick (made here instead if it is missing).
+REMOTE_UNLOCK_KEYS = Path("/etc/dropbear/initramfs/authorized_keys")
+REMOTE_UNLOCK_HOST_KEY = Path("/etc/dropbear/initramfs/dropbear_ed25519_host_key")
+# The key types dropbear's hook accepts, as it spells them, and the account
+# names github.com/NAME.keys answers for.
+PUBLIC_KEY_RE = re.compile(
+    r"^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)"
+    r"|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( [^\n]*)?$"
+)
+GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+GITHUB_PREFIX = "github:"
+# An RSA key of 4096 bits is some 750 characters; the default row limit is 64.
+UNLOCK_KEY_LIMIT = 2048
+
 # Wi-Fi joined during setup lives under /run until the summary is accepted, so
 # a postponed setup leaves no network password on the stick. NetworkManager
 # reads profiles and configuration from /run as well as from /etc.
@@ -1563,6 +1588,8 @@ class State:
         self.drive: dict | None = None
         self.ssh = False
         self.firewall = True
+        self.remote_unlock = False
+        self.unlock_key = ""
         self.expand: bool | None = None
         self.expand_free: int | None = None
         self.wear: dict | None = None
@@ -2580,9 +2607,46 @@ def swapfile_row(drive: dict, current: int) -> Row:
 
 # -- services --------------------------------------------------------------
 
+def _remote_unlock_available(state: State) -> bool:
+    """Whether this stick can answer SSH from its initramfs.
+
+    An encrypted root is the whole point, and dropbear-initramfs has to be
+    on the stick already: first boot has no network to fetch it with.
+    """
+    return state.luks_device is not None and Path(DROPBEAR_HOOK).exists()
+
+
+def check_unlock_key(values: dict, online: bool):
+    """The settings screen's verdict on the unlock key, or None when it will do.
+
+    Remote unlock with no key is a server nobody can log in to, so it is
+    refused here rather than applied and warned about. GitHub needs the
+    network, which the Network step may not have found.
+    """
+    if not values.get("remote_unlock"):
+        return None
+    key = (values.get("unlock_key") or "").strip()
+    if not key:
+        return ("unlock_key", "Remote unlock needs a key to answer to. Type one, or turn it off and "
+                              "add one later with portlin-remote-unlock.")
+    if key.startswith(GITHUB_PREFIX):
+        if not GITHUB_NAME_RE.match(key[len(GITHUB_PREFIX):].strip()):
+            return ("unlock_key", "That is not a GitHub account name. Write github: and the name, "
+                                  "for example github:sam.")
+        if not online:
+            return ("unlock_key", "Taking keys from GitHub needs the network. Connect in the Network "
+                                  "step, or type the key itself.")
+        return None
+    if not PUBLIC_KEY_RE.match(key):
+        return ("unlock_key", "That is not a public key. One starts with ssh-ed25519, ssh-rsa or "
+                              "ecdsa-sha2-nistp256, a space, and then the key itself.")
+    return None
+
+
 def step_services(state: State):
     has_ssh, has_ufw = Path(SSHD).exists(), Path(UFW).exists()
-    if not has_ssh and not has_ufw:
+    remote = _remote_unlock_available(state)
+    if not has_ssh and not has_ufw and not remote:
         return False
 
     def ssh_help(values):
@@ -2611,8 +2675,36 @@ def step_services(state: State):
         Row("firewall", "Firewall", [(True, "on"), (False, "off")] if has_ufw else [(False, "not installed")],
             state.firewall and has_ufw, help=firewall_help, enabled=has_ufw),
     ]
-    values = ui.settings("Services", "What this stick lets other machines do.", rows)
+
+    def remote_help(values):
+        if not values["remote_unlock"]:
+            return ("The passphrase can only be typed at this machine's own keyboard. Turn this on "
+                    "for a machine with no screen or keyboard, such as a server or a box in a cupboard.")
+        return (f"Before asking for the passphrase, the stick takes a DHCP address on a plugged-in "
+                f"cable and answers SSH on port {REMOTE_UNLOCK_PORT} as root, to the key below and "
+                "nobody else. Logging in asks for the passphrase and nothing more. Ethernet only: "
+                "Wi-Fi does not work this early.")
+
+    def key_help(values):
+        text = ("The public key of the computer that will do the unlocking: the one line in its "
+                "~/.ssh/id_ed25519.pub, typed here. Or github:NAME, for the keys that GitHub account "
+                "has published")
+        if state.online:
+            return text + ", fetched now over the network."
+        return text + "; that needs the network, which is not connected."
+
+    if remote:
+        rows += [
+            Row("remote_unlock", "Remote unlock", [(False, "off"), (True, "on")], state.remote_unlock,
+                help=remote_help),
+            Row("unlock_key", "Unlock key", text=True, value=state.unlock_key,
+                placeholder="ssh-ed25519 ... or github:NAME", limit=UNLOCK_KEY_LIMIT, help=key_help),
+        ]
+    values = ui.settings("Services", "What this stick lets other machines do.", rows,
+                         validate=(lambda v: check_unlock_key(v, state.online)) if remote else None)
     state.ssh, state.firewall = values["ssh"], values["firewall"]
+    state.remote_unlock = bool(values.get("remote_unlock", False))
+    state.unlock_key = (values.get("unlock_key") or "").strip()
     return True
 
 
@@ -2711,9 +2803,18 @@ def summary_groups(state: State) -> list[tuple[str, str, str]]:
     swap = [f"compressed swap {state.swap}% of RAM" if state.swap else "no compressed swap"]
     swap.append(f"{state.swapfile} GB swap file" if state.swapfile else "no swap file")
     groups.append(("hardware", "Hardware", ", ".join([drivers, *swap])))
-    if Path(SSHD).exists() or Path(UFW).exists():
-        groups.append(("services", "Services",
-                       f"SSH {_yes(state.ssh, 'on', 'off')}, firewall {_yes(state.firewall, 'on', 'off')}"))
+    remote = _remote_unlock_available(state)
+    if Path(SSHD).exists() or Path(UFW).exists() or remote:
+        services = [f"SSH {_yes(state.ssh, 'on', 'off')}", f"firewall {_yes(state.firewall, 'on', 'off')}"]
+        if remote and state.remote_unlock:
+            if state.unlock_key.startswith(GITHUB_PREFIX):
+                source = f"keys from GitHub {state.unlock_key[len(GITHUB_PREFIX):].strip()}"
+            else:
+                source = "the key typed"
+            services.append(f"remote unlock on port {REMOTE_UNLOCK_PORT}, {source}")
+        elif remote:
+            services.append("remote unlock off")
+        groups.append(("services", "Services", ", ".join(services)))
     storage = []
     if state.expand_free:
         storage.append("use the whole drive" if state.expand else "leave the drive as it is")
@@ -3578,6 +3679,65 @@ def apply_firewall(enabled: bool, ssh: bool) -> None:
     run(["systemctl", "enable", "ufw.service"], check=False)
 
 
+def github_keys(name: str) -> list[str]:
+    """The public keys a GitHub account has published, from github.com/NAME.keys.
+
+    Only lines that are keys are kept, so an error page or an empty answer
+    cannot become an authorized_keys entry.
+    """
+    proc = run(["curl", "-fsS", "--max-time", "30", f"https://github.com/{name}.keys"], check=False)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no answer"
+        raise RuntimeError(f"could not fetch github.com/{name}.keys: {detail}")
+    return [line.strip() for line in proc.stdout.splitlines() if PUBLIC_KEY_RE.match(line.strip())]
+
+
+def write_remote_unlock_conf(enabled: bool) -> None:
+    """Flip the switch the initramfs gate hook reads, keeping the port it names."""
+    port = REMOTE_UNLOCK_PORT
+    try:
+        for line in REMOTE_UNLOCK_CONF.read_text().splitlines():
+            if line.startswith("port=") and line[5:].strip().isdigit():
+                port = int(line[5:])
+    except OSError:
+        pass
+    _write(REMOTE_UNLOCK_CONF, "\n".join([
+        "# Written by portlin. Whether the initramfs answers SSH before the root",
+        "# filesystem is unlocked, and on which port. Change it with",
+        "# portlin-remote-unlock, which also rebuilds the initramfs.",
+        f"enabled={int(enabled)}",
+        f"port={port}",
+        "",
+    ]))
+
+
+def apply_remote_unlock(enabled: bool, key: str) -> None:
+    """Switch remote unlock on or off.
+
+    Only files: the rebuild that carries them into the initramfs is the Boot
+    files task, which follows on every encrypted stick, and this is only
+    offered on one. Off leaves any keys in place, so that turning it back on
+    later with portlin-remote-unlock needs no key typed again.
+    """
+    if not enabled:
+        write_remote_unlock_conf(False)
+        return
+    key = key.strip()
+    if key.startswith(GITHUB_PREFIX):
+        name = key[len(GITHUB_PREFIX):].strip()
+        keys = github_keys(name)
+        if not keys:
+            raise RuntimeError(f"github.com/{name} has published no SSH keys")
+    else:
+        keys = [key]
+    _write_private(REMOTE_UNLOCK_KEYS, "".join(f"{line}\n" for line in keys))
+    if not REMOTE_UNLOCK_HOST_KEY.exists():
+        # write makes one for every stick, but a stick written before it did
+        # would otherwise rebuild an initramfs whose server cannot start.
+        run([DROPBEARKEY, "-t", "ed25519", "-f", str(REMOTE_UNLOCK_HOST_KEY)])
+    write_remote_unlock_conf(True)
+
+
 def apply_wear(wanted: dict, initial: dict) -> None:
     for key, value in wanted.items():
         if initial.get(key) != value:
@@ -3723,6 +3883,9 @@ def apply_all(state: State) -> None:
     if Path(UFW).exists():
         task("Firewall", lambda: apply_firewall(state.firewall, state.ssh and Path(SSHD).exists()), True)
     task("If-found message", lambda: apply_found_message(state.found_message), True)
+    if _remote_unlock_available(state):
+        # Before Boot files, whose initramfs rebuild is what carries it in.
+        task("Remote unlock", lambda: apply_remote_unlock(state.remote_unlock, state.unlock_key), True)
     task("Boot files", lambda: (drop_passphrase_stash(), refresh_initramfs_for_keymap(encrypted)))
 
     progress = Progress(ui, "Applying", "Setting the stick up. Do not remove it.", [t[0] for t in tasks])

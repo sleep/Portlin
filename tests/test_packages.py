@@ -79,6 +79,14 @@ class TestPortabilityRequirements:
         assert "cryptsetup" in resolved
         assert "cryptsetup-initramfs" in resolved
 
+    def test_a_minimal_build_can_offer_remote_unlock(self):
+        # First boot has no network, so the initramfs SSH server has to be on
+        # the stick before it can be offered. The -initramfs package only: the
+        # plain "dropbear" package is a second sshd on the running system.
+        resolved = packages.resolve(packages.MINIMAL_GROUPS)
+        assert "dropbear-initramfs" in resolved
+        assert "dropbear" not in resolved
+
     def test_a_minimal_build_can_still_reach_a_network(self):
         assert "network-manager" in packages.resolve(packages.MINIMAL_GROUPS)
 

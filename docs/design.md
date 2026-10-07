@@ -85,7 +85,7 @@ their tier before they are written.
 | | Frozen | Updatable |
 |---|---|---|
 | Written by | `write`, once | `portlin-runtime` and `portlin-desktop`, by apt |
-| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts, the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, icon theme, panel layout, wallpaper, branding, the shell theme and welcome banner, the software catalog and the Software app, the `portlin-*` commands |
+| Holds | partition layout, `fstab`, `crypttab`, `/etc/default/grub`, the initramfs scripts (the encryption offer, the remote-unlock gate hook and its boot script), the bootloader, the first-boot wizard, the encryption finaliser | desktop theme, icon theme, panel layout, wallpaper, branding, the shell theme and welcome banner, the software catalog and the Software app, the `portlin-*` commands |
 | Failure mode | a stick that will not boot or will not unlock | a desktop that looks wrong, or a command that refuses to run |
 
 **The test.** If a broken version of a file can stop a stick booting or
@@ -103,7 +103,20 @@ boundary.
 **An updatable feature may depend on a frozen one.** When it does, it must
 detect the prerequisite at runtime and refuse cleanly when it is absent,
 because the frozen half of a stick written last year cannot be brought
-forward.
+forward. `portlin-remote-unlock` is the second example after `portlin-encrypt`:
+the switch it flips is read by a hook `write` put into the initramfs
+machinery, and on a stick without that hook it refuses rather than write a
+file nothing reads.
+
+**Remote unlock is off until asked for.** `dropbear-initramfs` ships on every
+stick, because first boot has no network to fetch it with, and its own hook
+puts an SSH server into every initramfs it builds. portlin's gate hook, which
+runs after it, takes the server and every key out again unless
+`/etc/portlin/remote-unlock.conf` says `enabled=1`. The boot script that
+starts the server is portlin's too, under Debian's name so that it replaces
+Debian's, and it starts nothing unless a cable has a link: the stock script
+would otherwise spend minutes on DHCP over the passphrase prompt in every
+laptop with an empty ethernet port.
 
 **Privilege lives in one place.** The Software app runs as the user and never
 touches apt. Everything needing root is `portlin-install`, reached through a

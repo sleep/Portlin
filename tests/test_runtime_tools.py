@@ -19,7 +19,8 @@ import pytest
 from conftest import load_tool
 
 RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "runtime"
-TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate", "portlin-wear"]
+TOOLS = ["portlin-info", "portlin-expand", "portlin-encrypt", "portlin-install", "portlin-migrate", "portlin-wear",
+         "portlin-remote-unlock"]
 
 
 def _load_tool(name: str):

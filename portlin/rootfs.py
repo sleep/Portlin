@@ -114,6 +114,12 @@ def _configure_system(cfg: BuildConfig, runner: Runner, chroot: Chroot) -> None:
     chroot.write_file("etc/cryptsetup-initramfs/conf-hook", templates.render_cryptsetup_hook_conf())
     chroot.write_file("etc/default/grub", templates.render_default_grub())
     chroot.write_file("etc/default/zramswap", templates.render_zram_conf())
+    # Remote unlock starts out off. dropbear-initramfs's hook would otherwise
+    # put an SSH server in the initramfs of every stick the moment the
+    # package is installed; see render_remote_unlock_conf.
+    chroot.write_file(
+        templates.REMOTE_UNLOCK_CONF.lstrip("/"), templates.render_remote_unlock_conf()
+    )
     # Defaults favor a long-lived flash drive.  portlin-settings owns this
     # small public file thereafter; the Xsession hook and runtime tools read it
     # without needing a privileged daemon.
@@ -192,6 +198,10 @@ def _anonymise(runner: Runner, chroot: Chroot) -> None:
     chroot.apt(["clean"])
     chroot.run(["sh", "-c", "rm -rf /var/lib/apt/lists/*"])
     chroot.run(["sh", "-c", "rm -f /etc/ssh/ssh_host_*"])
+    # dropbear-initramfs makes its host keys when it is installed, which here
+    # means once, into a tarball that becomes many sticks. write makes each
+    # stick its own.
+    chroot.run(["sh", "-c", "rm -f /etc/dropbear/initramfs/dropbear_*_host_key"])
     chroot.run(["sh", "-c", ": > /etc/machine-id"])
     chroot.run(["sh", "-c", "rm -f /var/lib/dbus/machine-id"])
     chroot.run(["sh", "-c", "rm -f /var/log/*.log /var/log/*/*.log"], check=False)

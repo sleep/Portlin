@@ -246,6 +246,41 @@ the old drive's sudo and automatic-login answers, rebuilds the boot files and
 starts the desktop. Closing Migrate before then offers to open it again (a paused
 copy resumes) or to set up normally.
 
+## Remote unlock
+
+An encrypted stick in a machine with no screen, such as a server or a box in a
+cupboard, can be given its passphrase over the network. Turn **Remote unlock**
+on in first boot's Services step and give it a key: the one line of the
+unlocking machine's `~/.ssh/id_ed25519.pub`, typed in, or `github:NAME` to take
+the keys that GitHub account has published (that needs the network from the
+Network step). Then, at every boot with a cable plugged in, before the
+passphrase prompt the stick takes a DHCP address and answers SSH:
+
+```
+ssh -p 2222 root@192.168.1.42        # asks for the passphrase, and nothing else
+```
+
+The server is dropbear, inside the initramfs, listening on 2222 rather than 22 so
+that its own host key never collides in `known_hosts` with the real SSH server's
+on the same address. Key logins only, and a login can run nothing but the
+unlock prompt. Ethernet only: the initramfs carries no wireless drivers. With no
+cable, nothing is started and nothing waits, so the same stick booted in a
+laptop asks at the keyboard as before. The same switch is there afterwards:
+
+```
+sudo portlin-remote-unlock status                      # on or off, the keys, the host key
+sudo portlin-remote-unlock on ~/.ssh/id_ed25519.pub    # or a key line, or github:NAME
+sudo portlin-remote-unlock add-key github:NAME
+sudo portlin-remote-unlock off                         # keeps the keys for next time
+```
+
+Each rebuilds the initramfs. The switch is `/etc/portlin/remote-unlock.conf`;
+dropbear's own files live where Debian keeps them, under
+`/etc/dropbear/initramfs/`, and a `DROPBEAR_OPTIONS` set in the `dropbear.conf`
+there replaces portlin's. It is off on every freshly written stick: the
+package's own initramfs hook would put the server into every initramfs it
+builds, so portlin adds a hook that takes it out again unless asked.
+
 ## Updates
 
 The Debian system updates itself: it is a real install, so `apt full-upgrade`
@@ -253,8 +288,8 @@ and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
 the wallpapers, the caffeine applet, the Software app and its catalog, the Drivers app, the About Portlin menu
-entry and the `portlin-info`, `portlin-expand`, `portlin-encrypt` and `portlin-install`
-commands are Debian packages, and will update from portlin's archive like
+entry and the `portlin-info`, `portlin-expand`, `portlin-encrypt`, `portlin-install` and
+`portlin-remote-unlock` commands are Debian packages, and will update from portlin's archive like
 anything else once that archive is published; until then they stay at
 whatever version the stick was written with. The bootloader, the initramfs,
 `fstab` and `crypttab` are written once and stay put, because an update that
@@ -373,7 +408,7 @@ an answer already chosen, so Enter alone gets through it. It asks for:
 | Security | Automatic login, whether sudo asks for a password, screen lock delay and lock on suspend, a new LUKS passphrase (only when someone else chose the current one), and an "if found" message shown on the boot menu and above the passphrase prompt |
 | Appearance | Theme, icons, and display scale: automatic picks 100% or 200% at every login for whatever screen the stick is plugged into |
 | Hardware | Drivers `portlin-install scan` suggests for this machine, installed during setup when there is a network (or later from Drivers in the Portlin menu); compressed swap size; an optional swap file on the drive (2-32 GB, used after compressed swap fills, with a warning on USB flash) |
-| Services | SSH server (off by default, host keys generated on first enable) and the ufw firewall (on by default, letting SSH through rate-limited when it is on) |
+| Services | SSH server (off by default, host keys generated on first enable), the ufw firewall (on by default, letting SSH through rate-limited when it is on), and on an encrypted stick remote unlock (off by default; takes a public key, or `github:NAME`) |
 | Storage | Growing the system to fill the drive, and the storage-wear switches `portlin-wear` owns |
 
 Nothing is written until the summary screen is accepted, apart from the keyboard layout, which

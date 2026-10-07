@@ -90,6 +90,11 @@ class TestAnonymisation:
     def test_removes_ssh_host_keys(self, built):
         assert built.has("rm -f /etc/ssh/ssh_host_")
 
+    def test_removes_the_initramfs_ssh_host_keys_too(self, built):
+        # dropbear-initramfs makes its own at install time, which here is once
+        # into a tarball that becomes many sticks. write makes each its own.
+        assert built.has("rm -f /etc/dropbear/initramfs/dropbear_")
+
     def test_clears_the_apt_cache_before_packing(self, built):
         assert built.tokens_before(("apt-get", "clean"), ("tar", "-cf"))
         assert built.index("rm -rf /var/lib/apt/lists") < built.token_index("tar", "-cf")
