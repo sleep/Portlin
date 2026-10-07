@@ -165,11 +165,11 @@ class TestWhatTheImageSkips:
         assert "numix-icon-theme" not in resolved
         assert "numix-icon-theme-circle" not in resolved
 
-    def test_git_is_a_software_app_install(self):
-        # 48 MB plus the perl stack it drags in; the catalog's build-tools
-        # entry already installs it, with build-essential and pkg-config.
-        assert "git" not in packages.TOOLS
-        assert "git" not in packages.resolve()
+    def test_git_is_left_out_of_a_minimal_stick_only(self):
+        # The zsh prompt and the AI agents' installers want it, and a stick
+        # with no network cannot fetch it when they do.
+        assert "git" in packages.resolve()
+        assert "git" not in packages.resolve(packages.MINIMAL_GROUPS)
 
     def test_nvidia_firmware_is_purged_at_write_time(self):
         # NEVER_INSTALL alone cannot stop the Recommends of

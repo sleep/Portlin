@@ -82,7 +82,8 @@ SYSTEM = [
     # the system to have already: Goose ships as a .tar.bz2, and the Node.js
     # Hermes fetches links libatomic. The scripts run as the user and cannot
     # apt-get what is missing. Both are small; git, which Hermes and OpenClaw
-    # also need, is not, and their entries ask for Build tools instead.
+    # also need, is not, so it is in TOOLS and their entries ask for Build
+    # tools on a --minimal stick.
     "bzip2",
     "libatomic1",
     "zram-tools",
@@ -304,9 +305,10 @@ TOOLS = [
     "nano",
     "vim-tiny",
     "htop",
-    # git is the one deliberate omission: 48 MB of program plus the perl stack
-    # it drags in, and the Software app's "Build tools" entry already installs
-    # git (with build-essential and pkg-config) on a networked stick.
+    # 48 MB with the perl stack it brings, but the zsh prompt reads it, AI
+    # agents' installers clone with it, and a stick with no network cannot
+    # fetch it at the moment it turns out to be needed.
+    "git",
     "usbutils",
     "lshw",
     "file",

@@ -1112,7 +1112,7 @@ ENTRIES: tuple[Entry, ...] = (
         # it can open one, which it can when the app was started from a
         # terminal.
         script_args=("--non-interactive",),
-        # It clones itself with git, which the image leaves out.
+        # It clones itself with git, which a --minimal stick leaves out.
         requires=("build-tools",),
         check=path("~/.local/bin/hermes"),
         remove_paths=(
@@ -1143,8 +1143,8 @@ ENTRIES: tuple[Entry, ...] = (
         # ~/.openclaw, no sudo, and no onboarding questions. The site's main
         # install.sh instead reaches for sudo apt-get to install Node.js.
         url="https://openclaw.ai/install-cli.sh",
-        # It wants git, and without it tries sudo apt-get, which cannot
-        # prompt for a password here.
+        # It wants git, which a --minimal stick leaves out, and without it
+        # tries sudo apt-get, which cannot prompt for a password here.
         requires=("build-tools",),
         check=path("~/.openclaw/bin/openclaw"),
         remove_paths=("~/.openclaw/bin", "~/.openclaw/tools"),

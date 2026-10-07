@@ -153,8 +153,8 @@ portlin-shell bash         # and back
 ```
 
 Switching copies the themed `~/.zshrc` into a home that has none, and leaves one that exists
-alone. The git part needs git, which the Software app's Build tools entry installs;
-`PORTLIN_PROMPT_GIT=0` leaves it out in a repository big enough to make it slow.
+alone. `PORTLIN_PROMPT_GIT=0` leaves the git part out in a repository big enough to make it
+slow.
 
 ### Lite session
 
