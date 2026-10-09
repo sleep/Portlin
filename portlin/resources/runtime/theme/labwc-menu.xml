@@ -25,9 +25,6 @@
     <item label="Migrate">
       <action name="Execute" command="portlin-migration" />
     </item>
-    <item label="HUD">
-      <action name="Execute" command="portlin-hud" />
-    </item>
     <item label="Portlin Settings">
       <action name="Execute" command="portlin-settings" />
     </item>

@@ -11,7 +11,7 @@ seen. The second is what the agents that keep a transcript on disk say about
 themselves. Claude Code writes one JSON line per message under ~/.claude,
 Codex one per event under ~/.codex, and OpenCode keeps a SQLite database;
 each carries the model, the tokens spent and what the last turn was doing,
-which is how a kiosk screen can say "running pytest in portlin, 41% of the
+which is how the HUD can say "running pytest in portlin, 41% of the
 context used" about a terminal it cannot see.
 
 Everything here is read-only and reads only the invoking user's own files.

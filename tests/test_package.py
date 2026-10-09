@@ -96,6 +96,7 @@ def test_runtime_ships_every_tool_as_an_executable():
         "usr/bin/portlin-migrate",
         "usr/bin/portlin-wear",
         "usr/bin/portlin-remote-unlock",
+        "usr/bin/portlin-hud",
     }
 
 

@@ -5,15 +5,14 @@ fed captured output and each reader a /proc and /sys built under tmp_path.
 The captured text is kept verbatim, trailing dots and padding included: the
 kernel's spacing is part of what a parser has to survive.
 
-The window cannot be built here (GTK, an X display). What can be checked is
-that portlin-hud imports without gi, that its formatting helpers say "--"
-rather than a number where nothing is known, and that the packages ship it
-beside the modules it imports with a menu entry that names what exists.
+The screen is curses, but everything up to the terminal is plain text: the
+cards are rendered to lines of (text, role) here and checked for width,
+layout and the "--" where nothing is known, and the packages are checked to
+ship the tool beside the modules it imports.
 """
 
 from __future__ import annotations
 
-import configparser
 import json
 import os
 from pathlib import Path
@@ -441,17 +440,11 @@ class TestReaders:
         assert (addresses["public"], addresses["public_state"]) == ("203.0.113.9", "known")
 
 
-class TestTheWindowProgram:
-    def test_it_imports_without_gtk(self, tool):
-        # Its --json mode runs on a --minimal stick and in the harness, where
-        # the window's toolkit may be absent; gi is imported only to draw.
+class TestTheTerminalProgram:
+    def test_it_draws_nothing_graphical(self, tool):
         source = (RUNTIME / "portlin-hud").read_text()
-        head = source.split("def run_window")[0]
-        assert "import gi" not in head
+        assert "import gi" not in source
         assert tool.DEFAULT_INTERVAL >= 1
-
-    def test_it_names_its_window_icon(self, tool):
-        assert tool.ICON_NAME == package.APP_ICON
 
     def test_unknowns_are_dashes_not_numbers(self, tool):
         assert tool.format_tokens(None) == "--"
@@ -502,35 +495,92 @@ class TestTheWindowProgram:
     def test_arguments(self, tool):
         args = tool.parse_args(["--json", "--no-public", "--interval", "5"])
         assert args.json and args.no_public and args.interval == 5
-        assert tool.parse_args(["-f"]).fullscreen
+
+
+SNAPSHOT = {
+    "sampled_at": 1000.0,
+    "host": {"hostname": "attic", "model": "ThinkPad X1 Carbon Gen 9",
+             "cpu": "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz", "threads": 8,
+             "uptime_seconds": 9000, "load": [0.5, 0.4, 0.3]},
+    "release": {"version": "0.9.0", "root": "/dev/mapper/root", "encrypted": True},
+    "cpu": {"percent": 14.2, "cores": [10, 90, 30, 4, 55, 12, 0, 100]},
+    "memory": {"total": 16 << 30, "used": 3 << 30, "anon": 2 << 30, "page_cache": 5 << 30,
+               "buffers": 1 << 28, "shmem": 1 << 26, "reclaimable": 1 << 28, "free": 8 << 30},
+    "gpu": None,
+    "addresses": {"private": "192.168.1.42", "public_state": "off"},
+    "filesystems": [{"mountpoint": "/", "used_bytes": 6 << 30, "total_bytes": 119 << 30,
+                     "source": "/dev/mapper/root", "fstype": "ext4"}],
+    "disks": [],
+    "interfaces": [],
+    "agents": {"processes": [{"agent": "claude", "pid": 1}], "names": {"claude": "Claude Code"},
+               "sessions": [{"agent": "claude", "pid": 1, "cwd": "/src/portlin", "project": "portlin",
+                             "status": "running Bash", "context_percent": 92, "context_window": 200_000}]},
+}
+
+EMPTY = {"host": {}, "release": {}, "cpu": {}, "memory": None, "gpu": None, "addresses": {},
+         "filesystems": [], "disks": [], "interfaces": [], "agents": {}}
+
+
+def text_of(line) -> str:
+    return "".join(text for text, _ in line)
+
+
+class TestTheCards:
+    @pytest.mark.parametrize("width", [40, 80, 120, 200])
+    def test_every_line_fills_the_width_exactly(self, tool, width):
+        for snapshot in (SNAPSHOT, EMPTY):
+            assert {tool.line_width(line) for line in tool.render(snapshot, width, now=1000.0)} == {width}
+
+    def test_cards_sit_side_by_side_as_the_width_allows(self, tool):
+        assert tool.column_count(40) == 1
+        assert tool.column_count(80) == 2
+        assert tool.column_count(120) == 3
+        first = tool.render_text(SNAPSHOT, 80, now=1000.0).splitlines()[0]
+        assert first.startswith("SYSTEM") and "RELEASE" in first
+
+    def test_an_empty_snapshot_says_dashes_and_words(self, tool):
+        text = tool.render_text(EMPTY, 120)
+        assert "--%" in text
+        assert "No graphics card reported" in text
+        assert "No AI agents running." in text
+
+    def test_a_long_value_wraps_under_its_column(self, tool):
+        lines = tool.render_text(SNAPSHOT, 40, now=1000.0).splitlines()
+        start = next(index for index, line in enumerate(lines) if "processor" in line)
+        assert lines[start + 1].startswith(" " * (tool.NAME_WIDTH + 2))
+        assert "2.80GHz" in "".join(lines[start:start + 3])
+
+    def test_luks_is_the_only_crimson(self, tool):
+        lines = tool.render(SNAPSHOT, 120, now=1000.0)
+        accented = [text for line in lines for text, role in line if role == "accent"]
+        assert accented == ["luks"]
+
+    def test_a_nearly_full_context_draws_amber(self, tool):
+        roles = {role for line in tool.render(SNAPSHOT, 120, now=1000.0)
+                 for text, role in line if tool.GLYPHS_UTF8["full"] in text}
+        assert "amber" in roles
+
+    def test_an_ascii_terminal_gets_ascii_bars(self, tool):
+        text = tool.render_text(SNAPSHOT, 80, glyphs=tool.GLYPHS_ASCII, now=1000.0)
+        assert text.isascii() and "#" in text
+
+    def test_clipping_marks_what_it_cut(self, tool):
+        assert tool.clip([("abcdef", "text")], 4, "~") == [("abc", "text"), ("~", "text")]
+        assert tool.clip([("abc", "text")], 4, "~") == [("abc", "text")]
 
 
 class TestPackaging:
-    def test_desktop_ships_the_hud_its_modules_and_its_menu_entry(self):
-        files = package.text_files("portlin-desktop")
+    def test_runtime_ships_the_hud_and_its_modules(self):
+        # A terminal program, so a --minimal stick with no desktop has it too.
+        files = package.text_files("portlin-runtime")
         assert files["usr/bin/portlin-hud"].startswith("#!/usr/bin/env python3")
-        assert "usr/bin/portlin-hud" in package.executable_paths("portlin-desktop")
-        for module in ("hud.py", "agents.py"):
+        assert "usr/bin/portlin-hud" in package.executable_paths("portlin-runtime")
+        for module in ("hud.py", "agents.py", "hostinfo.py", "devices.py", "catalog.py"):
             assert f"usr/lib/portlin/{module}" in files
-            assert f"usr/lib/portlin/{module}" not in package.executable_paths("portlin-desktop")
-        assert "usr/share/applications/portlin-hud.desktop" in files
+            assert f"usr/lib/portlin/{module}" not in package.executable_paths("portlin-runtime")
 
-    def test_the_modules_it_imports_are_in_the_runtime_it_depends_on(self):
-        # hud.py imports hostinfo and devices; agents.py imports catalog.
-        # All three ship in portlin-runtime, in the same directory.
-        runtime = package.text_files("portlin-runtime")
-        for module in ("hostinfo.py", "devices.py", "catalog.py"):
-            assert f"usr/lib/portlin/{module}" in runtime
-
-    def test_the_menu_entry_runs_what_ships_and_is_in_the_portlin_submenu(self):
-        parser = configparser.ConfigParser(interpolation=None)
-        parser.optionxform = str
-        parser.read_string((RUNTIME / "portlin-hud.desktop").read_text())
-        entry = parser["Desktop Entry"]
-        assert entry["Exec"] == "portlin-hud"
-        assert entry["Icon"] == package.APP_ICON
-        assert "X-Portlin" in entry["Categories"].split(";")
-        assert "portlin-hud.desktop" in (RUNTIME / "portlin-tools.menu").read_text()
-
-    def test_the_lite_session_menu_offers_it_too(self):
-        assert 'command="portlin-hud"' in (RUNTIME / "theme" / "labwc-menu.xml").read_text()
+    def test_it_has_no_menu_entry(self):
+        desktop = package.text_files("portlin-desktop")
+        assert "usr/bin/portlin-hud" not in desktop
+        assert not any(path.endswith("portlin-hud.desktop") for path in desktop)
+        assert "portlin-hud" not in (RUNTIME / "theme" / "labwc-menu.xml").read_text()

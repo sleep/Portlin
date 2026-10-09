@@ -42,9 +42,9 @@ dryrun: venv
 
 # The ten that exercise what a unit test structurally cannot see: the
 # shipped scripts and commands against real block devices, portlin's own
-# packages against a real dpkg, the caffeine applet, the Software, Migrate
-# and HUD windows against a real X server, the readouts against a real
-# kernel, and portlin-install against a real archive, where what is being
+# packages against a real dpkg, the caffeine applet, the Software and
+# Migrate windows against a real X server, the readouts against a real
+# kernel, the HUD in a real terminal, and portlin-install against a real archive, where what is being
 # tested is partly somebody else's promise
 # about a package name or a repository. Each one caught a bug the unit tests
 # could not. Fourteen runs: test-expand.py goes four times because the tier

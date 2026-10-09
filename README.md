@@ -85,7 +85,7 @@ is decided on every boot, before the login screen, because a stick can be encryp
 after it was written.
 
 One panel, along the top, with a searchable applications menu under the portlin mark. portlin's own
-tools (Software, Drivers, Migrate, Caffeine, HUD and Portlin Settings) share a Portlin submenu beside Settings. At the right
+tools (Software, Drivers, Migrate, Caffeine and Portlin Settings) share a Portlin submenu beside Settings. At the right
 end sits a readout of what the machine is doing:
 
 ```
@@ -104,7 +104,7 @@ session, before there are two samples to compare; a machine with no battery has 
 rather than an empty one. Intel graphics expose a clock and no utilisation counter, so on those
 machines the field reads `gpu 350MHz` and the tooltip says in words that it is a frequency.
 
-**HUD**, in the Portlin menu, is the page behind that line, for a screen left showing it: the
+`portlin-hud`, in a terminal, is the page behind that line, for a screen left showing it: the
 machine and the release, every core, the memory broken down into applications, file cache,
 buffers, shared and free with swap and zram beside it, the graphics card with its memory and
 temperature where the driver reports them, every filesystem and each drive's read and write rate,
@@ -124,10 +124,11 @@ the file that abtop's status-line hook keeps, and says to run `abtop --setup` un
 (abtop is on the Software app's AI tools page). Nothing is sent anywhere and no agent is asked
 anything.
 
-F11 or `--fullscreen` makes it a kiosk: no title bar, no pointer, Esc brings both back.
-`portlin-hud --json` prints the same snapshot for a script. It keeps the readout's rule: the
-first sample has no rates and no CPU figure and says `--`, and a card whose source is missing
-says so in words.
+It is curses, so it runs the same in the desktop's terminal, on a text console and over ssh into
+a `--minimal` stick; the cards sit side by side as the terminal's width allows, the arrow keys
+scroll, `r` samples now and `q` quits. `portlin-hud --json` prints the same snapshot for a
+script. It keeps the readout's rule: the first sample has no rates and no CPU figure and says
+`--`, and a card whose source is missing says so in words.
 
 A coffee cup sits in the panel: click it and the machine stops sleeping, blanking and dimming until
 you click it again, or for a span you pick from `Activate for`. It holds a logind lock over
@@ -335,8 +336,8 @@ and kernel upgrades work.
 
 Portlin's own contribution to the stick is split in two. The desktop theme,
 the wallpapers, the caffeine applet, the Software app and its catalog, the Drivers app, the About Portlin menu
-entry and the `portlin-info`, `portlin-expand`, `portlin-encrypt`, `portlin-install` and
-`portlin-remote-unlock` commands are Debian packages, and will update from portlin's archive like
+entry and the `portlin-info`, `portlin-expand`, `portlin-encrypt`, `portlin-install`,
+`portlin-remote-unlock` and `portlin-hud` commands are Debian packages, and will update from portlin's archive like
 anything else once that archive is published; until then they stay at
 whatever version the stick was written with. The bootloader, the initramfs,
 `fstab` and `crypttab` are written once and stay put, because an update that

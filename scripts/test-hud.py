@@ -3,36 +3,40 @@
 # Part of portlin. Copyright (C) 2026 the portlin authors.
 # Licensed under the GNU General Public License, version 3 or later.
 # See <https://www.gnu.org/licenses/gpl-3.0.html>.
-"""Run the shipped HUD against a real kernel, and build its window under Xvfb.
+"""Run the shipped HUD against a real kernel, and in a real terminal.
 
 The unit tests feed hud.py captured text and a /proc built under tmp_path.
 What they cannot see is whether the readers look in the right place on a
 real Linux: a parser correct about a string and a reader that opens the
 wrong file pass the same suite and draw an empty card. So this runs
-`portlin-hud --json` for real, as the window would, and checks the answers
-a kernel always has. Then it builds the real window against a real X server
-and feeds it a snapshot, which is the one way to find a card that raises on
-a shape of data the unit tests never drew.
+`portlin-hud --json` for real, as the screen would, and checks the answers
+a kernel always has. Then it draws that snapshot, which is the one way to
+find a card that raises on a shape of data the unit tests never drew, and
+runs the screen itself in a pseudo-terminal until it is told to quit.
 
-Needs a Debian userland with GTK and Xvfb. Run under `make harness`.
+Needs a Debian userland. Run under `make harness`.
 """
 
 from __future__ import annotations
 
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
 import os
+import pty
+import select
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 RUNTIME = REPO / "portlin" / "resources" / "runtime"
 HUD = RUNTIME / "portlin-hud"
-DISPLAY = ":98"
 
 failures = 0
 
@@ -114,96 +118,78 @@ def check_snapshot(snapshot: dict) -> None:
         check(not disk["name"].startswith(("loop", "ram", "dm-")), f"{disk['name']} is a whole disk")
 
 
-def start_xvfb() -> subprocess.Popen:
-    server = subprocess.Popen(["Xvfb", DISPLAY, "-screen", "0", "1280x800x24"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    os.environ["DISPLAY"] = DISPLAY
-    for _ in range(50):
-        if subprocess.run(["xset", "q"], capture_output=True).returncode == 0:
-            return server
-        time.sleep(0.2)
-    raise SystemExit("Xvfb never came up")
-
-
-def check_the_window(snapshot: dict) -> None:
-    """Build the real window, hand it the real snapshot, then an empty one.
-
-    The collector is replaced with one that answers the saved snapshot, so
-    the window draws what --json just read without sampling again. A timer
-    then inspects the cards, applies a snapshot with nothing in it, which is
-    what every card has to survive on a machine missing that source, and
-    closes the window, which ends the application.
-    """
-    server = start_xvfb()
+def check_the_cards(snapshot: dict) -> None:
+    """Draw the real snapshot at a narrow and a wide width, then an empty one."""
+    sys.path.insert(0, str(RUNTIME))
+    hud_tool = load(HUD, "portlin_hud")
+    for width in (80, 160):
+        lines = hud_tool.render(snapshot, width)
+        check({hud_tool.line_width(line) for line in lines} == {width}, f"every line is {width} columns")
+    text = hud_tool.render_text(snapshot, 120)
+    for title in ("SYSTEM", "CPU", "MEMORY", "STORAGE", "NETWORK", "AI AGENTS"):
+        check(title in text, f"the {title} card is drawn")
+    (REPO / "out").mkdir(exist_ok=True)
+    (REPO / "out" / "hud-harness.txt").write_text(text + "\n")
+    print(f"  drawn: {REPO / 'out' / 'hud-harness.txt'}")
     try:
-        sys.path.insert(0, str(RUNTIME))
-        hud_tool = load(HUD, "portlin_hud")
-        import gi
+        hud_tool.render({"host": {}, "release": {}, "cpu": {}, "memory": None, "gpu": None,
+                         "addresses": {}, "filesystems": [], "disks": [], "interfaces": [], "agents": {}}, 120)
+        check(True, "an empty snapshot draws without raising")
+    except Exception as error:
+        check(False, f"an empty snapshot draws without raising: {type(error).__name__}: {error}")
 
-        gi.require_version("Gtk", "3.0")
-        from gi.repository import GLib, Gtk
 
-        hud_tool.Collector.snapshot = lambda self: snapshot  # type: ignore[method-assign]
-        seen: dict = {}
-        (REPO / "out").mkdir(exist_ok=True)
-
-        deadline = time.monotonic() + 30
-
-        def inspect() -> bool:
-            windows = [w for w in Gtk.Window.list_toplevels()
-                       if w.get_visible() and isinstance(w, Gtk.ApplicationWindow)]
-            seen["windows"] = len(windows)
-            if not windows:
-                return time.monotonic() < deadline
-            window = windows[0]
-            # The first snapshot arrives from the collector's thread; on a
-            # cold container the toolkit's own start-up can take longer than
-            # that, so wait for it rather than for a number of seconds.
-            if not window._cards["cpu"].headline.get_text() and time.monotonic() < deadline:
-                return True
-            seen["cards"] = len(window.grid.get_children())
-            seen["columns"] = window.columns
-            seen["cpu"] = window._cards["cpu"].headline.get_text()
-            seen["memory"] = window._cards["memory"].headline.get_text()
-            seen["agents"] = window._cards["agents"].headline.get_text()
-            shot = subprocess.run(["import", "-window", "root", str(REPO / "out" / "hud-harness.png")],
-                                  capture_output=True)
-            seen["screenshot"] = shot.returncode == 0
+def read_until(fd: int, wanted: bytes, deadline: float) -> bytes:
+    """Read the pty until wanted appears; an empty wanted reads until the deadline."""
+    seen = b""
+    while (not wanted or wanted not in seen) and time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
             try:
-                window._apply({"host": {}, "release": {}, "cpu": {}, "memory": None, "gpu": None,
-                               "addresses": {}, "filesystems": [], "disks": [], "interfaces": [],
-                               "agents": {}})
-                seen["empty_ok"] = True
-            except Exception as error:
-                seen["empty_error"] = f"{type(error).__name__}: {error}"
-            window.destroy()
-            return False
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            seen += chunk
+    return seen
 
-        GLib.timeout_add(500, inspect)
-        hud_tool.run_window(interval=60, fullscreen=False, lookup_public=False)
 
-        check(seen.get("windows") == 1, "the HUD window opened")
-        check(seen.get("cards") == 9, f"it drew every card ({seen.get('cards')})")
-        check(seen.get("columns") == 3, f"a 1280 px screen gets three columns ({seen.get('columns')})")
-        check(seen.get("cpu", "--%") != "--%", f"the CPU headline is a number ({seen.get('cpu')})")
-        check("/" in seen.get("memory", ""), f"the memory headline is used over total ({seen.get('memory')})")
-        check(bool(seen.get("agents")), f"the agents headline says something ({seen.get('agents')})")
-        check(seen.get("empty_ok", False), f"an empty snapshot draws without raising {seen.get('empty_error', '')}")
-        if seen.get("screenshot"):
-            print(f"  screenshot: {REPO / 'out' / 'hud-harness.png'}")
-    finally:
-        server.terminate()
+def check_the_screen() -> None:
+    """Start the real curses screen in a 120x40 terminal, wait for it, press q."""
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.environ.update({"TERM": "xterm-256color", "LANG": "C.UTF-8", "PYTHONPATH": str(RUNTIME)})
+        os.execv(sys.executable, [sys.executable, str(HUD), "--no-public", "--interval", "1"])
+    output = read_until(fd, b"AI AGENTS", time.monotonic() + 30)
+    check(b"SYSTEM" in output and b"AI AGENTS" in output, "the screen draws its cards in a terminal")
+    os.write(fd, b"q")
+    status = None
+    deadline = time.monotonic() + 10
+    while status is None and time.monotonic() < deadline:
+        # Keep reading, or a child writing its last frame blocks on a full pty.
+        read_until(fd, b"", time.monotonic() + 0.2)
+        waited, code = os.waitpid(pid, os.WNOHANG)
+        if waited:
+            status = os.waitstatus_to_exitcode(code)
+    if status is None:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+    check(status == 0, f"q quits it cleanly (exit {status})")
+    os.close(fd)
 
 
 def main() -> int:
-    print("portlin-hud, against a real kernel and a real X server")
+    print("portlin-hud, against a real kernel and in a real terminal")
     with tempfile.TemporaryDirectory() as home:
         os.environ["HOME"] = home
         snapshot = run_json()
     if snapshot is None:
         return 1
     check_snapshot(snapshot)
-    check_the_window(snapshot)
+    check_the_cards(snapshot)
+    check_the_screen()
     print("FAILED" if failures else "all checks passed")
     return 1 if failures else 0
 
