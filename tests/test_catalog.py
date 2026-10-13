@@ -24,7 +24,7 @@ RUNTIME = Path(__file__).resolve().parent.parent / "portlin" / "resources" / "ru
 REQUESTED = [
     "mullvad", "qbittorrent", "deluge", "tor-browser", "chrome", "chromium",
     "brave", "palemoon", "zed", "cursor", "claude-desktop", "claude-code",
-    "kimi-code", "hermes", "openclaw", "codex", "opencode", "goose", "rustdesk", "anydesk",
+    "kimi-code", "hermes", "openclaw", "codex", "opencode", "opencode2", "goose", "rustdesk", "anydesk",
     "vscode", "docker", "tailscale", "syncthing", "wireshark",
     "vlc", "libreoffice", "gimp", "obs-studio", "thunderbird", "keepassxc",
     "signal", "telegram", "discord",
@@ -332,6 +332,29 @@ class TestValidationRules:
         ytdlp = catalog.by_id("yt-dlp")
         assert _only(catalog, dataclasses.replace(ytdlp, check=catalog.path("/usr/local/bin/x")))
         assert _only(catalog, dataclasses.replace(ytdlp, check=catalog.dpkg("yt-dlp")))
+
+    def test_npm_bin_entries_name_a_package_a_major_and_a_member(self, catalog):
+        opencode2 = catalog.by_id("opencode2")
+        assert _only(catalog, opencode2) == []
+        assert _only(catalog, dataclasses.replace(
+            opencode2, release_api="https://example.com/@opencode/cli-linux-x64"))
+        assert _only(catalog, dataclasses.replace(opencode2, npm_major=None))
+        assert _only(catalog, dataclasses.replace(opencode2, npm_member="bin/opencode"))
+        assert _only(catalog, dataclasses.replace(opencode2, bin_path="/usr/bin/opencode2"))
+        assert _only(catalog, dataclasses.replace(opencode2, check=catalog.path("/usr/local/bin/x")))
+
+    def test_only_npm_bin_entries_carry_npm_fields(self, catalog):
+        assert _only(catalog, dataclasses.replace(catalog.by_id("yt-dlp"), npm_major=2))
+
+    def test_opencode2_installs_2x_beside_opencode(self, catalog):
+        """2.x is on npm only, and named so that a 1.x in ~/.opencode/bin,
+        which its installer puts first on PATH, cannot hide it."""
+        opencode2 = catalog.by_id("opencode2")
+        assert opencode2.kind == "npm-bin"
+        assert opencode2.release_api == catalog.npm_package("@opencode/cli-linux-x64")
+        assert opencode2.npm_major == 2
+        assert opencode2.bin_path == "/usr/local/bin/opencode2"
+        assert catalog.is_privileged(opencode2)
 
     def test_a_release_api_over_plain_http_is_refused(self, catalog):
         ytdlp = catalog.by_id("yt-dlp")

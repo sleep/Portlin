@@ -23,12 +23,14 @@ Needs root, network and a Debian userland. Run under `make harness`.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -327,6 +329,50 @@ def check_the_other_install_kinds() -> None:
         bad("the release binary path did not remove what it installed")
     else:
         ok("a release executable removes cleanly")
+
+    # One executable out of an npm tarball, the way OpenCode 2 arrives:
+    # checked against its sha512 first, so a wrong digest must stop it.
+    package = Path("/tmp/harness-npm/package/bin/probe")
+    package.parent.mkdir(parents=True, exist_ok=True)
+    package.write_text("#!/bin/sh\necho npm\n")
+    package.chmod(0o755)
+    tarball = Path("/tmp/harness-npm/probe.tgz")
+    with tarfile.open(tarball, "w:gz") as archive:
+        archive.add(package.parent.parent, arcname="package")
+    digest = hashlib.sha512(tarball.read_bytes()).hexdigest()
+    npm_entry = catalog.Entry(
+        id="harness-npm",
+        name="Harness npm binary",
+        summary="A stand-in for an npm-published executable",
+        category="System tools",
+        kind="npm-bin",
+        release_api="https://registry.npmjs.org/harness-npm",
+        npm_major=1,
+        npm_member="package/bin/probe",
+        bin_path="/usr/local/bin/portlin-harness-npm",
+        check=catalog.path("/usr/local/bin/portlin-harness-npm"),
+        homepage="https://example.invalid/",
+    )
+    npm_installed = Path(npm_entry.bin_path)
+    tampered = installer.run_plan(installer.plan_install(
+        npm_entry, ctx, asset_url=tarball.as_uri(), asset_sha512="0" * 128))
+    if tampered.ok or npm_installed.exists():
+        bad("an npm tarball with the wrong sha512 was installed")
+    else:
+        ok("an npm tarball with the wrong sha512 is refused")
+    result = installer.run_plan(installer.plan_install(
+        npm_entry, ctx, asset_url=tarball.as_uri(), asset_sha512=digest))
+    if result.ok and run([str(npm_installed)]).stdout == "npm\n":
+        ok("an npm executable lands on PATH and runs")
+    else:
+        bad(f"the npm binary path failed: {result.failure}")
+    if Path(f"{ctx.download_dir}/harness-npm-unpack").exists():
+        bad("the npm binary path left its unpacked tarball behind")
+    installer.run_plan(installer.plan_remove(npm_entry, ctx, None))
+    if npm_installed.exists():
+        bad("the npm binary path did not remove what it installed")
+    else:
+        ok("an npm executable removes cleanly")
 
 
 def check_the_user_script_path() -> None:

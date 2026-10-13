@@ -17,6 +17,8 @@ apt-repo     a vendor apt repository: a signing key, a sources entry, then apt
 deb-url      a .deb the vendor publishes at a fixed URL
 github-deb   a .deb attached to the latest release of a GitHub repository
 github-zip-opt a ZIP attached to the latest GitHub release, unpacked under /opt
+npm-bin      one executable from the newest release of one major version of
+             a package on the npm registry, installed into /usr/local/bin
 release-bin  one executable attached to the latest release on GitHub or
              Codeberg, installed into /usr/local/bin
 tarball-opt  a tarball unpacked under /opt, with a generated menu entry
@@ -40,12 +42,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 KINDS = (
-    "apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "release-bin", "tarball-opt",
-    "user-script",
+    "apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "npm-bin", "release-bin",
+    "tarball-opt", "user-script",
 )
 PRIVILEGED_KINDS = frozenset(
-    {"apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "release-bin", "tarball-opt"}
+    {"apt", "apt-repo", "deb-url", "github-deb", "github-zip-opt", "npm-bin", "release-bin",
+     "tarball-opt"}
 )
+# The kinds that put one executable at bin_path and nothing else.
+BIN_KINDS = frozenset({"npm-bin", "release-bin"})
 USER_KINDS = frozenset({"user-script"})
 
 # Display order. Drivers last: it is the page that talks about this machine
@@ -74,7 +79,8 @@ PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.-]+$")
 ENTRY_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 KEYRING_DIRS = ("/usr/share/keyrings/", "/etc/apt/keyrings/")
 SOURCES_DIR = "/etc/apt/sources.list.d/"
-# Where a release-bin entry's executable goes: on PATH for everyone, and
+NPM_REGISTRY = "https://registry.npmjs.org/"
+# Where a release-bin or npm-bin entry's executable goes: on PATH for everyone, and
 # ahead of /usr/bin, so it wins over any older Debian package of the same tool.
 BIN_DIR = "/usr/local/bin/"
 DASHES = "–—"
@@ -131,6 +137,11 @@ class Entry:
     # (Forgejo) answer that endpoint in the same shape.
     release_api: str | None = None
     bin_path: str | None = None
+    # npm-bin: release_api is the package's registry document. The newest
+    # release of npm_major is installed, and npm_member is the executable's
+    # path inside that release's tarball.
+    npm_major: int | None = None
+    npm_member: str | None = None
     opt_dir: str | None = None
     launcher: str | None = None
     icon: str | None = None
@@ -161,6 +172,10 @@ def github_releases(repo: str) -> str:
 
 def codeberg_releases(repo: str) -> str:
     return f"https://codeberg.org/api/v1/repos/{repo}/releases/latest"
+
+
+def npm_package(name: str) -> str:
+    return NPM_REGISTRY + name
 
 
 DKMS_WARNING = (
@@ -1201,6 +1216,31 @@ ENTRIES: tuple[Entry, ...] = (
         ),
     ),
     Entry(
+        id="opencode2",
+        name="OpenCode 2",
+        summary="OpenCode's 2.x line, with the server other programs drive it through, "
+                "installed for everyone as opencode2",
+        category="AI tools",
+        kind="npm-bin",
+        # 2.x is published only to npm, one compiled executable per platform;
+        # OpenCode's GitHub releases and its install script are still 1.x.
+        release_api=npm_package("@opencode/cli-linux-x64"),
+        npm_major=2,
+        npm_member="package/bin/opencode",
+        # opencode2 is the name OpenCode's own npm package gives 2.x beside
+        # opencode. It keeps the two apart: the 1.x installer puts
+        # ~/.opencode/bin ahead of /usr/local/bin on PATH, so a 2.x named
+        # opencode would be hidden whenever 1.x is installed too.
+        bin_path="/usr/local/bin/opencode2",
+        check=path("/usr/local/bin/opencode2"),
+        homepage="https://opencode.ai/",
+        notes=(
+            "Installs the newest 2.x release, a single 200 MB program. Run opencode2 in a "
+            "terminal, or opencode2 serve to start its server. It can be installed beside "
+            "OpenCode 1.x; removing it leaves your settings and sessions in your home directory."
+        ),
+    ),
+    Entry(
         id="goose",
         name="goose",
         summary="Block's open-source agent for the terminal, for any model provider",
@@ -1740,12 +1780,13 @@ def validate(entries: tuple[Entry, ...] = ENTRIES) -> list[str]:
                     re.compile(entry.asset_pattern)
                 except re.error as exc:
                     problem(entry, f"asset_pattern does not compile: {exc}")
-            if not entry.bin_path or not entry.bin_path.startswith(BIN_DIR):
-                problem(entry, f"release-bin entries install under {BIN_DIR}")
-            elif entry.check.kind != "path" or entry.bin_path not in entry.check.values:
-                problem(entry, "release-bin entries are checked by the executable they install")
-            if entry.packages:
-                problem(entry, "release-bin entries install one file, not packages")
+        elif entry.kind == "npm-bin":
+            if not entry.release_api or not entry.release_api.startswith(NPM_REGISTRY):
+                problem(entry, f"npm-bin entries name a package on {NPM_REGISTRY}")
+            if not isinstance(entry.npm_major, int) or entry.npm_major < 1:
+                problem(entry, "npm-bin entries name the major version to install")
+            if not entry.npm_member or not entry.npm_member.startswith("package/"):
+                problem(entry, "npm-bin entries name their executable under package/")
         elif entry.kind == "tarball-opt":
             if not entry.url:
                 problem(entry, "tarball-opt entries carry a url")
@@ -1762,6 +1803,15 @@ def validate(entries: tuple[Entry, ...] = ENTRIES) -> list[str]:
                 problem(entry, "user-script entries are checked by a path under ~")
             if entry.warning is None:
                 problem(entry, "user-script entries warn that they run a vendor script")
+        if entry.kind in BIN_KINDS:
+            if not entry.bin_path or not entry.bin_path.startswith(BIN_DIR):
+                problem(entry, f"{entry.kind} entries install under {BIN_DIR}")
+            elif entry.check.kind != "path" or entry.bin_path not in entry.check.values:
+                problem(entry, f"{entry.kind} entries are checked by the executable they install")
+            if entry.packages:
+                problem(entry, f"{entry.kind} entries install one file, not packages")
+        if (entry.npm_major is not None or entry.npm_member) and entry.kind != "npm-bin":
+            problem(entry, "only npm-bin entries name an npm version or member")
         if (entry.script_args or entry.script_env) and entry.kind != "user-script":
             problem(entry, "only user-script entries pass their script arguments or environment")
         for name, _value in entry.script_env:

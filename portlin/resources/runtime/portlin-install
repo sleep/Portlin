@@ -38,6 +38,7 @@ unit tests on a machine with no apt at all.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pwd
@@ -55,6 +56,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, "/usr/lib/portlin")
 
 from catalog import (  # noqa: E402
+    BIN_KINDS,
     ENTRIES,
     USER_KINDS,
     Entry,
@@ -541,13 +543,39 @@ def plan_release_bin(entry: Entry, ctx: Context, url: str) -> list[Step]:
     ] + _plan_after(entry, ctx)
 
 
+def plan_npm_bin(entry: Entry, ctx: Context, url: str, sha512: str) -> list[Step]:
+    """Install one executable out of an npm package's tarball.
+
+    The tarball is checked against the sha512 the registry published for it
+    before anything is unpacked, and only the one member is taken out of it,
+    so nothing else the package carries is ever written anywhere.
+    """
+    archive = f"{ctx.download_dir}/{entry.id}.tgz"
+    staging = f"{ctx.download_dir}/{entry.id}-unpack"
+    return [
+        Step(f"Downloading {entry.name}", mkdir=ctx.download_dir,
+             argv=curl_argv(url, archive), check_file=archive),
+        Step("Checking the download",
+             argv=("sh", "-ec", 'printf "%s  %s\\n" "$1" "$2" | sha512sum -c --quiet -',
+                   "portlin-verify", sha512, archive)),
+        Step(f"Unpacking {entry.name}", mkdir=staging,
+             argv=("tar", "-xzf", archive, "-C", staging, entry.npm_member),
+             remove=(archive,)),
+        Step(f"Installing {entry.name} as {entry.bin_path}",
+             mkdir=str(Path(entry.bin_path).parent),
+             argv=("install", "-m", "0755", f"{staging}/{entry.npm_member}", entry.bin_path),
+             remove=(staging,)),
+    ] + _plan_after(entry, ctx)
+
+
 # The kinds whose download is whatever the forge says the latest release is,
 # looked up before the plan is made.
 RELEASE_KINDS = ("github-deb", "github-zip-opt", "release-bin")
 
 
 def plan_install(
-    entry: Entry, ctx: Context, *, resolved_packages=None, asset_url: str | None = None
+    entry: Entry, ctx: Context, *, resolved_packages=None, asset_url: str | None = None,
+    asset_sha512: str | None = None,
 ) -> list[Step]:
     if entry.kind == "apt":
         return plan_apt(entry, ctx, resolved_packages)
@@ -561,6 +589,9 @@ def plan_install(
         return plan_github_zip(entry, ctx, asset_url or "<latest release asset>")
     if entry.kind == "release-bin":
         return plan_release_bin(entry, ctx, asset_url or "<latest release asset>")
+    if entry.kind == "npm-bin":
+        return plan_npm_bin(entry, ctx, asset_url or "<newest release tarball>",
+                            asset_sha512 or "<its sha512>")
     if entry.kind == "tarball-opt":
         return plan_tarball(entry, ctx)
     if entry.kind == "user-script":
@@ -626,7 +657,7 @@ def plan_remove(entry: Entry, ctx: Context, record: dict | None) -> list[Step]:
             Step(f"Removing {entry.name}",
                  remove=tuple(paths or (entry.opt_dir, tarball_desktop_path(entry)))),
         ]
-    if entry.kind == "release-bin":
+    if entry.kind in BIN_KINDS:
         paths = record.get("paths") if record else None
         return [Step(f"Removing {entry.name}", remove=tuple(paths or (entry.bin_path,)))]
     if entry.kind == "user-script":
@@ -704,7 +735,7 @@ def record_for(entry: Entry, ctx: Context, steps, resolved_packages=None) -> dic
         paths += [entry.repo.sources_path, entry.repo.keyring_path]
     if entry.kind in ("tarball-opt", "github-zip-opt"):
         paths += [entry.opt_dir, tarball_desktop_path(entry)]
-    if entry.kind == "release-bin":
+    if entry.kind in BIN_KINDS:
         paths.append(entry.bin_path)
     if entry.kind == "user-script":
         paths += [str(expand_home(p, Path(ctx.home))) for p in entry.remove_paths]
@@ -724,6 +755,43 @@ def pick_release_asset(payload: dict, pattern: str) -> str:
             f"expected one asset matching {pattern!r}, found {len(urls)}"
         )
     return urls[0]
+
+
+NPM_RELEASE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+def pick_npm_release(payload: dict, major: int) -> tuple[str, str, str]:
+    """(version, tarball URL, sha512 in hex) of the newest release of ``major``.
+
+    Only plain x.y.z versions count: the registry also carries dated beta
+    and dev builds, which are not releases. The sha512 comes from the
+    registry's own integrity field, which is base64 where sha512sum wants hex.
+    """
+    releases = []
+    for version, document in payload.get("versions", {}).items():
+        match = NPM_RELEASE.match(version)
+        if match and int(match.group(1)) == major:
+            releases.append((tuple(map(int, match.groups())), version, document))
+    if not releases:
+        raise ValueError(f"no {major}.x release is published")
+    _, version, document = max(releases, key=lambda release: release[0])
+    dist = document["dist"]
+    algorithm, _, digest = dist.get("integrity", "").partition("-")
+    if algorithm != "sha512":
+        raise ValueError(f"{version} has no sha512 to check the download against")
+    return version, dist["tarball"], base64.b64decode(digest).hex()
+
+
+def latest_npm_release(entry: Entry) -> tuple[str, str, str]:
+    request = Request(
+        entry.release_api,
+        # The abbreviated document: every version's dist, without every
+        # version's whole package.json.
+        headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.npm.install-v1+json"},
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.load(response)
+    return pick_npm_release(payload, entry.npm_major)
 
 
 # -- the hardware scan -------------------------------------------------------
@@ -1214,6 +1282,8 @@ def cmd_show(args, ctx: Context) -> int:
         field("url", entry.url)
     if entry.release_api:
         field("release", entry.release_api)
+    if entry.npm_major:
+        field("version", f"newest {entry.npm_major}.x")
     if entry.bin_path:
         field("installs", entry.bin_path)
     if entry.needs_components:
@@ -1273,12 +1343,20 @@ def install_one(entry: Entry, ctx: Context, *, dry_run: bool) -> int:
             return EXIT_FAILED
     resolved = None
     asset_url = None
+    asset_sha512 = None
     if entry.kind in RELEASE_KINDS and not dry_run:
         try:
             asset_url = latest_release_asset(entry)
         except (OSError, ValueError, KeyError) as exc:
             emit("result", "failed", entry.id, f"could not find the latest release: {exc}")
             return EXIT_FAILED
+    if entry.kind == "npm-bin" and not dry_run:
+        try:
+            version, asset_url, asset_sha512 = latest_npm_release(entry)
+        except (OSError, ValueError, KeyError) as exc:
+            emit("result", "failed", entry.id, f"could not find the newest release: {exc}")
+            return EXIT_FAILED
+        emit("step", f"Found {entry.name} {version}")
     if entry.resolver == "nvidia-detect":
         if dry_run:
             resolved = ("<metapackage from nvidia-detect>",)
@@ -1296,7 +1374,8 @@ def install_one(entry: Entry, ctx: Context, *, dry_run: bool) -> int:
                 return EXIT_FAILED
             resolved = (resolved_name,)
         ctx = replace(ctx, components=tuple(ctx.components) + tuple(entry.needs_components))
-    steps = plan_install(entry, ctx, resolved_packages=resolved, asset_url=asset_url)
+    steps = plan_install(entry, ctx, resolved_packages=resolved, asset_url=asset_url,
+                         asset_sha512=asset_sha512)
     result = run_plan(steps, dry_run=dry_run)
     if result.ok and not dry_run:
         write_record(ctx, entry, record_for(entry, ctx, steps, resolved))

@@ -509,6 +509,87 @@ class TestReleaseBinaries:
         assert not bin_path.exists()
 
 
+class TestNpmBinaries:
+    """One executable out of the newest npm release of a major version."""
+
+    URL = "https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-2.0.28.tgz"
+    SHA512 = "ab" * 64
+    ARCHIVE = "/var/cache/portlin/downloads/opencode2.tgz"
+    STAGING = "/var/cache/portlin/downloads/opencode2-unpack"
+
+    def test_it_downloads_verifies_unpacks_one_file_then_installs_it(self, tool, catalog, ctx):
+        entry = catalog.by_id("opencode2")
+        steps = tool.plan_install(entry, ctx, asset_url=self.URL, asset_sha512=self.SHA512)
+        commands = argvs(steps)
+        assert commands[0] == tool.curl_argv(self.URL, self.ARCHIVE)
+        assert commands[1][:2] == ("sh", "-ec") and commands[1][-2:] == (self.SHA512, self.ARCHIVE)
+        assert commands[2] == ("tar", "-xzf", self.ARCHIVE, "-C", self.STAGING, "package/bin/opencode")
+        assert commands[3] == ("install", "-m", "0755", f"{self.STAGING}/package/bin/opencode",
+                               "/usr/local/bin/opencode2")
+        assert any(self.ARCHIVE in step.remove for step in steps)
+        assert any(self.STAGING in step.remove for step in steps)
+
+    def test_removal_and_the_record_are_the_executable_alone(self, tool, catalog, ctx):
+        entry = catalog.by_id("opencode2")
+        assert flat(tool.plan_remove(entry, ctx, None)) == "remove /usr/local/bin/opencode2"
+        steps = tool.plan_install(entry, ctx, asset_url=self.URL, asset_sha512=self.SHA512)
+        record = tool.record_for(entry, ctx, steps)
+        assert record["paths"] == ["/usr/local/bin/opencode2"]
+        assert record["packages"] == []
+
+    def test_the_newest_release_of_the_major_is_picked_over_betas_and_other_majors(self, tool):
+        def version(name: str) -> dict:
+            return {"dist": {"tarball": f"https://r/{name}.tgz",
+                             "integrity": "sha512-q80="}}
+
+        payload = {"versions": {name: version(name) for name in (
+            "1.19.0", "2.0.9", "2.0.28", "2.0.3", "0.0.0-beta-19507", "2.1.0-rc.1", "3.0.0",
+        )}}
+        assert tool.pick_npm_release(payload, 2) == ("2.0.28", "https://r/2.0.28.tgz", "abcd")
+
+    def test_a_major_with_no_release_or_no_sha512_is_an_error(self, tool):
+        with pytest.raises(ValueError):
+            tool.pick_npm_release({"versions": {"1.0.0": {}}}, 2)
+        sha1_only = {"versions": {"2.0.0": {"dist": {"tarball": "https://r/x.tgz",
+                                                     "shasum": "00"}}}}
+        with pytest.raises(ValueError):
+            tool.pick_npm_release(sha1_only, 2)
+
+    @pytest.mark.skipif(
+        any(shutil.which(name) is None for name in ("curl", "install", "tar", "sha512sum")),
+        reason="needs curl, install, tar and sha512sum",
+    )
+    def test_the_plan_runs_for_real_and_refuses_a_wrong_digest(
+        self, tool, catalog, ctx, tmp_path
+    ):
+        import dataclasses
+        import hashlib
+        import tarfile
+
+        member = tmp_path / "package" / "bin" / "opencode"
+        member.parent.mkdir(parents=True)
+        member.write_text("#!/bin/sh\necho two\n")
+        tarball = tmp_path / "cli.tgz"
+        with tarfile.open(tarball, "w:gz") as archive:
+            archive.add(tmp_path / "package", arcname="package")
+        digest = hashlib.sha512(tarball.read_bytes()).hexdigest()
+        bin_path = tmp_path / "usr-local-bin" / "opencode2"
+        entry = dataclasses.replace(catalog.by_id("opencode2"), bin_path=str(bin_path))
+        sandbox = dataclasses.replace(ctx, download_dir=str(tmp_path / "downloads"))
+
+        refused = tool.run_plan(tool.plan_install(
+            entry, sandbox, asset_url=tarball.as_uri(), asset_sha512="0" * 128))
+        assert not refused.ok and not bin_path.exists()
+
+        result = tool.run_plan(tool.plan_install(
+            entry, sandbox, asset_url=tarball.as_uri(), asset_sha512=digest))
+        assert result.ok, result.failure
+        assert bin_path.stat().st_mode & 0o777 == 0o755
+        assert subprocess.run([str(bin_path)], capture_output=True, text=True).stdout == "two\n"
+        assert not (tmp_path / "downloads" / "opencode2.tgz").exists()
+        assert not (tmp_path / "downloads" / "opencode2-unpack").exists()
+
+
 class TestVendorScripts:
     def test_the_script_is_downloaded_to_a_file_and_never_piped(self, tool, catalog, ctx):
         import dataclasses
