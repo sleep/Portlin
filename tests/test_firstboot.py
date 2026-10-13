@@ -596,21 +596,74 @@ class TestEncryptOnFirstBoot:
         body = self.LOCAL_TOP.read_text()
         assert "after 30s" in body
 
-    def test_it_refuses_to_reencrypt_an_existing_container(self):
-        # Running reencrypt over a LUKS device would destroy it.
+    def _already_luks(self) -> str:
         body = self.LOCAL_TOP.read_text()
-        already = body[body.index("if cryptsetup isLuks"):body.index("say \"\"\nsay \"===")]
-        assert "reencrypt" not in already
+        return body[body.index("if cryptsetup isLuks"):body.index("say \"\"\nsay \"===")]
+
+    def test_it_refuses_to_reencrypt_an_existing_container(self):
+        # Encrypting a LUKS device over again would destroy it. The branch for
+        # one may only resume an encryption that is already under way.
+        already = self._already_luks()
+        assert "--encrypt" not in already
+        assert "reencrypt --resume-only" in already
 
     def test_it_recovers_a_drive_encrypted_by_an_unfinished_setup(self):
         # Encrypted but not finalised means no crypttab exists yet, so nothing
         # else can unlock the root and the boot dies in an initramfs shell.
         # Cancelling a setup wizard must not brick the stick.
-        body = self.LOCAL_TOP.read_text()
-        already = body[body.index("if cryptsetup isLuks"):]
+        already = self._already_luks()
         assert "setup did not finish" in already
-        assert "cryptsetup open" in already.split("reencrypt")[0]
-        assert "ROOT=/dev/mapper/portlin_root" in already.split("reencrypt")[0]
+        assert "cryptsetup open" in already
+        assert "ROOT=/dev/mapper/portlin_root" in already
+
+    def test_it_finishes_an_interrupted_encryption_before_opening(self):
+        # After a crash mid-encryption cryptsetup open fails outright until the
+        # metadata is repaired, and opening it half done would leave the rest
+        # of the drive in plaintext for good.
+        already = self._already_luks()
+        assert "online-reencrypt" in already
+        assert already.index("cryptsetup repair") < already.index("reencrypt --resume-only")
+        assert already.index("reencrypt --resume-only") < already.index("cryptsetup open")
+
+    def test_the_prompt_says_how_big_the_job_is(self):
+        # Every block is rewritten, so a grown drive takes hours, not minutes.
+        body = self.LOCAL_TOP.read_text()
+        prompt = body[body.index("say \"  Portlin: encrypt this drive?\""):body.index("Encrypt this drive? [y/N]")]
+        assert "SIZE_MIB" in prompt
+        assert "format_minutes" in prompt
+        assert "few minutes" not in body
+
+    def test_declining_is_recorded_for_the_finaliser(self):
+        body = self.LOCAL_TOP.read_text()
+        decline = body[body.index("Encrypt this drive? [y/N]"):body.index("Continuing without encryption")]
+        assert "encrypt-declined" in decline
+
+    def test_every_failure_after_yes_stops_and_is_recorded(self):
+        # The console line alone is covered by setup within a second.
+        body = self.LOCAL_TOP.read_text()
+        after_yes = body[body.index("Read the passphrase twice"):]
+        assert 'say "Encryption failed' not in after_yes
+        assert "Giving up on encryption" in after_yes
+        fail = body[body.index("fail() {"):body.index("format_minutes() {")]
+        assert "record_failure" in fail
+        assert "read -r" in fail
+        assert "encrypt-failed" in body[body.index("record_failure() {"):body.index("fail() {")]
+
+    def test_a_failed_filesystem_check_stops_the_encryption(self):
+        # Inside `if ! e2fsck`, $? is the negation's status and always 0, which
+        # once let a failed check through to the shrink.
+        body = self.LOCAL_TOP.read_text()
+        assert "if ! e2fsck" not in body
+        check = body[body.index("e2fsck -f -y"):body.index("resize2fs")]
+        assert "status=$?" in check
+        assert '"$status" -gt 1' in check
+
+    def test_three_short_passphrases_do_not_get_through(self):
+        # Matching but too short three times used to pass the final check.
+        body = self.LOCAL_TOP.read_text()
+        loop = body[body.index('chosen=""'):body.index("HEADER_BYTES=")]
+        assert loop.index("Too short") < loop.index("chosen=1")
+        assert '[ -z "$chosen" ]' in loop
 
     def test_it_makes_room_for_the_luks_header(self):
         # A header can only be added by shifting the filesystem forward, which is
@@ -623,7 +676,7 @@ class TestEncryptOnFirstBoot:
         # without shrinking first it believes it is larger than its container
         # and fsck drops the machine to an initramfs shell on the next boot.
         body = self.LOCAL_TOP.read_text()
-        assert body.index("resize2fs") < body.index("cryptsetup reencrypt")
+        assert body.index("resize2fs") < body.index("cryptsetup reencrypt --encrypt")
         assert body.index("e2fsck") < body.index("resize2fs")
 
     def test_the_shrink_matches_the_space_the_header_takes(self):
@@ -635,7 +688,7 @@ class TestEncryptOnFirstBoot:
         # Aborting before the header is written means the plaintext filesystem
         # is untouched and still mounts.
         body = self.LOCAL_TOP.read_text()
-        shrink = body[body.index("resize2fs"):body.index("cryptsetup reencrypt")]
+        shrink = body[body.index("resize2fs"):body.index("cryptsetup reencrypt --encrypt")]
         assert "exit 0" in shrink
 
     def test_the_hook_ships_the_resize_tools(self):
@@ -698,6 +751,21 @@ class TestEncryptOnFirstBoot:
         assert "update-initramfs" in body
         assert "portlin.encrypt=ask" in body
         assert "update-grub" in body
+
+    def test_the_finaliser_retires_a_declined_offer(self):
+        # Otherwise every boot of an unencrypted stick asks again.
+        body = FINALISE.read_text()
+        assert "/run/portlin/encrypt-declined" in body
+        unencrypted = body[body.index("def finalise"):body.index("crypttab = Path")]
+        assert "DECLINED.exists()" in unencrypted
+        assert "drop_offer()" in unencrypted
+
+    def test_the_wizard_reports_a_failed_boot_time_encryption(self):
+        body = WIZARD.read_text()
+        assert 'ENCRYPT_FAILED = Path("/run/portlin/encrypt-failed")' in body
+        for name in ("def apply_all", "def apply_upgrade"):
+            start = body.index(name)
+            assert "report_encryption_failure(state)" in body[start:body.index("\ndef ", start + 1)]
 
     def test_finalisation_keys_off_observable_state(self):
         # Not off a flag file that a crash could lose, leaving a stick encrypted
@@ -1032,6 +1100,50 @@ class TestFinaliserBreadcrumbContract:
         main_body = body[body.index("def main"):]
         assert "BREADCRUMB.touch()" in main_body
         assert re.search(r"BREADCRUMB\.touch\(\)\s*\n\s*return FINALISED", main_body)
+
+
+class TestFinaliserRetiresADeclinedOffer:
+    """A no at the boot prompt takes portlin.encrypt=ask off the boot line."""
+
+    def _finaliser(self, tmp_path, monkeypatch, *, root: str, declined: bool):
+        import importlib.machinery
+        import importlib.util
+        import types
+
+        loader = importlib.machinery.SourceFileLoader("portlin_finalise", str(FINALISE))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader("portlin_finalise", loader))
+        loader.exec_module(module)
+
+        grub = tmp_path / "grub"
+        grub.write_text('GRUB_CMDLINE_LINUX_DEFAULT="quiet portlin.encrypt=ask"\n')
+        flag = tmp_path / "encrypt-declined"
+        if declined:
+            flag.touch()
+        monkeypatch.setattr(module, "DEFAULT_GRUB", grub)
+        monkeypatch.setattr(module, "DECLINED", flag)
+        monkeypatch.setattr(module, "LOG", tmp_path / "log")
+        ran: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            ran.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout=f"{root}\n" if argv[0] == "findmnt" else "", stderr="")
+
+        monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return module, grub, ran
+
+    def test_a_declined_plain_stick_loses_the_offer(self, tmp_path, monkeypatch):
+        module, grub, ran = self._finaliser(tmp_path, monkeypatch, root="/dev/sda4", declined=True)
+        assert module.main() == 0
+        assert "portlin.encrypt=ask" not in grub.read_text()
+        assert ["update-grub"] in ran
+
+    def test_a_plain_stick_that_was_not_asked_keeps_it(self, tmp_path, monkeypatch):
+        # A failed attempt, or a boot where the drive never appeared: the
+        # offer stays so the next boot can try again.
+        module, grub, ran = self._finaliser(tmp_path, monkeypatch, root="/dev/sda4", declined=False)
+        assert module.main() == 0
+        assert "portlin.encrypt=ask" in grub.read_text()
+        assert ["update-grub"] not in ran
 
 
 class TestKeyringUnderAutologin:

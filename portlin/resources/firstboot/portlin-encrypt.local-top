@@ -43,6 +43,34 @@ plymouth quit >/dev/null 2>&1 || true
 CONSOLE="${PORTLIN_CONSOLE:-/dev/console}"
 say() { printf '%s\n' "$1" > "$CONSOLE"; }
 
+# A line on this console is gone within a second of boot carrying on: quiet
+# boot and the setup screen cover it. So every failure is also left in /run,
+# which survives the pivot, for the first-boot wizard to show and log.
+STATE_DIR=/run/portlin
+record_failure() {
+    (mkdir -p "$STATE_DIR" && printf '%s\n' "$1" > "$STATE_DIR/encrypt-failed") 2>/dev/null || true
+}
+
+# For failures after someone has answered yes, and so is at the keyboard.
+fail() {
+    say ""
+    say "portlin: $1"
+    record_failure "$1"
+    printf 'Press Enter to continue. ' > "$CONSOLE"
+    read -r _ < "$CONSOLE"
+    say ""
+}
+
+# cryptsetup reencrypt rewrites every block of the partition, used or not, so
+# the cost is the partition's size over the drive's write speed.
+format_minutes() {
+    if [ "$1" -lt 60 ]; then
+        echo "$1 min"
+    else
+        echo "$(($1 / 60))h $(($1 % 60))m"
+    fi
+}
+
 # Hand the passphrase to the first-boot wizard, which is minutes away and will
 # need it to grow the LUKS mapping into the rest of the drive.
 #
@@ -111,6 +139,7 @@ done
 
 if [ -z "$ROOT_DEV" ] || [ ! -b "$ROOT_DEV" ]; then
     say "portlin: could not identify the root device after 30s, skipping encryption."
+    record_failure "The drive holding the system could not be found within 30 seconds."
     exit 0
 fi
 
@@ -119,10 +148,22 @@ fi
 # did not finish, so /etc/crypttab was never written and the initramfs has no
 # idea how to unlock this. Nothing else will open it, and the boot would die in
 # an initramfs shell. Unlock it here so the system comes up and setup can retry.
+#
+# Or the encryption itself was cut short, by a power cut or a pulled cable. The
+# header then carries the online-reencrypt requirement until it is finished.
 if cryptsetup isLuks "$ROOT_DEV" 2>/dev/null; then
+    interrupted=""
+    if cryptsetup luksDump "$ROOT_DEV" 2>/dev/null | grep -q 'online-reencrypt'; then
+        interrupted=1
+    fi
     say ""
-    say "Portlin: this drive is encrypted but setup did not finish last time."
-    say "Enter the passphrase to continue; setup will run again."
+    if [ -n "$interrupted" ]; then
+        say "Portlin: encrypting this drive was interrupted last time."
+        say "Enter the passphrase to finish it; the data is intact."
+    else
+        say "Portlin: this drive is encrypted but setup did not finish last time."
+        say "Enter the passphrase to continue; setup will run again."
+    fi
     attempt=0
     while [ "$attempt" -lt 3 ]; do
         attempt=$((attempt + 1))
@@ -131,6 +172,24 @@ if cryptsetup isLuks "$ROOT_DEV" 2>/dev/null; then
         read -r recover < "$CONSOLE"
         stty echo < "$CONSOLE" 2>/dev/null
         say ""
+        if [ -n "$interrupted" ]; then
+            # A crash mid-encryption leaves metadata that has to be repaired
+            # before anything will open the device, and repair is also what
+            # checks the passphrase here. The rest of the drive is then
+            # encrypted from where it stopped; opening it half done would
+            # leave the stick that way for good.
+            if ! printf '%s' "$recover" | cryptsetup repair --key-file - "$ROOT_DEV" > /dev/null 2>&1; then
+                say "That passphrase was not accepted."
+                continue
+            fi
+            say "Resuming the encryption. Do not remove the drive or power off."
+            if ! printf '%s' "$recover" | cryptsetup reencrypt --resume-only \
+                    --key-file - --progress-frequency 5 "$ROOT_DEV" > "$CONSOLE" 2>&1; then
+                fail "Resuming the encryption failed. Restart to try again."
+                exit 0
+            fi
+            interrupted=""
+        fi
         if printf '%s' "$recover" | cryptsetup open --key-file - "$ROOT_DEV" portlin_root; then
             ROOT=/dev/mapper/portlin_root
             export ROOT
@@ -146,6 +205,12 @@ if cryptsetup isLuks "$ROOT_DEV" 2>/dev/null; then
     exit 0
 fi
 
+SECTORS="$(cat "/sys/class/block/$(basename "$ROOT_DEV")/size" 2>/dev/null)"
+case "$SECTORS" in
+    '' | *[!0-9]*) SECTORS=0 ;;
+esac
+SIZE_MIB=$((SECTORS / 2048))
+
 say ""
 say "======================================================================"
 say "  Portlin: encrypt this drive?"
@@ -153,8 +218,15 @@ say ""
 say "  Encrypting protects everything on the stick if it is lost or stolen."
 say "  You will be asked for the passphrase every time it boots."
 say ""
-say "  This is the only opportunity: it cannot be done once the system is"
-say "  running. It takes a few minutes and must not be interrupted."
+say "  It can only be done now, before the system starts, and it must not"
+say "  be interrupted."
+if [ "$SIZE_MIB" -gt 0 ]; then
+    say ""
+    say "  Every block of the $((SIZE_MIB / 1024)) GiB partition is rewritten, used or not:"
+    say "  about $(format_minutes $((SIZE_MIB / 100 / 60 + 1))) on a fast drive, $(format_minutes $((SIZE_MIB / 20 / 60 + 1))) on a slow one."
+fi
+say ""
+say "  Answering no is remembered. sudo portlin-encrypt offers it again."
 say "======================================================================"
 say ""
 
@@ -162,13 +234,20 @@ printf 'Encrypt this drive? [y/N] ' > "$CONSOLE"
 read -r answer < "$CONSOLE"
 case "$answer" in
     y | Y | yes | YES) ;;
-    *) say "Continuing without encryption."; exit 0 ;;
+    *)
+        # portlin-finalise-encryption reads this and takes the offer off the
+        # command line, so a declined drive is not asked on every boot.
+        (mkdir -p "$STATE_DIR" && : > "$STATE_DIR/encrypt-declined") 2>/dev/null || true
+        say "Continuing without encryption."
+        exit 0
+        ;;
 esac
 
 # Read the passphrase twice with echo off, and refuse to proceed until they
 # match. Getting this wrong means an unopenable stick, so there is no "close
 # enough" here.
 attempt=0
+chosen=""
 while [ "$attempt" -lt 3 ]; do
     attempt=$((attempt + 1))
     stty -echo < "$CONSOLE" 2>/dev/null
@@ -187,11 +266,12 @@ while [ "$attempt" -lt 3 ]; do
         say "Those did not match."
         continue
     fi
+    chosen=1
     break
 done
 
-if [ -z "$pass1" ] || [ "$pass1" != "$pass2" ]; then
-    say "Giving up on encryption; continuing unencrypted."
+if [ -z "$chosen" ]; then
+    fail "No usable passphrase after three tries. Giving up on encryption; continuing unencrypted."
     exit 0
 fi
 
@@ -204,32 +284,29 @@ fi
 HEADER_BYTES=33554432  # 32 MiB, matching --reduce-device-size below
 
 say "Preparing the filesystem. This must finish; do not power off."
-if ! e2fsck -f -y "$ROOT_DEV" > "$CONSOLE" 2>&1; then
-    # e2fsck returns 1 for "errors corrected", which is a success for us.
-    status=$?
-    if [ "$status" -gt 1 ]; then
-        say "Filesystem check failed; leaving the drive unencrypted."
-        exit 0
-    fi
+e2fsck -f -y "$ROOT_DEV" > "$CONSOLE" 2>&1
+status=$?
+# 1 is "errors corrected", which leaves a clean filesystem.
+if [ "$status" -gt 1 ]; then
+    fail "Filesystem check failed (e2fsck exit $status); leaving the drive unencrypted."
+    exit 0
 fi
 
-SECTORS="$(cat "/sys/class/block/$(basename "$ROOT_DEV")/size" 2>/dev/null)"
-if [ -z "$SECTORS" ]; then
-    say "Could not measure $ROOT_DEV; leaving the drive unencrypted."
+if [ "$SECTORS" -eq 0 ]; then
+    fail "Could not measure $ROOT_DEV; leaving the drive unencrypted."
     exit 0
 fi
 TARGET_KIB=$(( (SECTORS * 512 - HEADER_BYTES) / 1024 ))
 
 say "Shrinking the filesystem by 32 MiB to make room for the header."
 if ! resize2fs "$ROOT_DEV" "${TARGET_KIB}K" > "$CONSOLE" 2>&1; then
-    say "Could not shrink the filesystem; leaving the drive unencrypted."
-    say "Nothing has been changed and the system will boot normally."
+    fail "Could not shrink the filesystem; leaving the drive unencrypted. Nothing has been changed."
     exit 0
 fi
 
 say ""
 say "Encrypting $ROOT_DEV. Do not remove the drive or power off."
-say "(Progress is shown below; this takes a few minutes.)"
+say "(Progress is shown below.)"
 say ""
 
 # --reduce-device-size makes room at the front for the LUKS2 header by shifting
@@ -254,15 +331,20 @@ if printf '%s' "$pass1" | cryptsetup reencrypt --encrypt \
         "$ROOT_DEV" > "$CONSOLE" 2>&1; then
     say ""
     say "Encryption complete. Unlocking and continuing boot."
+elif cryptsetup isLuks "$ROOT_DEV" 2>/dev/null; then
+    # The header is written and part of the drive is encrypted, so the plain
+    # filesystem is gone and this boot cannot go on. The next one finds the
+    # interrupted encryption above and finishes it.
+    fail "Encryption stopped partway. The data is intact: restart and enter the passphrase to finish."
+    reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
+    exit 0
 else
-    say ""
-    say "Encryption failed. The drive is unchanged; continuing unencrypted."
-    say "cryptsetup can resume an interrupted run with --resume-only."
+    fail "Encryption failed before it changed anything; continuing unencrypted."
     exit 0
 fi
 
 if ! printf '%s' "$pass1" | cryptsetup open --key-file - "$ROOT_DEV" portlin_root; then
-    say "Could not open the new container. Reboot and enter the passphrase."
+    fail "Could not open the new container. Restart and enter the passphrase."
     exit 0
 fi
 

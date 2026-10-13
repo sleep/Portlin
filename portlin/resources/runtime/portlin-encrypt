@@ -12,12 +12,12 @@ on every stick, is covered by scripts/test-encrypt-hook.py against real block
 devices, and does nothing at all unless portlin.encrypt=ask is on the kernel
 command line.
 
-write() arms that flag on every stick it writes without --encrypt, so on
-almost every stick this tool ever runs on, the flag is already present --
-that is the ordinary case, not evidence that this tool has run before. So
-mostly what this does is show the warning nobody has seen yet, confirm, and
-offer to reboot into the encryption that is already armed. It arms the flag
-itself only on the rarer stick where it is genuinely missing, having first
+write() arms that flag on every stick it writes without --encrypt, and it
+stays until the stick is encrypted or someone answers no at the boot prompt,
+when portlin-finalise-encryption takes it off. So the flag may or may not be
+present here, and neither is evidence that this tool has run before. When it
+is, this only shows the warning, confirms, and offers to reboot into the
+encryption that is already armed. When it is not, this arms it, having first
 checked that the stick can finish what it starts.
 """
 

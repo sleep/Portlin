@@ -42,6 +42,8 @@ CRYPTTAB = Path("/etc/crypttab")
 # Where the crypttab keyscript leaves the boot passphrase, and the crypttab
 # option that puts it there. Both are removed once setup is finished.
 STASH = Path("/run/portlin/luks-pass")
+# Left by the initramfs encryption prompt when it gave up.
+ENCRYPT_FAILED = Path("/run/portlin/encrypt-failed")
 STASH_KEYSCRIPT_OPTION = "keyscript=/lib/cryptsetup/scripts/portlin-stash-passphrase"
 # The comment portlin-finalise-encryption puts at the top of the crypttab it
 # writes. Kept as a substring of that header rather than the whole line, so
@@ -3120,6 +3122,29 @@ def finalise_encryption() -> bool:
     return Path("/run/portlin/finalised").exists()
 
 
+def encryption_failure() -> str:
+    """Why the initramfs did not encrypt this drive on this boot, or "".
+
+    The initramfs says so on the console too, but that line is covered by the
+    time anyone could read it. The offer stays armed, so the next boot asks
+    again.
+    """
+    try:
+        reason = ENCRYPT_FAILED.read_text().strip()
+    except OSError:
+        return ""
+    if reason:
+        log(f"boot-time encryption failed: {reason}")
+    return reason
+
+
+def report_encryption_failure(state: State) -> None:
+    reason = encryption_failure()
+    if reason:
+        state.warnings.append(f"The drive was not encrypted: {reason} "
+                              "It will be offered again when the stick next starts.")
+
+
 def _luks_device() -> str | None:
     """The backing device of the encrypted root, if this stick has one.
 
@@ -3847,6 +3872,7 @@ def apply_all(state: State) -> None:
     # cannot leave a stick that is encrypted but no longer bootable.
     if finalise_encryption():
         task("Encryption recorded during boot", lambda: None)
+    report_encryption_failure(state)
     if state.expand:
         # First, so everything below writes into the full-size filesystem
         # rather than the handful of gigabytes the image shipped with.
@@ -3942,6 +3968,7 @@ def apply_upgrade(state: State) -> None:
     tasks: list[tuple[str, object, bool]] = []
     if finalise_encryption():
         tasks.append(("Encryption recorded during boot", lambda: None, False))
+    report_encryption_failure(state)
     tasks += [
         ("Administrator access", lambda: apply_privilege(state), False),
         ("Login", lambda: apply_login(state, encrypted), False),

@@ -469,7 +469,13 @@ If the wizard is cancelled or crashes its sentinel stays in place and it runs ag
 rather than stranding you at a login screen with no accounts. On a stick encrypted during that boot
 but never finished, the initramfs recognises the situation and asks for the passphrase itself.
 Otherwise no `crypttab` would exist yet, nothing would unlock the root, and cancelling a wizard
-would leave an unbootable drive.
+would leave an unbootable drive. An encryption cut short by a power cut is recognised the same way,
+and the passphrase finishes it from where it stopped.
+
+The boot-time offer rewrites every block of the root partition, so it is quick on a fresh image
+and slow once the drive has been grown: the prompt shows the size and an estimate. Answering no
+takes the offer off the boot line for good (`sudo portlin-encrypt` puts it back). A failure keeps
+it, stops for a keypress, and is listed again at the end of setup.
 
 The first time each account logs in, `portlin-intro` plays a short full-screen film, drawn live: the
 mark draws itself, then its bars take this stick's real partition sizes beside the rows `lsblk`
