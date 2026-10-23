@@ -15,6 +15,10 @@ sudo portlin create --target /dev/sdb --encrypt
 Boot the result anywhere and a first-run wizard sets it up: account, keyboard, language, time zone,
 Wi-Fi, security, appearance, drivers, services, and growing the system to fill the drive.
 
+<p align="center">
+  <img src="https://github.com/sleep/Portlin/releases/download/v0.1.0/portlin-desktop.png" alt="The portlin Xfce desktop with a terminal and the Software app open" width="900">
+</p>
+
 ## Requirements
 
 x86_64 Linux host, root, and these packages:
